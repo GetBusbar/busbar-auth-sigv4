@@ -25,7 +25,7 @@ jobs:
     secrets: inherit
   release:
     needs: ci
-    uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@ff907b1f8906d6428d552849c70f412fbd27434e
+    uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@349a9927181dc96043a4a1c676e4862cc8b39a46
     with:
       plugin_crate: busbar-auth-sigv4-plugin
       manifest_name: busbar-auth-sigv4
@@ -41,7 +41,7 @@ jobs:
   consumer-verify:
     needs: release
     if: ${{ !cancelled() }}
-    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@ff907b1f8906d6428d552849c70f412fbd27434e
+    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@349a9927181dc96043a4a1c676e4862cc8b39a46
     with:
       version: ${{ github.ref_name }}
       asset_prefix: busbar-auth-sigv4

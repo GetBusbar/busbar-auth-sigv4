@@ -12,6 +12,18 @@
 //!   1.5.5 bytes win).
 //! * [`red_a_writer_that_ignores_the_host_capacity_faults`]: a `fields` that writes past the host's
 //!   field capacity is FAULT at the loader, never a truncated header.
+//!
+//! ## The inbound cell
+//!
+//! `verify` (inbound SigV4, moved here from the kernel) is driven through the REAL loader and
+//! dispatcher, linked and dropped in, over a host whose `records.secret` serves one live
+//! credential, one that is not live, and the fixed dummy (not live) for any other id
+//! ([`Creds`]): on the spot (ticket-less: a bearer passes, a structural failure rejects, a SigV4
+//! credential is REFUSED for the ticketed call) and submitted on a ticket (the live credential is
+//! its AccessKeyId; unknown, not-live, wrong-signature and tampered-body requests reject alike).
+//! The published suite's inbound script cannot drive it at this pin: it presents a candidate
+//! credential at `Head` (no body, no request facts), binds no host services, and requires an
+//! identity on the spot.
 
 // THE PUBLISHED CONFORMANCE SUITE (busbar-plugin-loader's `conformance` feature, TODO ABI-b4): the
 // auth kind's OUTBOUND script over this crate's linked door and its dropped-in cdylib (built with
@@ -27,23 +39,30 @@ use std::ffi::c_void;
 use std::mem::zeroed;
 use std::sync::{Arc, Mutex};
 
+use std::time::Duration;
+
 use busbar_contract::abi::auth::{
-    self, slot, FieldSpan, FieldsIn, FieldsOut, IdentifyOut, OpenOutboundIn, OpenOutboundOut,
-    OutboundReadyIn, OutboundReadyOut, RequestFacts, VerifyIn, FIELD_SENSITIVE, MODE_OWN,
-    MODE_PASSTHROUGH, POINT_HEAD_BODY,
+    self, slot, FieldSpan, FieldsIn, FieldsOut, IdentifyOut, IdentityBuf, NamedValue,
+    OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut, RequestFacts, StripName,
+    VerifyIn, FIELD_SENSITIVE, MODE_OWN, MODE_PASSTHROUGH, POINT_HEAD_BODY, SPAN_ABSENT,
+    VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
 };
+use busbar_contract::abi::host::service::{ItemSpan, SECRET_LIVE, SECRET_NOT_LIVE};
 use busbar_contract::abi::mechanism::call::{
-    AbiStr, Blob, Op, Outcome, RawOutcome, BLOB_JSON, BLOB_OCTETS, BLOB_SECRET,
+    AbiStr, Blob, DeadlineClass, Op, Outcome, RawOutcome, Span, BLOB_JSON, BLOB_OCTETS, BLOB_SECRET,
 };
 use busbar_contract::abi::mechanism::door::{Door, DoorFn};
 use busbar_contract::abi::mechanism::lifecycle::{
     slot as life, CancelIn, CancelOut, GenIn, OpenIn, OpenOut, RefreshIn, TickIn, TickOut,
     ValidateIn,
 };
+use busbar_contract::redacted::sha256_hex;
+use busbar_contract::services::{Caller, RecordsList, UNSERVED};
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
 use busbar_plugin_loader::dispatch::{
-    in_head, load_dropped, load_linked, out_head, rendering_of, Bind, Diagnostic, DispatchConfig,
-    Dispatcher, Dropped, EnvelopeSink, Frame, LinkedRow, Metric, Plugin,
+    in_head, load_dropped, load_linked, now_ns, out_head, rendering_of, Bind, Diagnostic,
+    DispatchConfig, Dispatcher, Dropped, EnvelopeSink, Frame, HostServices, Later, LinkedRow,
+    Metric, Plugin, Ran, Reading, Stored,
 };
 
 fn z<T>() -> T {
@@ -246,10 +265,339 @@ fn ready(p: &Plugin<Auth>, handle: u64) -> String {
     format!("ready {:?} {}", c.outcome, f.out.ready)
 }
 
+// ── THE INBOUND CELL ──────────────────────────────────────────────────────────────────────────
+
+/// The live credential the host holds.
+const AKID: &str = "BBAKCONFORMANCE000001";
+const LIVE_SECRET: &str = "conformance/live+SECRET0000000000000000000";
+/// A credential the host holds that is not live.
+const DEAD_AKID: &str = "BBAKCONFORMANCE000002";
+const DEAD_SECRET: &str = "conformance/dead+SECRET0000000000000000000";
+/// The host's fixed dummy for an id it does not hold (the kernel's `auth::DUMMY_SECRET`).
+const DUMMY: &str = "AWS4-DUMMY-SECRET-FOR-CONSTANT-TIME-REJECT-PATH";
+/// The request's clock and the path signed: AWS's example timestamp.
+const NOW: u64 = 1_440_938_160;
+const AMZDATE: &str = "20150830T123600Z";
+const PATH: &str = "/model/m/converse";
+
+/// THE HOST: every service refused but `records.secret`, which serves the credentials above (and
+/// the dummy, not live, for any other id) at once, and records each read.
+#[derive(Default)]
+struct Creds(Mutex<Vec<String>>);
+
+impl Creds {
+    fn drain(&self) -> String {
+        std::mem::take(&mut *self.0.lock().unwrap()).join(", ")
+    }
+}
+
+fn unserved() -> Ran {
+    Ran::Now(Stored::refused(UNSERVED))
+}
+
+impl HostServices for Creds {
+    fn now(&self) -> Reading {
+        Reading {
+            wall_ns: NOW * 1_000_000_000,
+            mono_ns: 0,
+        }
+    }
+    fn dest_judge(&self, _: &str, _: u32, _: bool, _: Option<Later>) -> Ran {
+        unserved()
+    }
+    fn records_get(&self, _: &Caller, _: &str, _: &[u8], _: Later) -> Ran {
+        unserved()
+    }
+    fn records_list(&self, _: &Caller, _: RecordsList, _: Later) -> Ran {
+        unserved()
+    }
+    fn records_claim(&self, _: &Caller, _: &str, _: &[u8], _: u64, _: Later) -> Ran {
+        unserved()
+    }
+    fn sign(&self, _: &Caller, _: &[u8]) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn trust_sight(&self, _: &Caller, _: &str, _: &str, _: Later) -> Ran {
+        unserved()
+    }
+    fn trust_due(&self, _: &Caller) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn trust_verify(&self, _: &Caller, _: &str, _: &[u8], _: &[u8]) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn entitlement_check(&self, _: &Caller, _: Option<u64>, _: &str) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn random_fill(&self, _: u64) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn records_secret(&self, kind: &str, id: &str, _: Later) -> Ran {
+        self.0.lock().unwrap().push(format!("{kind}:{id}"));
+        let (secret, live) = match id {
+            AKID => (LIVE_SECRET, SECRET_LIVE),
+            DEAD_AKID => (DEAD_SECRET, SECRET_NOT_LIVE),
+            _ => (DUMMY, SECRET_NOT_LIVE),
+        };
+        Ran::Now(Stored {
+            bytes: secret.as_bytes().to_vec(),
+            spans: vec![ItemSpan {
+                key: Span {
+                    offset: SPAN_ABSENT,
+                    len: 0,
+                },
+                value: Span {
+                    offset: 0,
+                    len: secret.len() as u32,
+                },
+            }],
+            ..Stored::ready(live)
+        })
+    }
+}
+
+/// One inbound request as the host presents it at `HeadBody`, owning every byte its frame points
+/// at, with the host's identity buffer and strip array.
+struct Inbound {
+    lines: Vec<(String, String)>,
+    named: Vec<NamedValue>,
+    body: Vec<u8>,
+    bytes: Vec<u8>,
+    groups: Vec<Span>,
+    strips: Vec<StripName>,
+}
+
+impl Inbound {
+    fn new(lines: Vec<(String, String)>, body: &[u8]) -> Self {
+        let mut i = Self {
+            lines,
+            named: Vec::new(),
+            body: body.to_vec(),
+            bytes: vec![0; auth::IDENTITY_BUF_BYTES],
+            groups: vec![Span { offset: 0, len: 0 }; 8],
+            strips: vec![
+                StripName {
+                    name: Span { offset: 0, len: 0 },
+                    place: 0,
+                    _reserved: 0,
+                };
+                auth::FIELDS_MAX as usize
+            ],
+        };
+        i.named = i
+            .lines
+            .iter()
+            .map(|(n, v)| NamedValue {
+                name: AbiStr {
+                    ptr: n.as_ptr(),
+                    len: n.len(),
+                },
+                value: Blob {
+                    ptr: v.as_ptr(),
+                    len: v.len(),
+                    fmt: BLOB_OCTETS,
+                    flags: 0,
+                },
+            })
+            .collect();
+        i
+    }
+
+    /// A client's request signed with `secret` as `akid` (over the body `signed_body`), carrying
+    /// `body`.
+    fn signed(secret: &str, akid: &str, signed_body: &[u8], body: &[u8]) -> Self {
+        let payload_hash = sha256_hex(signed_body);
+        let headers = vec![
+            ("host".to_string(), "busbar.example".to_string()),
+            ("x-amz-content-sha256".to_string(), payload_hash.clone()),
+            ("x-amz-date".to_string(), AMZDATE.to_string()),
+        ];
+        let (sig, signed_headers) = busbar_auth_sigv4::inbound::sign_v4(
+            secret,
+            "us-east-1",
+            "bedrock",
+            "POST",
+            PATH,
+            "",
+            &headers,
+            &payload_hash,
+            AMZDATE,
+            &AMZDATE[..8],
+        );
+        let mut lines = vec![(
+            "authorization".to_string(),
+            format!(
+                "AWS4-HMAC-SHA256 Credential={akid}/{}/us-east-1/bedrock/aws4_request, \
+                 SignedHeaders={signed_headers}, Signature={sig}",
+                &AMZDATE[..8]
+            ),
+        )];
+        lines.extend(headers);
+        Self::new(lines, body)
+    }
+
+    fn frame(&mut self) -> Frame<VerifyIn, IdentifyOut> {
+        let mut f: Frame<VerifyIn, IdentifyOut> = Frame::new(z(), z());
+        f.input.head = in_head();
+        f.out.head = out_head();
+        f.input.lines = self.named.as_ptr();
+        f.input.lines_len = self.named.len();
+        f.input.request = RequestFacts {
+            method: s("POST"),
+            authority: s("busbar.example"),
+            canonical_path: s(PATH),
+            query: AbiStr {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+            timestamp: NOW,
+        };
+        f.input.point = POINT_HEAD_BODY;
+        f.input.body = Blob {
+            ptr: self.body.as_ptr(),
+            len: self.body.len(),
+            fmt: BLOB_OCTETS,
+            flags: 0,
+        };
+        f.input.out_buf = IdentityBuf {
+            buf: self.bytes.as_mut_ptr(),
+            buf_cap: self.bytes.len(),
+            groups: self.groups.as_mut_ptr(),
+            groups_cap: self.groups.len() as u32,
+            _reserved: 0,
+        };
+        f.input.strip = self.strips.as_mut_ptr();
+        f.input.strip_cap = self.strips.len() as u32;
+        f
+    }
+
+    fn verdict(&self, outcome: Outcome, out: &IdentifyOut) -> String {
+        if outcome != Outcome::Ready {
+            return format!("{outcome:?}");
+        }
+        let v = match out.verdict {
+            VERDICT_IDENTITY => {
+                let sp = out.identity.subject;
+                format!(
+                    "Identity({}) ttl={} replay={} credential={}",
+                    String::from_utf8_lossy(
+                        &self.bytes[sp.offset as usize..(sp.offset + sp.len) as usize]
+                    ),
+                    out.identity.flags,
+                    out.identity.replay_key.offset != SPAN_ABSENT,
+                    out.identity.credential.len
+                )
+            }
+            VERDICT_REJECT => "Reject".to_string(),
+            VERDICT_PASS => "Pass".to_string(),
+            other => format!("verdict={other}"),
+        };
+        format!(
+            "Ready {v} decision={} strips={}",
+            out.decision, out.strip_len
+        )
+    }
+}
+
+/// `verify` ON THE SPOT, ticket-less.
+fn verify_now(p: &Plugin<Auth>, req: &mut Inbound) -> String {
+    let mut f = req.frame();
+    let c = p.call(slot::VERIFY, &mut f);
+    req.verdict(c.outcome, &f.out)
+}
+
+/// `verify` SUBMITTED on a ticket, awaited, the ticket recycled.
+fn verify_submitted(p: &Plugin<Auth>, d: &Dispatcher, req: &mut Inbound) -> String {
+    let ticket = d.mint(0).expect("a ticket is free");
+    let deadline = now_ns().saturating_add(10_000_000_000);
+    let reply = d.submit(
+        p,
+        ticket,
+        slot::VERIFY,
+        req.frame(),
+        DeadlineClass::Call,
+        deadline,
+    );
+    let done = reply.wait(Duration::from_secs(10));
+    drop(reply);
+    d.recycle(ticket);
+    let done = done.expect("the submitted verify answers");
+    match &done.frame {
+        Some(f) => req.verdict(done.outcome, &f.out),
+        None => format!("{:?} frame=none", done.outcome),
+    }
+}
+
+fn bearer() -> Inbound {
+    Inbound::new(
+        vec![(
+            "authorization".to_string(),
+            "Bearer sk-busbar-1".to_string(),
+        )],
+        b"",
+    )
+}
+
+/// THE INBOUND STEPS, on an open instance: on the spot, then (with a host) submitted.
+fn inbound_steps(p: &Plugin<Auth>, host: Option<(&Dispatcher, &Creds)>, t: &mut Vec<String>) {
+    let body = br#"{"messages":[]}"#;
+    t.push(format!(
+        "verify bearer now {}",
+        verify_now(p, &mut bearer())
+    ));
+    t.push(format!(
+        "verify sigv4 now {}",
+        verify_now(p, &mut Inbound::signed(LIVE_SECRET, AKID, body, body))
+    ));
+    let mut trivial = Inbound::new(
+        vec![(
+            "authorization".to_string(),
+            "AWS4-HMAC-SHA256 x".to_string(),
+        )],
+        b"",
+    );
+    t.push(format!(
+        "verify trivial now {}",
+        verify_now(p, &mut trivial)
+    ));
+    let Some((d, creds)) = host else {
+        return;
+    };
+    t.push(format!("reads now [{}]", creds.drain()));
+    let cases = [
+        ("live", Inbound::signed(LIVE_SECRET, AKID, body, body)),
+        (
+            "unknown",
+            Inbound::signed(LIVE_SECRET, "BBAKNOBODY", body, body),
+        ),
+        (
+            "dummy-signed",
+            Inbound::signed(DUMMY, "BBAKNOBODY", body, body),
+        ),
+        (
+            "not live",
+            Inbound::signed(DEAD_SECRET, DEAD_AKID, body, body),
+        ),
+        ("wrong secret", Inbound::signed("not-it", AKID, body, body)),
+        (
+            "tampered body",
+            Inbound::signed(LIVE_SECRET, AKID, body, b"{}"),
+        ),
+        ("bearer", bearer()),
+    ];
+    for (label, mut req) in cases {
+        t.push(format!(
+            "verify {label} submitted {} reads=[{}]",
+            verify_submitted(p, d, &mut req),
+            creds.drain()
+        ));
+    }
+}
+
 const SIGV4_SETTINGS: &str =
     r#"{"service":"svc","region":"us-east-1","content_type":"application/json"}"#;
 
-fn script(p: &Plugin<Auth>) -> Vec<String> {
+fn script(p: &Plugin<Auth>, host: Option<(&Dispatcher, &Creds)>) -> Vec<String> {
     let mut t = Vec::new();
 
     let mut v = Frame::new(
@@ -317,13 +665,7 @@ fn script(p: &Plugin<Auth>) -> Vec<String> {
         k.out.next_tick_ns > 1_000
     ));
 
-    let mut vf: Frame<VerifyIn, IdentifyOut> = Frame::new(z(), z());
-    vf.input.head = in_head();
-    vf.out.head = out_head();
-    t.push(format!(
-        "verify {:?}",
-        p.call(slot::VERIFY, &mut vf).outcome
-    ));
+    inbound_steps(p, host, &mut t);
 
     let mut x: Frame<CancelIn, CancelOut> = Frame::new(z(), z());
     x.input.head = in_head();
@@ -402,7 +744,20 @@ const EXPECTED: &[&str] = &[
     "ready Ready 1",
     "ready Ready 1",
     "tick Ready next>1000=true",
-    "verify Refused",
+    "verify bearer now Ready Pass decision=1 strips=0",
+    "verify sigv4 now Refused",
+    "verify trivial now Ready Reject decision=2 strips=0",
+    "reads now []",
+    "verify live submitted Ready Identity(BBAKCONFORMANCE000001) ttl=0 replay=false credential=0 \
+     decision=1 strips=0 reads=[sigv4:BBAKCONFORMANCE000001]",
+    "verify unknown submitted Ready Reject decision=2 strips=0 reads=[sigv4:BBAKNOBODY]",
+    "verify dummy-signed submitted Ready Reject decision=2 strips=0 reads=[sigv4:BBAKNOBODY]",
+    "verify not live submitted Ready Reject decision=2 strips=0 \
+     reads=[sigv4:BBAKCONFORMANCE000002]",
+    "verify wrong secret submitted Ready Reject decision=2 strips=0 \
+     reads=[sigv4:BBAKCONFORMANCE000001]",
+    "verify tampered body submitted Ready Reject decision=2 strips=0 reads=[]",
+    "verify bearer submitted Ready Pass decision=1 strips=0 reads=[]",
     "cancel Ready",
     "refresh Ready",
     "open_outbound sigv4 Ready ",
@@ -428,16 +783,22 @@ fn mask_signature(t: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn run(p: &Plugin<Auth>, folds: &Folds) -> (Vec<String>, Vec<String>) {
-    let t = script(p);
+fn run(
+    p: &Plugin<Auth>,
+    folds: &Folds,
+    d: &Dispatcher,
+    creds: &Creds,
+) -> (Vec<String>, Vec<String>) {
+    let t = script(p, Some((d, creds)));
     (t, std::mem::take(&mut *folds.0.lock().unwrap()))
 }
 
 #[test]
 fn compiled_in_and_dropped_in_answer_every_op_identically() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let creds = Arc::new(Creds::default());
+    let d = Dispatcher::with_services(DispatchConfig::default(), creds.clone());
     let folds = Arc::new(Folds::default());
-    let (linked_t, linked_f) = run(&linked(&folds, &d), &folds);
+    let (linked_t, linked_f) = run(&linked(&folds, &d), &folds, &d, &creds);
     assert_eq!(
         mask_signature(linked_t.clone()),
         EXPECTED,
@@ -446,7 +807,7 @@ fn compiled_in_and_dropped_in_answer_every_op_identically() {
     assert_eq!(linked_f, EXPECTED_FOLDS, "the linked door's folds");
     let folds = Arc::new(Folds::default());
     if let Some(p) = dropped(&folds, &d) {
-        let (dropped_t, dropped_f) = run(&p, &folds);
+        let (dropped_t, dropped_f) = run(&p, &folds, &d, &creds);
         assert_eq!(dropped_t, linked_t, "the dropped door, signature included");
         assert_eq!(dropped_f, linked_f, "the dropped door's folds");
         println!(
@@ -506,7 +867,7 @@ fn red_a_sensitive_field_flag_is_not_the_1_5_5_bytes() {
     let d = Dispatcher::new(DispatchConfig::default());
     let folds = Arc::new(Folds::default());
     let red = load_linked::<Auth>(&row(sensitive_door), bind(&folds, &d)).expect("the door loads");
-    let t = mask_signature(script(&red));
+    let t = mask_signature(script(&red, None));
     assert_ne!(
         t, EXPECTED,
         "a sensitive flag must not pass as the 1.5.5 bytes"

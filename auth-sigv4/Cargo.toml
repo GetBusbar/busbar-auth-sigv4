@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "The sigv4 auth style, served in both the operator's own credential and the caller's, as one auth-kind plugin on the auth kind's memory ABI."
+description = "AWS SigV4 as one auth-kind plugin on the auth kind's memory ABI: the outbound sigv4 style (the operator's own credential or the caller's), and the inbound SigV4 verify (moved from the kernel) over the host's records.secret."
 
 # MOVED from busbar (crates/busbar-auth-sigv4 at busbar bb0c7f71d4, history imported;
 # BUSBAR-1.6.0.md §9: every plugin lives in its own repo). The source is busbar's verbatim.

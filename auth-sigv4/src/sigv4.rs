@@ -17,7 +17,10 @@
 //! * THE SECRET IS ZEROISED (TODO item 586, #53/#54): the `AWS4<secret>` key material and every
 //!   derived key are [`Zeroizing`] buffers, wiped on drop.
 //!
-//! Only the OUTBOUND signer lives here; inbound SigV4 verification is an ingress-auth concern.
+//! The signer's chain is shared with the INBOUND check ([`crate::inbound`], moved here from the
+//! kernel): it recomputes a client's signature through [`hmac`], [`signing_key`] and [`sha256_hex`],
+//! and derives the canonical URI with [`uri_encode_path`], keeping its own canonical signing (a
+//! quoted header value's interior spaces are kept verbatim there).
 
 use ring::{digest, hmac as ring_hmac};
 use zeroize::Zeroizing;
@@ -57,6 +60,28 @@ pub(crate) fn signing_key(
     let k_region = Zeroizing::new(hmac(&k_date, region.as_bytes()));
     let k_service = Zeroizing::new(hmac(&k_region, service.as_bytes()));
     Zeroizing::new(hmac(&k_service, SIGNATURE_TERMINATION.as_bytes()))
+}
+
+/// SigV4 URI-encode a request path: every byte outside the unreserved set (`A-Z a-z 0-9 - _ . ~`)
+/// and `/` becomes `%XX` (uppercase hex). MOVED VERBATIM from the kernel's
+/// `egress_auth/sigv4::uri_encode_path`, the encoder the inbound check derives the canonical URI
+/// with (1.5.5's ingress verify called it over the received path).
+pub fn uri_encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for &b in path.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(b as char)
+            }
+            _ => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0x0f) as usize] as char);
+            }
+        }
+    }
+    out
 }
 
 /// Convert a epoch (1970-01-01 UTC) (seconds) to (amzdate `YYYYMMDDTHHMMSSZ`, datestamp `YYYYMMDD`). Pure UTC,

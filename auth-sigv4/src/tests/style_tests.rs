@@ -12,15 +12,12 @@ fn open(
     style: &str,
     credential: Option<&str>,
     settings: &str,
-) -> (Result<SigV4Binding, Vec<Refusal>>, Vec<OpenNote>) {
-    let mut notes = Vec::new();
-    let r = open_binding(
+) -> Result<SigV4Binding, Vec<Refusal>> {
+    open_binding(
         style,
         credential.map(str::as_bytes),
         Some(settings.as_bytes()),
-        &mut notes,
-    );
-    (r, notes)
+    )
 }
 
 fn lines(r: Result<SigV4Binding, Vec<Refusal>>) -> Vec<String> {
@@ -33,34 +30,32 @@ fn lines(r: Result<SigV4Binding, Vec<Refusal>>) -> Vec<String> {
 #[test]
 fn sigv4_needs_its_three_params_and_notes_an_unsendable_token() {
     assert_eq!(
-        lines(
-            open(
-                SIGV4,
-                Some("A:S"),
-                r#"{"service":"svc","region":"us-east-1"}"#
-            )
-            .0
-        ),
+        lines(open(
+            SIGV4,
+            Some("A:S"),
+            r#"{"service":"svc","region":"us-east-1"}"#
+        )),
         ["settings: uses auth: sigv4 but has no `content_type`"]
     );
-    let (r, notes) = open(
+    let r = open(
         SIGV4,
         Some("A:S:T\r\nX"),
         r#"{"service":"svc","region":"us-east-1","content_type":"application/json"}"#,
     );
-    assert!(r.is_ok());
-    assert_eq!(notes, [OpenNote::SessionToken("svc".to_string())]);
+    assert!(r
+        .expect("an unsendable token opens")
+        .session_token_unsendable());
 }
 
 #[test]
 fn a_keyless_binding_opens_but_signs_nothing() {
-    let (r, notes) = open(
+    let r = open(
         SIGV4,
         None,
         r#"{"service":"svc","region":"us-east-1","content_type":"application/json"}"#,
     );
     let binding = r.expect("a keyless sigv4 binding still opens: the caller's credential may sign");
-    assert!(notes.is_empty());
+    assert!(!binding.session_token_unsendable());
     let hash = sigv4::sha256_hex(b"{}");
     let facts = SignFacts {
         host: "h",
@@ -74,15 +69,15 @@ fn a_keyless_binding_opens_but_signs_nothing() {
 #[test]
 fn an_unknown_style_or_malformed_settings_is_refused() {
     assert_eq!(
-        lines(open("kerberos", Some("k"), "{}").0),
+        lines(open("kerberos", Some("k"), "{}")),
         ["settings: outbound auth style `kerberos` is not served by this plugin"]
     );
     assert_eq!(
-        lines(open(SIGV4, Some("k"), "[1]").0),
+        lines(open(SIGV4, Some("k"), "[1]")),
         ["settings: outbound auth settings must be a JSON object"]
     );
     assert_eq!(
-        lines(open("bearer", Some("k"), "{}").0),
+        lines(open("bearer", Some("k"), "{}")),
         ["settings: outbound auth style `bearer` is not served by this plugin"],
         "bearer is a different mechanism, busbar-auth-header"
     );

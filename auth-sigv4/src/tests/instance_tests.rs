@@ -20,6 +20,12 @@ const SETTINGS: &str =
     r#"{"service":"svc","region":"us-east-1","content_type":"application/json"}"#;
 
 fn fields(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bool) {
+    let (outcome, signed, _) = fields_noted(s, handle, mode, caller);
+    (outcome, signed)
+}
+
+/// [`fields`], with how many diagnostics the call's envelope carried.
+fn fields_noted(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bool, usize) {
     let mut buf = [0_u8; 1024];
     let mut spans = [FieldSpan {
         name: auth_span(),
@@ -59,7 +65,7 @@ fn fields(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bool) {
     let mut out: FieldsOut = crate::abi::zeroed_out();
     let inst = std::ptr::from_ref(s).cast_mut().cast::<c_void>();
     let outcome = Fields::call(inst, &i, &mut out);
-    (outcome, out.fields_len > 0)
+    (outcome, out.fields_len > 0, out.head.envelope.diags_len)
 }
 
 fn open(s: &SigV4, cred: Option<&str>) -> u64 {
@@ -67,7 +73,6 @@ fn open(s: &SigV4, cred: Option<&str>) -> u64 {
         style::SIGV4,
         cred.map(str::as_bytes),
         Some(SETTINGS.as_bytes()),
-        &mut Vec::new(),
     )
     .expect("the binding opens");
     s.keep(binding)
@@ -102,6 +107,35 @@ fn a_keyless_binding_signs_nothing_in_own_mode_but_still_serves_passthrough() {
     assert_eq!(
         fields(&s, handle, MODE_PASSTHROUGH, "AKIDCALLER:CALLERSECRET"),
         (Outcome::Ready, true)
+    );
+}
+
+/// A credential whose session token no header value may carry signs nothing, and EACH request
+/// reports the signer's line on its `fields` envelope (1.5.5 logged it per request; the open
+/// reports nothing, as 1.5.5's boot did not), in either mode; a merely malformed one reports none.
+#[test]
+fn an_unsendable_session_token_is_noted_on_each_fields_call() {
+    let s = SigV4::new(1, None);
+    let handle = open(&s, Some("AKID:SECRET:TOK\r\nEN"));
+    for _ in 0..2 {
+        assert_eq!(
+            fields_noted(&s, handle, MODE_OWN, ""),
+            (Outcome::Ready, false, 1)
+        );
+    }
+    let quiet = open(&s, Some("AKID:SECRET:CLEAN"));
+    assert_eq!(
+        fields_noted(&s, quiet, MODE_OWN, ""),
+        (Outcome::Ready, true, 0)
+    );
+    assert_eq!(
+        fields_noted(&s, quiet, MODE_PASSTHROUGH, "AKID:SECRET:TOK\r\nEN"),
+        (Outcome::Ready, false, 1)
+    );
+    let malformed = open(&s, Some("not-a-valid-key"));
+    assert_eq!(
+        fields_noted(&s, malformed, MODE_OWN, ""),
+        (Outcome::Ready, false, 0)
     );
 }
 

@@ -57,7 +57,7 @@ use busbar_contract::abi::mechanism::lifecycle::{
     ValidateIn,
 };
 use busbar_contract::redacted::sha256_hex;
-use busbar_contract::services::{Caller, RecordsList, UNSERVED};
+use busbar_contract::services::{Caller, NestAsk, RecordsList, UNSERVED};
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
 use busbar_plugin_loader::dispatch::{
     in_head, load_dropped, load_linked, now_ns, out_head, rendering_of, Bind, Diagnostic,
@@ -331,6 +331,21 @@ impl HostServices for Creds {
     }
     fn random_fill(&self, _: u64) -> Stored {
         Stored::refused(UNSERVED)
+    }
+    fn unit_nest(&self, _: &Caller, _: Option<u64>, _: NestAsk, _: Later) -> Ran {
+        unserved()
+    }
+    fn work_open(&self, _: &Caller, _: Option<u64>, _: &str, _: &[u8], _: Later) -> Ran {
+        unserved()
+    }
+    fn work_find(&self, _: &Caller, _: Option<u64>, _: &[u8], _: Later) -> Ran {
+        unserved()
+    }
+    fn work_settle(&self, _: &Caller, _: u64, _: &[u8], _: Later) -> Ran {
+        unserved()
+    }
+    fn work_resume(&self, _: &Caller, _: Option<u64>, _: u64, _: Later) -> Ran {
+        unserved()
     }
     fn records_secret(&self, kind: &str, id: &str, _: Later) -> Ran {
         self.0.lock().unwrap().push(format!("{kind}:{id}"));

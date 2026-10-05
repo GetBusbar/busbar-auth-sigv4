@@ -243,7 +243,9 @@ impl Slot for Open {
     fn call(_: *mut c_void, input: &OpenIn, out: &mut OpenOut) -> Outcome {
         if !settings_ok(blob(&input.settings)) {
             out.head.error = abi_str(SETTINGS_NOT_OBJECT);
-            return Outcome::Refused;
+            // Settings `open` refuses are FAILED with the reason (the lifecycle's rule, and the
+            // inbound conformance script's).
+            return Outcome::Failed;
         }
         let s = SigV4::new(input.generation, Host::of(input.host));
         out.instance = abi::into_instance(Box::new(s));
@@ -262,7 +264,7 @@ impl Slot for Refresh {
         };
         if !settings_ok(blob(&input.settings)) {
             out.error = abi_str(SETTINGS_NOT_OBJECT);
-            return Outcome::Refused;
+            return Outcome::Failed;
         }
         s.set_generation(input.generation);
         Outcome::Ready

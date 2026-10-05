@@ -18,7 +18,6 @@ use busbar_contract::abi::mechanism::ticket::Ticket;
 
 use crate::abi::{abi, Host};
 use crate::signing::SigV4Binding;
-use crate::style::OpenNote;
 
 /// The index of each diagnostic id in the Statement (`crate::DIAG_IDS`).
 pub(crate) mod diag {
@@ -169,20 +168,20 @@ impl SigV4 {
             .retain(|_, (g, _)| *g != generation);
     }
 
-    /// Report an open's notes into `env`, in the line 1.5.5's builder logged.
-    pub(crate) fn note_open(env: &mut EnvStore, notes: &[OpenNote]) {
-        for OpenNote::SessionToken(service) in notes {
-            let (initial, rest) = service.split_at(service.len().min(1));
-            env.push(
-                diag::SESSION_TOKEN_INVALID_BYTES,
-                WARN,
-                format!(
-                    "{}{rest} lane session token contains a byte rejected by HeaderValue; \
-                     skipping signing to avoid a signed-but-absent x-amz-security-token header.",
-                    initial.to_uppercase()
-                ),
-            );
-        }
+    /// Report into `env` a request signed with nothing because its credential's session token is
+    /// no legal header value, in the line 1.5.5's signer logged on each such request, naming
+    /// `service`.
+    pub(crate) fn note_unsendable(env: &mut EnvStore, service: &str) {
+        let (initial, rest) = service.split_at(service.len().min(1));
+        env.push(
+            diag::SESSION_TOKEN_INVALID_BYTES,
+            WARN,
+            format!(
+                "{}{rest} lane session token contains a byte rejected by HeaderValue; \
+                 skipping signing to avoid a signed-but-absent x-amz-security-token header.",
+                initial.to_uppercase()
+            ),
+        );
     }
 
     /// `tick`: pre-derive every live binding's day keys ahead of midnight. Answers the next tick

@@ -149,6 +149,14 @@ impl SigV4Binding {
         &self.params
     }
 
+    /// Whether the bound credential's session token is no legal header value: [`Self::sign`]
+    /// presents nothing for it, and the request reports the signer's line.
+    pub fn session_token_unsendable(&self) -> bool {
+        self.credential
+            .as_ref()
+            .is_some_and(SigningCredential::session_token_unsendable)
+    }
+
     /// Derive (and keep) the key for `datestamp` unless held; at most two days are kept.
     fn derive(&self, datestamp: &str) {
         let Some(cred) = &self.credential else {

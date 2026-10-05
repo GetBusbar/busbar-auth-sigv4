@@ -95,6 +95,37 @@ use crate::inbound::{Judgement, Read, SecretSource};
 use crate::instance::{EnvStore, Held, SigV4};
 use crate::signing::{SigV4Binding, SignFacts, SigningCredential};
 
+thread_local! {
+    /// `fields`' envelope storage, per calling thread: the host copies a call's envelope before it
+    /// makes any other call on that thread, and `fields` is called from many at once.
+    static FIELDS_ENV: std::cell::RefCell<EnvStore> = std::cell::RefCell::default();
+}
+
+/// `fields` for `signer`: its signed fields, and — when its session token is no legal header
+/// value, so it signs nothing — the signer's line on this call's envelope, as 1.5.5 logged it on
+/// each such request.
+fn sign_into(
+    signer: &SigV4Binding,
+    input: &FieldsIn,
+    hash: &str,
+    out: &mut FieldsOut,
+    write: impl Fn(&[(String, String)], &mut FieldsOut) -> Outcome,
+) -> Outcome {
+    let Some(facts) = sign_facts(input, hash) else {
+        return Outcome::Failed;
+    };
+    let outcome = write(&signer.sign(&facts), out);
+    if signer.session_token_unsendable() {
+        FIELDS_ENV.with(|env| {
+            let mut env = env.borrow_mut();
+            env.clear();
+            SigV4::note_unsendable(&mut env, &signer.params().service);
+            envelope(&mut out.head, &env);
+        });
+    }
+    outcome
+}
+
 /// The flags every field this plugin writes carries: NONE. 1.5.5 sent its credential headers
 /// indexable, and an h2 encoder that honoured `FIELD_SENSITIVE` would send them never-indexed —
 /// different bytes (ARCHITECT ruling 2026-09-28, Q4: the 1.5.5 bytes win; TODO item 583's
@@ -475,14 +506,7 @@ impl Slot for OpenOutbound {
             envelope(&mut out.head, &env);
             return Outcome::Refused;
         };
-        let mut notes = Vec::new();
-        let opened = style::open_binding(
-            style,
-            blob(&input.credential),
-            blob(&input.settings),
-            &mut notes,
-        );
-        SigV4::note_open(&mut env, &notes);
+        let opened = style::open_binding(style, blob(&input.credential), blob(&input.settings));
         let outcome = match opened {
             Ok(binding) => {
                 out.handle = s.keep(binding);
@@ -552,10 +576,7 @@ impl Slot for Fields {
                 let Some(b) = s.binding(input.handle) else {
                     return Outcome::Refused;
                 };
-                match sign_facts(input, &hash) {
-                    Some(facts) => write(&b.sign(&facts), out),
-                    None => Outcome::Failed,
-                }
+                sign_into(&b, input, &hash, out, write)
             }
             MODE_PASSTHROUGH => {
                 let Some(b) = s.binding(input.handle) else {
@@ -568,10 +589,7 @@ impl Slot for Fields {
                 // never enters the operator binding's day-key cache (`signing` module doc).
                 let signer =
                     SigV4Binding::new(b.params().clone(), SigningCredential::split(caller));
-                match sign_facts(input, &hash) {
-                    Some(facts) => write(&signer.sign(&facts), out),
-                    None => Outcome::Failed,
-                }
+                sign_into(&signer, input, &hash, out, write)
             }
             _ => Outcome::Refused,
         }

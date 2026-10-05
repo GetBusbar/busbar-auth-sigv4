@@ -39,13 +39,6 @@ impl Refusal {
     }
 }
 
-/// A signing credential an open could not present: its session token is not a legal header value.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OpenNote {
-    /// A signing credential's session token is not a legal header value; naming the service.
-    SessionToken(String),
-}
-
 /// The settings object (`{}` when absent).
 fn object(settings: Option<&[u8]>) -> Result<Map<String, Value>, Refusal> {
     let Some(bytes) = settings.filter(|b| !b.is_empty()) else {
@@ -92,7 +85,6 @@ pub fn open_binding(
     style: &str,
     credential: Option<&[u8]>,
     settings: Option<&[u8]>,
-    notes: &mut Vec<OpenNote>,
 ) -> Result<SigV4Binding, Vec<Refusal>> {
     if style != SIGV4 {
         return Err(vec![Refusal::Settings(format!(
@@ -110,13 +102,9 @@ pub fn open_binding(
             )])
         }
     };
+    // A session token no header value may carry is not refused: the binding signs nothing, and
+    // each request it is asked for reports the signer's line (`crate::Fields`), as 1.5.5 did.
     let cred = credential_text.and_then(SigningCredential::split);
-    if cred
-        .as_ref()
-        .is_some_and(SigningCredential::session_token_unsendable)
-    {
-        notes.push(OpenNote::SessionToken(params.service.clone()));
-    }
     Ok(SigV4Binding::new(params, cred))
 }
 

@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "busbar-auth-sigv4-plugin"
-version = "0.1.0"
+version = "1.6.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "First-party signed kind:auth plugin cdylib: the sigv4 auth, packaged as a droppable busbar plugin. Drop the signed tarball into plugins/."
+description = "First-party signed kind:auth plugin cdylib: the sigv4 auth module, packaged as a droppable busbar plugin. Drop the signed tarball into plugins/."
 
 [lib]
 # cdylib: the DROPPED-IN door (a signed tarball in `plugins/`), exporting `busbar_plugin_door`.
@@ -19,6 +19,7 @@ busbar-auth-sigv4 = { path = "../auth-sigv4" }
 busbar-contract = { workspace = true }
 
 [dev-dependencies]
-# The conformance test loads the linked door and dlopens the built cdylib over busbar's REAL loader:
-# dev-only, never in the shipped artifact.
-busbar-plugin-loader = { workspace = true }
+# busbar's published conformance suite and the door's own both-ways proof (`tests/conformance.rs`,
+# moved from busbar's crates/busbar-auth-sigv4) load the linked door and dlopen the built cdylib over
+# busbar's REAL loader: dev-only, never in the shipped artifact.
+busbar-plugin-loader = { workspace = true, features = ["conformance"] }

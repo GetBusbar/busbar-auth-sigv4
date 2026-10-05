@@ -1,17 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! ONE INSTANCE: the handles (generation data), and the per-op envelope storage the host copies
-//! after each control-lane call. No token cache, no waker, no waiting tickets: a sigv4 binding
-//! never mints and never pends — `tick` only pre-derives day keys ahead of midnight.
+//! ONE INSTANCE: the handles (generation data), the per-op envelope storage the host copies
+//! after each control-lane call, the host services `open` was handed, and the inbound `verify`'s
+//! per-ticket state. No token cache, no waker: a sigv4 binding never mints and never pends — `tick`
+//! only pre-derives day keys ahead of midnight. Only `verify` may pend, on the host's
+//! `records.secret` read; it keeps the completion handle it issued under the ticket until the read
+//! answers, and nothing else (never a secret, never a verdict cache: the kernel never cached a SigV4
+//! verdict).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use busbar_contract::abi::mechanism::call::{AbiStr, Diag};
+use busbar_contract::abi::mechanism::ticket::Ticket;
 
-use crate::abi::abi;
+use crate::abi::{abi, Host};
 use crate::signing::SigV4Binding;
 use crate::style::OpenNote;
 
@@ -68,24 +73,67 @@ impl EnvStore {
 /// How often `tick` re-checks the SigV4 day keys while a binding is open.
 const PREDERIVE_TICK_NS: u64 = 60 * 1_000_000_000;
 
+/// What `verify` keeps for a ticket between two calls on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Held {
+    /// The `records.secret` read pends under this completion handle's `seq`: the resumed call
+    /// re-issues the SAME handle and reads the stored answer.
+    Pending(u32),
+    /// The identity this ticket reached did not fit the host's buffer: the host's one re-call is
+    /// served from it, the work never repeated. The subject is the AccessKeyId (not secret).
+    Reached(String),
+}
+
 /// One plugin instance.
 pub(crate) struct SigV4 {
     generation: AtomicU64,
     next_handle: AtomicU64,
     handles: RwLock<HashMap<u64, (u64, Arc<SigV4Binding>)>>,
     /// `open_outbound`'s envelope and error.
-    pub(crate) open_env: std::sync::Mutex<EnvStore>,
+    pub(crate) open_env: Mutex<EnvStore>,
+    /// The host services `open` was handed (`records.secret`); `None` when the host offers none.
+    pub(crate) host: Option<Host>,
+    /// The next completion-handle `seq` a fresh `records.secret` read issues: unique per instance,
+    /// so two reads under one ticket never share a handle.
+    next_seq: AtomicU32,
+    /// `verify`'s per-ticket state ([`Held`]); an entry lives from a PENDING or short answer to the
+    /// call that consumes it, or the ticket's `cancel`.
+    held: Mutex<HashMap<Ticket, Held>>,
 }
 
 impl SigV4 {
-    /// An instance at `generation`.
-    pub(crate) fn new(generation: u64) -> Self {
+    /// An instance at `generation`, calling the host services `host`.
+    pub(crate) fn new(generation: u64, host: Option<Host>) -> Self {
         Self {
             generation: AtomicU64::new(generation),
             next_handle: AtomicU64::new(1),
             handles: RwLock::new(HashMap::new()),
-            open_env: std::sync::Mutex::default(),
+            open_env: Mutex::default(),
+            host,
+            next_seq: AtomicU32::new(0),
+            held: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// A fresh completion-handle `seq`.
+    pub(crate) fn issue_seq(&self) -> u32 {
+        self.next_seq.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Keep `held` for `ticket` until its next call.
+    pub(crate) fn hold(&self, ticket: Ticket, held: Held) {
+        self.held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(ticket, held);
+    }
+
+    /// Take what `ticket` holds, if anything.
+    pub(crate) fn take(&self, ticket: Ticket) -> Option<Held> {
+        self.held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&ticket)
     }
 
     /// `refresh`: the generation later handles belong to.

@@ -75,7 +75,7 @@ fn open(s: &SigV4, cred: Option<&str>) -> u64 {
 
 #[test]
 fn own_mode_signs_with_the_operator_credential_and_passthrough_with_the_callers() {
-    let s = SigV4::new(1);
+    let s = SigV4::new(1, None);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     assert_eq!(fields(&s, handle, MODE_OWN, ""), (Outcome::Ready, true));
     assert_eq!(
@@ -92,7 +92,7 @@ fn own_mode_signs_with_the_operator_credential_and_passthrough_with_the_callers(
 
 #[test]
 fn a_keyless_binding_signs_nothing_in_own_mode_but_still_serves_passthrough() {
-    let s = SigV4::new(1);
+    let s = SigV4::new(1, None);
     let handle = open(&s, None);
     assert_eq!(
         fields(&s, handle, MODE_OWN, ""),
@@ -107,7 +107,7 @@ fn a_keyless_binding_signs_nothing_in_own_mode_but_still_serves_passthrough() {
 
 #[test]
 fn retire_drops_the_generations_handles() {
-    let s = SigV4::new(1);
+    let s = SigV4::new(1, None);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     s.retire(1);
     assert_eq!(fields(&s, handle, MODE_OWN, ""), (Outcome::Refused, false));
@@ -115,7 +115,7 @@ fn retire_drops_the_generations_handles() {
 
 #[test]
 fn tick_prederives_every_live_bindings_day_key_and_answers_zero_when_none_are_open() {
-    let s = SigV4::new(1);
+    let s = SigV4::new(1, None);
     assert_eq!(s.tick(1_000), 0, "no binding open: nothing to pre-derive");
     open(&s, Some("AKIDEXAMPLE:SECRET"));
     assert!(s.tick(1_000) > 1_000);

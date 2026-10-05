@@ -1,5 +1,148 @@
 {
   "auth": {
+    "bad_settings": [
+      "[1]",
+      "\"not-an-object\"",
+      "{ not json"
+    ],
+    "host_credentials": [
+      {
+        "kind": "sigv4",
+        "id": "BBAKCONFORMANCE000001",
+        "secret": "conformance-sigv4-live-secret",
+        "live": true
+      },
+      {
+        "kind": "sigv4",
+        "id": "BBAKCONFORMANCE000002",
+        "secret": "conformance-sigv4-revoked-secret",
+        "live": false
+      }
+    ],
+    "rotated_host_credentials": [
+      {
+        "kind": "sigv4",
+        "id": "BBAKCONFORMANCE000001",
+        "secret": "conformance-sigv4-rotated-live-secret",
+        "live": true
+      },
+      {
+        "kind": "sigv4",
+        "id": "BBAKCONFORMANCE000002",
+        "secret": "conformance-sigv4-rotated-revoked-secret",
+        "live": false
+      }
+    ],
+    "cases": [
+      {
+        "credential": null,
+        "method": "POST",
+        "path": "/model/m/converse",
+        "timestamp": 1440938202,
+        "body": "{\"messages\":[]}",
+        "lines": {
+          "authorization": "AWS4-HMAC-SHA256 Credential=BBAKCONFORMANCE000001/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=d9f034c5761a1b2f9746846d390088554c1a814dd50cd9e0cca6250ab88239d7",
+          "host": "busbar.example",
+          "x-amz-content-sha256": "5e4ce7b36ba37b78a5d5f9fd08e6b7b54ba6879d651aa46ec9e1d6fa24ebe30a",
+          "x-amz-date": "20150830T123600Z"
+        },
+        "verdict": "identity:BBAKCONFORMANCE000001"
+      },
+      {
+        "credential": null,
+        "method": "POST",
+        "path": "/model/m/converse",
+        "timestamp": 1440938202,
+        "body": "{\"messages\":[]}",
+        "lines": {
+          "authorization": "AWS4-HMAC-SHA256 Credential=BBAKCONFORMANCE000002/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=2701f77e9241f8e763ae98e2072fbd8f406c128c1a549f1a96359ebdd7b83b42",
+          "host": "busbar.example",
+          "x-amz-content-sha256": "5e4ce7b36ba37b78a5d5f9fd08e6b7b54ba6879d651aa46ec9e1d6fa24ebe30a",
+          "x-amz-date": "20150830T123600Z"
+        },
+        "verdict": "reject"
+      },
+      {
+        "credential": null,
+        "method": "POST",
+        "path": "/model/m/converse",
+        "timestamp": 1440938202,
+        "body": "{\"messages\":[]}",
+        "lines": {
+          "authorization": "AWS4-HMAC-SHA256 Credential=BBAKCONFORMANCE000001/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=f9044bba0d9cf74b3455c45f20996b867e9b1e6c38592b51e39d5ed16ed78758",
+          "host": "busbar.example",
+          "x-amz-content-sha256": "5e4ce7b36ba37b78a5d5f9fd08e6b7b54ba6879d651aa46ec9e1d6fa24ebe30a",
+          "x-amz-date": "20150830T123600Z"
+        },
+        "verdict": "reject"
+      },
+      {
+        "credential": null,
+        "method": "POST",
+        "path": "/model/m/converse",
+        "timestamp": 1440938202,
+        "body": "{\"messages\":[]}",
+        "lines": {
+          "authorization": "AWS4-HMAC-SHA256 Credential=BBAKNOBODY/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=d9f034c5761a1b2f9746846d390088554c1a814dd50cd9e0cca6250ab88239d7",
+          "host": "busbar.example",
+          "x-amz-content-sha256": "5e4ce7b36ba37b78a5d5f9fd08e6b7b54ba6879d651aa46ec9e1d6fa24ebe30a",
+          "x-amz-date": "20150830T123600Z"
+        },
+        "verdict": "reject"
+      },
+      {
+        "credential": null,
+        "method": "POST",
+        "path": "/model/m/converse",
+        "timestamp": 1440938202,
+        "body": "{\"messages\":[\"tampered\"]}",
+        "lines": {
+          "authorization": "AWS4-HMAC-SHA256 Credential=BBAKCONFORMANCE000001/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=d9f034c5761a1b2f9746846d390088554c1a814dd50cd9e0cca6250ab88239d7",
+          "host": "busbar.example",
+          "x-amz-content-sha256": "5e4ce7b36ba37b78a5d5f9fd08e6b7b54ba6879d651aa46ec9e1d6fa24ebe30a",
+          "x-amz-date": "20150830T123600Z"
+        },
+        "verdict": "reject"
+      },
+      {
+        "credential": null,
+        "method": "POST",
+        "path": "/model/m/converse",
+        "timestamp": 1440941760,
+        "body": "{\"messages\":[]}",
+        "lines": {
+          "authorization": "AWS4-HMAC-SHA256 Credential=BBAKCONFORMANCE000001/20150830/us-east-1/bedrock/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=d9f034c5761a1b2f9746846d390088554c1a814dd50cd9e0cca6250ab88239d7",
+          "host": "busbar.example",
+          "x-amz-content-sha256": "5e4ce7b36ba37b78a5d5f9fd08e6b7b54ba6879d651aa46ec9e1d6fa24ebe30a",
+          "x-amz-date": "20150830T123600Z"
+        },
+        "verdict": "reject"
+      },
+      {
+        "credential": null,
+        "method": "POST",
+        "path": "/model/m/converse",
+        "timestamp": 1440938202,
+        "lines": {
+          "authorization": "Bearer sk-busbar-conformance"
+        },
+        "verdict": "pass"
+      },
+      {
+        "credential": null,
+        "method": "POST",
+        "path": "/model/m/converse",
+        "timestamp": 1440938202,
+        "lines": {},
+        "verdict": "pass"
+      }
+    ],
+    "never_echoed": [
+      "conformance-sigv4-live-secret",
+      "conformance-sigv4-revoked-secret",
+      "conformance-sigv4-rotated-live-secret",
+      "conformance-sigv4-rotated-revoked-secret"
+    ],
     "outbound": [
       {
         "style": "sigv4",

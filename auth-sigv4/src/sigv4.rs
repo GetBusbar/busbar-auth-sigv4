@@ -23,7 +23,7 @@
 //! quoted header value's interior spaces are kept verbatim there).
 
 use ring::{digest, hmac as ring_hmac};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 const SECS_PER_DAY: u64 = 86_400;
 const SECS_PER_HOUR: u64 = 3_600;
@@ -60,6 +60,15 @@ pub(crate) fn signing_key(
     let k_region = Zeroizing::new(hmac(&k_date, region.as_bytes()));
     let k_service = Zeroizing::new(hmac(&k_region, service.as_bytes()));
     Zeroizing::new(hmac(&k_service, SIGNATURE_TERMINATION.as_bytes()))
+}
+
+/// Wipe every value of a header list (a session token rides in one), then drop the entries
+/// (THE DESIGN §6: "auth material is zeroised").
+pub(crate) fn wipe(headers: &mut Vec<(String, String)>) {
+    for (_, v) in headers.iter_mut() {
+        v.zeroize();
+    }
+    headers.clear();
 }
 
 /// SigV4 URI-encode a request path: every byte outside the unreserved set (`A-Z a-z 0-9 - _ . ~`)
@@ -195,27 +204,54 @@ pub fn sign_v4_with_key(
     // the one-entry-per-name shape AWS's servers expect. The sort above already made same-named
     // entries adjacent, so a single pass merges them in their original relative order.
     let mut merged: Vec<(String, String)> = Vec::with_capacity(h.len());
-    for (k, v) in h {
+    for (k, mut v) in h {
         match merged.last_mut() {
             Some((last_k, last_v)) if *last_k == k => {
                 last_v.push(',');
                 last_v.push_str(&v);
+                v.zeroize();
             }
             _ => merged.push((k, v)),
         }
     }
-    let h = merged;
+    let mut h = merged;
 
-    let canonical_headers: String = h.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
+    // The canonical headers carry a session token's value: they and the canonical request built
+    // from them are sized once (no growth leaves a copy behind) and wiped on drop, as is every
+    // per-header copy.
+    let mut canonical_headers = Zeroizing::new(String::with_capacity(
+        h.iter().map(|(k, v)| k.len() + v.len() + 2).sum(),
+    ));
+    for (k, v) in &h {
+        canonical_headers.push_str(k);
+        canonical_headers.push(':');
+        canonical_headers.push_str(v);
+        canonical_headers.push('\n');
+    }
     let signed_headers = h
         .iter()
         .map(|(k, _)| k.as_str())
         .collect::<Vec<_>>()
         .join(";");
+    wipe(&mut h);
 
-    let canonical_request = format!(
-        "{method}\n{canonical_uri}\n{canonical_querystring}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
-    );
+    let parts = [
+        method,
+        canonical_uri,
+        canonical_querystring,
+        canonical_headers.as_str(),
+        signed_headers.as_str(),
+        payload_hash,
+    ];
+    let mut canonical_request = Zeroizing::new(String::with_capacity(
+        parts.iter().map(|p| p.len() + 1).sum(),
+    ));
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            canonical_request.push('\n');
+        }
+        canonical_request.push_str(part);
+    }
     let scope = format!("{datestamp}/{region}/{service}/{SIGNATURE_TERMINATION}");
     let string_to_sign = format!(
         "{SIGV4_ALGORITHM}\n{amzdate}\n{scope}\n{}",

@@ -115,6 +115,22 @@ pub(crate) fn write_fields(
     Outcome::Ready
 }
 
+/// The value of the first `name` line (ASCII case-insensitive) in the header envelope the host
+/// lent `fields` (the style declares `STYLE_NEEDS_HEADERS`); `None` when none is sent, the
+/// envelope is absent, or the value is not text.
+pub(crate) fn sent_header<'a>(input: &'a FieldsIn, name: &str) -> Option<&'a str> {
+    if input.headers.is_null() || input.headers_len == 0 {
+        return None;
+    }
+    // SAFETY: a non-NULL `headers` in the host's `FieldsIn` addresses `headers_len` named values
+    // for the call (the auth ABI's `FieldsIn::headers`); the borrow does not outlive the `in`.
+    let all = unsafe { std::slice::from_raw_parts(input.headers, input.headers_len) };
+    all.iter()
+        .find(|h| raw(&h.name).is_some_and(|n| n.eq_ignore_ascii_case(name.as_bytes())))
+        .and_then(|h| lent(&h.value))
+        .and_then(|v| std::str::from_utf8(v).ok())
+}
+
 /// Copy `b` into the host's field buffer at `*at`, answering its span.
 fn put(input: &FieldsIn, at: &mut usize, b: &[u8]) -> Span {
     let span = Span {

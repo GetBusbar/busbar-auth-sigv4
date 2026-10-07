@@ -12,24 +12,26 @@ fn params() -> SigV4Params {
     SigV4Params {
         service: "iam".to_string(),
         region: "us-east-1".to_string(),
-        content_type: "application/json".to_string(),
     }
 }
 
 fn facts<'a>(hash: &'a str) -> SignFacts<'a> {
     SignFacts {
+        method: "POST",
         host: "runtime.signer.example",
-        canonical_uri: "/model/m/converse",
+        path: "/model/m/converse",
+        query: None,
+        content_type: Some("application/json"),
         payload_hash: hash,
         timestamp_epoch: 1_440_938_160,
     }
 }
 
-fn field(fields: &[(String, String)], name: &str) -> String {
+fn field(fields: &[Field], name: &str) -> String {
     fields
         .iter()
         .find(|(k, _)| k == name)
-        .map(|(_, v)| v.clone())
+        .map(|(_, v)| v.to_string())
         .unwrap_or_else(|| panic!("{name} is sent"))
 }
 

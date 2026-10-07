@@ -14,6 +14,13 @@
 //! the CALLER's credential (`STYLE_CALLER_CREDENTIAL` passthrough mode, ARCHITECT ruling
 //! 2026-09-29) is instead constructed fresh per request in [`crate::Fields`] and never enters this
 //! cache — the caller's key varies request to request, so there is nothing to hold ahead of time.
+//!
+//! THE REQUEST IT SIGNS (BUSBAR-1.6.0.md THE DESIGN §6, "the per-request auth call on the route
+//! walk": "SigV4 signs the real method and query of the walked request"): the method, the query
+//! and the content type are the walked request's own, as the host lends them; the canonical URI is
+//! the wire path URI-encoded once more (SigV4's non-S3 rule, 1.5.5's `sign_and_wire_path_parts`,
+//! `proxy/egress.rs`, v1.5.5). For the request 1.5.5 signed — a POST of a JSON body to its path,
+//! no query — every signed byte is 1.5.5's.
 
 use std::sync::RwLock;
 
@@ -29,32 +36,41 @@ const DAY_SECS: u64 = 86_400;
 /// How long before UTC midnight `tick` derives the next day's key.
 const PREDERIVE_AHEAD_SECS: u64 = 3_600;
 
-/// A `sigv4` binding's settings: the service and region the signature is scoped to, and the request
-/// content type the signature covers beside the host. The kernel resolves them at seal (the region
-/// from the provider's host through the plane's declared function) — see the seam in the crate doc.
+/// A `sigv4` binding's settings: the service and region the signature is scoped to. The kernel
+/// resolves them at seal (the region from the provider's host through the plane's declared
+/// function) — see the seam in the crate doc. The content type the signature covers is the one the
+/// request is sent with ([`SignFacts::content_type`]), never a setting.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SigV4Params {
     /// The AWS service name.
     pub service: String,
     /// The AWS region.
     pub region: String,
-    /// The request content type.
-    pub content_type: String,
 }
 
-/// The request facts a signature covers.
+/// The request facts a signature covers: the walked request's own.
 #[derive(Debug, Clone, Copy)]
 pub struct SignFacts<'a> {
+    /// The method.
+    pub method: &'a str,
     /// The host the request is sent to (the `host` field the signature covers).
     pub host: &'a str,
-    /// The encoded path, which is also the canonical URI.
-    pub canonical_uri: &'a str,
+    /// The path exactly as it is sent (already percent-encoded once); the canonical URI is it
+    /// encoded once more.
+    pub path: &'a str,
+    /// The query as it is sent, without `?`; `None` = none.
+    pub query: Option<&'a str>,
+    /// The `content-type` the request is sent with; `None` = none is sent, and none is signed.
+    pub content_type: Option<&'a str>,
     /// Lowercase hex SHA-256 of the body.
     pub payload_hash: &'a str,
     /// Seconds since the epoch (1970-01-01 UTC).
     pub timestamp_epoch: u64,
 }
+
+/// One field the signer sets: its name and its value, the value wiped on drop (a session token
+/// rides in one).
+pub type Field = (String, Zeroizing<String>);
 
 /// A credential split for signing, the secret held redacted.
 pub struct SigningCredential {
@@ -217,8 +233,9 @@ impl SigV4Binding {
 
     /// Sign one request: the fields to set, in order, or NONE when the credential cannot sign
     /// (missing, an empty access key id or secret, an unsendable session token, or an access key id
-    /// that makes the `Authorization` value illegal).
-    pub fn sign(&self, facts: &SignFacts<'_>) -> Vec<(String, String)> {
+    /// that makes the `Authorization` value illegal). Every per-request copy of the session token
+    /// is wiped on drop.
+    pub fn sign(&self, facts: &SignFacts<'_>) -> Vec<Field> {
         let Some(cred) = &self.credential else {
             return Vec::new();
         };
@@ -234,12 +251,14 @@ impl SigV4Binding {
         let service = self.params.service.as_str();
         let (amzdate, datestamp) = sigv4::format_amz_time(facts.timestamp_epoch);
         let payload_hash = facts.payload_hash.to_string();
-        // The declared scheme signs the content type and the host (`declared.rs::present`), then
-        // SETS, never appends, the fields it writes.
-        let mut headers: Vec<(String, String)> = vec![
-            ("content-type".to_string(), self.params.content_type.clone()),
-            ("host".to_string(), facts.host.to_string()),
-        ];
+        // The set 1.5.5's signing writer signed (`proto/bedrock/writer.rs`, v1.5.5): the content
+        // type the request is sent with (none sent, none signed) and the host, then SET, never
+        // appended, the fields it writes.
+        let mut headers: Vec<(String, String)> = Vec::with_capacity(5);
+        if let Some(content_type) = facts.content_type {
+            headers.push(("content-type".to_string(), content_type.to_string()));
+        }
+        headers.push(("host".to_string(), facts.host.to_string()));
         set_header(&mut headers, "x-amz-date", amzdate.clone());
         set_header(&mut headers, "x-amz-content-sha256", payload_hash.clone());
         if let Some(t) = &cred.session_token {
@@ -249,17 +268,17 @@ impl SigV4Binding {
                 t.expose_secret().clone(),
             );
         }
+        let canonical_uri = sigv4::uri_encode_path(facts.path);
+        let canonical_query = crate::inbound::canonical_query_string(facts.query);
         self.derive(&datestamp);
         let sign_with = |key: &[u8]| {
-            // A POST of the body to its path, with no query: the request 1.5.5's signing dialect writer
-            // signed (`declared.rs::request`).
             sigv4::sign_v4_with_key(
                 key,
                 region,
                 service,
-                "POST",
-                facts.canonical_uri,
-                "",
+                facts.method,
+                &canonical_uri,
+                &canonical_query,
                 &headers,
                 &payload_hash,
                 &amzdate,
@@ -285,6 +304,7 @@ impl SigV4Binding {
                 service,
             ))
         });
+        sigv4::wipe(&mut headers);
         let credential_scope = format!(
             "{datestamp}/{region}/{service}/{}",
             sigv4::SIGNATURE_TERMINATION
@@ -299,15 +319,18 @@ impl SigV4Binding {
         if !is_legal_header_value(&authorization) {
             return Vec::new();
         }
-        let mut fields = vec![
-            ("authorization".to_string(), authorization),
-            ("x-amz-date".to_string(), amzdate),
-            ("x-amz-content-sha256".to_string(), payload_hash),
+        let mut fields: Vec<Field> = vec![
+            ("authorization".to_string(), Zeroizing::new(authorization)),
+            ("x-amz-date".to_string(), Zeroizing::new(amzdate)),
+            (
+                "x-amz-content-sha256".to_string(),
+                Zeroizing::new(payload_hash),
+            ),
         ];
         if let Some(t) = &cred.session_token {
             fields.push((
                 "x-amz-security-token".to_string(),
-                t.expose_secret().clone(),
+                Zeroizing::new(t.expose_secret().clone()),
             ));
         }
         fields

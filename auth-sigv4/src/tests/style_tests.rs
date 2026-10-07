@@ -27,16 +27,24 @@ fn lines(r: Result<SigV4Binding, Vec<Refusal>>) -> Vec<String> {
         .collect()
 }
 
+/// The two params are needed; the content type is no param (the signature covers the one sent),
+/// and a `content_type` key is read past.
 #[test]
-fn sigv4_needs_its_three_params_and_notes_an_unsendable_token() {
+fn sigv4_needs_its_two_params_and_notes_an_unsendable_token() {
     assert_eq!(
-        lines(open(
-            SIGV4,
-            Some("A:S"),
-            r#"{"service":"svc","region":"us-east-1"}"#
-        )),
-        ["settings: uses auth: sigv4 but has no `content_type`"]
+        lines(open(SIGV4, Some("A:S"), r#"{"region":"us-east-1"}"#)),
+        ["settings: uses auth: sigv4 but has no `service`"]
     );
+    assert_eq!(
+        lines(open(SIGV4, Some("A:S"), r#"{"service":"svc"}"#)),
+        ["settings: uses auth: sigv4 but has no `region`"]
+    );
+    assert!(open(
+        SIGV4,
+        Some("A:S"),
+        r#"{"service":"svc","region":"us-east-1"}"#
+    )
+    .is_ok());
     let r = open(
         SIGV4,
         Some("A:S:T\r\nX"),
@@ -58,8 +66,11 @@ fn a_keyless_binding_opens_but_signs_nothing() {
     assert!(!binding.session_token_unsendable());
     let hash = sigv4::sha256_hex(b"{}");
     let facts = SignFacts {
+        method: "POST",
         host: "h",
-        canonical_uri: "/p",
+        path: "/p",
+        query: None,
+        content_type: None,
         payload_hash: &hash,
         timestamp_epoch: 1,
     };

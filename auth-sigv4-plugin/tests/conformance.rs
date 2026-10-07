@@ -209,6 +209,13 @@ fn fields_over(
     f.input.handle = handle;
     f.input.mode = mode;
     f.input.request = facts();
+    // The header envelope the framer sends (the style declares STYLE_NEEDS_HEADERS): the JSON
+    // content type the signature covers, as 1.5.5's signing writer signed it.
+    let sent = [NamedValue {
+        name: s("content-type"),
+        value: blob("application/json", BLOB_OCTETS, 0),
+    }];
+    (f.input.headers, f.input.headers_len) = (sent.as_ptr(), sent.len());
     f.input.point = POINT_HEAD_BODY;
     f.input.body = body.map_or(z(), |b| blob(b, BLOB_OCTETS, 0));
     f.input.caller_credential = caller;

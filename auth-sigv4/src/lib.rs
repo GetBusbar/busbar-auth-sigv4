@@ -75,7 +75,7 @@ use busbar_contract::abi::auth::{
     OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut, StyleDecl, VerifyIn,
     CANCEL_ABANDONED, CAP_INBOUND, CAP_OUTBOUND, FACT_INBOUND_ALL_HEADERS, FACT_READS_CREDENTIALS,
     LOGIN_KIND_NONE, MODE_OWN, MODE_PASSTHROUGH, POINT_HEAD_BODY, STYLE_CALLER_CREDENTIAL,
-    VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
+    STYLE_NEEDS_HEADERS, VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
 };
 use busbar_contract::abi::mechanism::call::{
     AbiStr, Envelope, InHead, OutHead, Outcome, FLAG_RESUME,
@@ -109,7 +109,7 @@ fn sign_into(
     input: &FieldsIn,
     hash: &str,
     out: &mut FieldsOut,
-    write: impl Fn(&[(String, String)], &mut FieldsOut) -> Outcome,
+    write: impl Fn(&[signing::Field], &mut FieldsOut) -> Outcome,
 ) -> Outcome {
     let Some(facts) = sign_facts(input, hash) else {
         return Outcome::Failed;
@@ -133,11 +133,12 @@ fn sign_into(
 const FIELD_FLAGS: u32 = 0;
 
 /// The one style this plugin serves: it signs the body, so it needs the `HeadBody` point (THE
-/// DESIGN, "Auth points and guest lists") and hashes the body itself; it serves the caller's
-/// credential too.
+/// DESIGN, "Auth points and guest lists") and hashes the body itself; it signs the content type
+/// the request is sent with, so it needs the header envelope; it serves the caller's credential
+/// too.
 const STYLE_DECLS: [StyleDecl; 1] = [StyleDecl {
     name: abi_str(style::SIGV4),
-    flags: STYLE_CALLER_CREDENTIAL,
+    flags: STYLE_CALLER_CREDENTIAL | STYLE_NEEDS_HEADERS,
     points: POINT_HEAD_BODY,
 }];
 
@@ -543,11 +544,16 @@ impl Slot for OutboundReady {
     }
 }
 
-/// The SigV4 facts of a `fields` call; `None` when the host sent no host or path.
+/// The SigV4 facts of a `fields` call: the walked request's method, host, path, query and sent
+/// content type (BUSBAR-1.6.0.md THE DESIGN §6: "SigV4 signs the real method and query of the
+/// walked request"); `None` when the host sent no method, host or path.
 fn sign_facts<'a>(input: &'a FieldsIn, hash: &'a str) -> Option<SignFacts<'a>> {
     Some(SignFacts {
+        method: text(&input.request.method)?,
         host: text(&input.request.authority)?,
-        canonical_uri: text(&input.request.canonical_path)?,
+        path: text(&input.request.canonical_path)?,
+        query: text(&input.request.query).filter(|q| !q.is_empty()),
+        content_type: abi::sent_header(input, "content-type"),
         payload_hash: hash,
         timestamp_epoch: input.request.timestamp,
     })
@@ -562,7 +568,7 @@ impl Slot for Fields {
         let Some(s) = inst(instance) else {
             return Outcome::Fault;
         };
-        let write = |fields: &[(String, String)], out: &mut FieldsOut| {
+        let write = |fields: &[signing::Field], out: &mut FieldsOut| {
             let f: Vec<(&str, &str)> = fields
                 .iter()
                 .map(|(n, v)| (n.as_str(), v.as_str()))

@@ -184,8 +184,10 @@ impl SigV4 {
         );
     }
 
-    /// `tick`: pre-derive every live binding's day keys ahead of midnight. Answers the next tick
-    /// (`0`: none wanted — no binding is open).
+    /// `tick`: pre-derive every live binding's day keys ahead of midnight. Answers the next tick,
+    /// ALWAYS: the schedule runs from the instance's open, before any binding exists, and a `0`
+    /// would end it for good (`TickOut::next_tick_ns`), leaving a later binding's day keys to be
+    /// derived on the request path (THE DESIGN §6.5: "a daily signing key derived ahead of time").
     pub(crate) fn tick(&self, now_ns: u64) -> u64 {
         let bindings: Vec<Arc<SigV4Binding>> = self
             .handles
@@ -194,9 +196,6 @@ impl SigV4 {
             .values()
             .map(|(_, b)| b.clone())
             .collect();
-        if bindings.is_empty() {
-            return 0;
-        }
         let now = crate::now_epoch();
         for b in &bindings {
             b.prederive(now);

@@ -57,12 +57,11 @@ use busbar_contract::abi::mechanism::lifecycle::{
     ValidateIn,
 };
 use busbar_contract::redacted::sha256_hex;
-use busbar_contract::services::{Caller, NestAsk, RecordsList, UNSERVED};
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
 use busbar_plugin_loader::dispatch::{
     in_head, load_dropped, load_linked, now_ns, out_head, rendering_of, Bind, Diagnostic,
-    DispatchConfig, Dispatcher, Dropped, EnvelopeSink, Frame, HostServices, Later, LinkedRow,
-    Metric, Plugin, Ran, Reading, Stored,
+    DispatchConfig, Dispatcher, Dropped, EnvelopeSink, Frame, Later, LinkedRow, Metric, Plugin,
+    Ran, Reading, Stored,
 };
 
 fn z<T>() -> T {
@@ -120,7 +119,7 @@ fn bind(folds: &Arc<Folds>, dispatcher: &Dispatcher) -> Bind {
         max_inflight_cap: 64,
         sink: folds.clone(),
         dispatcher: dispatcher.adopter(),
-        conns: None,
+        conns: busbar_plugin_loader::dispatch::ConnTable::NoNeeds,
     }
 }
 
@@ -298,61 +297,12 @@ impl Creds {
     }
 }
 
-fn unserved() -> Ran {
-    Ran::Now(Stored::refused(UNSERVED))
-}
-
-impl HostServices for Creds {
+impl busbar_contract::services::double::ServicesDouble for Creds {
     fn now(&self) -> Reading {
         Reading {
             wall_ns: NOW * 1_000_000_000,
             mono_ns: 0,
         }
-    }
-    fn dest_judge(&self, _: &str, _: u32, _: bool, _: Option<Later>) -> Ran {
-        unserved()
-    }
-    fn records_get(&self, _: &Caller, _: &str, _: &[u8], _: Later) -> Ran {
-        unserved()
-    }
-    fn records_list(&self, _: &Caller, _: RecordsList, _: Later) -> Ran {
-        unserved()
-    }
-    fn records_claim(&self, _: &Caller, _: &str, _: &[u8], _: u64, _: Later) -> Ran {
-        unserved()
-    }
-    fn sign(&self, _: &Caller, _: &[u8]) -> Stored {
-        Stored::refused(UNSERVED)
-    }
-    fn trust_sight(&self, _: &Caller, _: &str, _: &str, _: Later) -> Ran {
-        unserved()
-    }
-    fn trust_due(&self, _: &Caller) -> Stored {
-        Stored::refused(UNSERVED)
-    }
-    fn trust_verify(&self, _: &Caller, _: &str, _: &[u8], _: &[u8]) -> Stored {
-        Stored::refused(UNSERVED)
-    }
-    fn entitlement_check(&self, _: &Caller, _: Option<u64>, _: &str) -> Stored {
-        Stored::refused(UNSERVED)
-    }
-    fn random_fill(&self, _: u64) -> Stored {
-        Stored::refused(UNSERVED)
-    }
-    fn unit_nest(&self, _: &Caller, _: Option<u64>, _: NestAsk, _: Later) -> Ran {
-        unserved()
-    }
-    fn work_open(&self, _: &Caller, _: Option<u64>, _: &str, _: &[u8], _: Later) -> Ran {
-        unserved()
-    }
-    fn work_find(&self, _: &Caller, _: Option<u64>, _: &[u8], _: Later) -> Ran {
-        unserved()
-    }
-    fn work_settle(&self, _: &Caller, _: u64, _: &[u8], _: Later) -> Ran {
-        unserved()
-    }
-    fn work_resume(&self, _: &Caller, _: Option<u64>, _: u64, _: Later) -> Ran {
-        unserved()
     }
     fn records_secret(&self, kind: &str, id: &str, _: Later) -> Ran {
         self.0.lock().unwrap().push(format!("{kind}:{id}"));

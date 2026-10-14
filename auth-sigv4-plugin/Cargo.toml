@@ -19,6 +19,9 @@ busbar-auth-sigv4 = { path = "../auth-sigv4" }
 busbar-contract = { workspace = true }
 
 [dev-dependencies]
+# The shared host-services test double (`busbar_contract::services::double`): the dev-only
+# `services-double` feature, on this edge alone; a test's host overrides only what it serves.
+busbar-contract = { workspace = true, features = ["services-double"] }
 # busbar's published conformance suite and the door's own both-ways proof (`tests/conformance.rs`,
 # moved from busbar's crates/busbar-auth-sigv4) load the linked door and dlopen the built cdylib over
 # busbar's REAL loader: dev-only, never in the shipped artifact.

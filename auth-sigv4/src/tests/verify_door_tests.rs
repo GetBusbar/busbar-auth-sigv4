@@ -168,6 +168,8 @@ fn open_with(host: FakeHost, records_secret: bool, tables: bool) -> Opened {
         wake: None,
         conns: std::ptr::null(),
         services: std::ptr::from_ref(&*slots),
+        // The host I/O table: this host offers none (the door reads no handle).
+        io: std::ptr::null(),
     });
     let mut i: OpenIn = crate::abi::zeroed_in();
     i.host = if tables {

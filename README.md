@@ -1,4 +1,4 @@
-<!-- fleet:header:begin (rendered by `busbar-release plugin sync` from GetBusbar/busbar-release template/ and busbar's plugins.yaml; edit it there) -->
+<!-- fleet:header:begin (rendered by `busbar-release plugin heal` from GetBusbar/busbar-release template/ and busbar's plugins.yaml; edit it there) -->
 # busbar-auth-sigv4
 
 First-party signed kind:auth plugin cdylib: the sigv4 auth, packaged as a droppable busbar plugin. Drop the signed tarball into plugins/.

@@ -59,6 +59,7 @@
 #![deny(missing_docs)]
 
 mod abi;
+mod held;
 pub mod inbound;
 mod instance;
 mod signing;

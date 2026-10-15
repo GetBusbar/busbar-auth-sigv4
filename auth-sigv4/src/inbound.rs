@@ -31,7 +31,7 @@
 
 use zeroize::Zeroizing;
 
-use busbar_contract::redacted::constant_time_eq;
+use busbar_contract::constant_time_eq;
 
 use crate::sigv4::{
     hmac, sha256_hex, signing_key, uri_encode_path, SIGNATURE_TERMINATION, SIGV4_ALGORITHM,

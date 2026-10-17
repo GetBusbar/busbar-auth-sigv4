@@ -220,3 +220,22 @@ fn the_day_key_path_matches_the_aws_published_session_token_vector() {
         "85d96828115b5dc0cfc3bd16ad9e210dd772bbebba041836c64533a82be05ead"
     );
 }
+
+/// The outbound canonical query: names and values decoded once and re-encoded over the unreserved
+/// set (uppercase hex), sorted by name then value; a `+` is a literal byte (RFC 3986), a `%` that
+/// opens no two hex digits is a literal `%`, and a decoded multi-byte character is re-escaped.
+#[test]
+fn canonical_query_encodes_each_name_and_value() {
+    assert_eq!(canonical_query(None), "");
+    assert_eq!(canonical_query(Some("")), "");
+    assert_eq!(canonical_query(Some("b=2&a=1&&a=0")), "a=0&a=1&b=2");
+    assert_eq!(canonical_query(Some("q=1+2")), "q=1%2B2");
+    assert_eq!(canonical_query(Some("p=%zz&r=%4")), "p=%25zz&r=%254");
+    assert_eq!(canonical_query(Some("u=%e1%88%b4")), "u=%E1%88%B4");
+    assert_eq!(canonical_query(Some("s=a b,c")), "s=a%20b%2Cc");
+    assert_eq!(
+        canonical_query(Some("x%2Fy=1&x/z=2")),
+        "x%2Fy=1&x%2Fz=2",
+        "a name is encoded too"
+    );
+}

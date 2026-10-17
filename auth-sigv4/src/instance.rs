@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! ONE INSTANCE: the handles (generation data), the per-op envelope storage the host copies
-//! after each control-lane call, the host services `open` was handed, and the inbound `verify`'s
+//! ONE INSTANCE: the handles (generation data, each with the unsendable-token line its `fields`
+//! envelope points into), the per-op envelope storage the host copies after each control-lane call, the host services `open` was handed, and the inbound `verify`'s
 //! per-ticket state. No token cache, no waker: a sigv4 binding never mints and never pends — `tick`
 //! only pre-derives day keys ahead of midnight. Only `verify` may pend, on the host's
 //! `records.secret` read; it keeps the completion handle it issued under the ticket until the read
@@ -83,11 +83,16 @@ pub(crate) enum Held {
     Reached(String),
 }
 
+/// One handle: its generation, its binding, and its `fields` note ([`SigV4::note_unsendable`]).
+type Handle = (u64, Arc<SigV4Binding>, Arc<EnvStore>);
+
 /// One plugin instance.
 pub(crate) struct SigV4 {
     generation: AtomicU64,
     next_handle: AtomicU64,
-    handles: RwLock<HashMap<u64, (u64, Arc<SigV4Binding>)>>,
+    /// Each handle: its generation, its binding, and the envelope its `fields` answers when the
+    /// signing credential's session token is unsendable (built once at open, kept until retire).
+    handles: RwLock<HashMap<u64, Handle>>,
     /// `open_outbound`'s envelope and error.
     pub(crate) open_env: Mutex<EnvStore>,
     /// The host services `open` was handed (`records.secret`); `None` when the host offers none.
@@ -144,20 +149,29 @@ impl SigV4 {
     pub(crate) fn keep(&self, binding: SigV4Binding) -> u64 {
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
         let generation = self.generation.load(Ordering::Acquire);
+        // The line a request signed with nothing reports names the binding's service, the one
+        // input it varies on: built here, once, so `fields` allocates nothing for it.
+        let mut note = EnvStore::default();
+        Self::note_unsendable(&mut note, &binding.params().service);
         self.handles
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(handle, (generation, Arc::new(binding)));
+            .insert(handle, (generation, Arc::new(binding), Arc::new(note)));
         handle
     }
 
     /// The binding behind `handle`.
     pub(crate) fn binding(&self, handle: u64) -> Option<Arc<SigV4Binding>> {
+        self.bound(handle).map(|(b, _)| b)
+    }
+
+    /// The binding behind `handle`, and the note its `fields` envelope points into.
+    pub(crate) fn bound(&self, handle: u64) -> Option<(Arc<SigV4Binding>, Arc<EnvStore>)> {
         self.handles
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&handle)
-            .map(|(_, b)| b.clone())
+            .map(|(_, b, n)| (b.clone(), n.clone()))
     }
 
     /// `retire`: drop the handles opened at `generation`.
@@ -165,7 +179,7 @@ impl SigV4 {
         self.handles
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .retain(|_, (g, _)| *g != generation);
+            .retain(|_, (g, _, _)| *g != generation);
     }
 
     /// Report into `env` a request signed with nothing because its credential's session token is
@@ -194,7 +208,7 @@ impl SigV4 {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .values()
-            .map(|(_, b)| b.clone())
+            .map(|(_, b, _)| b.clone())
             .collect();
         let now = crate::now_epoch();
         for b in &bindings {

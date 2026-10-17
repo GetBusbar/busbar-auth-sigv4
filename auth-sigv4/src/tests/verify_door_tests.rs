@@ -25,7 +25,10 @@ use busbar_contract::abi::host::service::{
 use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, Outcome, RawOutcome, Span, BLOB_OCTETS, FLAG_RESUME,
 };
-use busbar_contract::abi::mechanism::door::{DoorFn, Statement, MARK_WORD_CARRIER};
+use busbar_contract::abi::mechanism::door::{
+    DoorFn, Statement, MARK_WORD_CARRIER, MARK_WORD_ISSUED_ID_ALPHABET, MARK_WORD_ISSUED_ID_LENGTH,
+    MARK_WORD_ISSUED_ID_PREFIX, MARK_WORD_ISSUED_SECRET_ALPHABET, MARK_WORD_ISSUED_SECRET_LENGTH,
+};
 use busbar_contract::abi::mechanism::lifecycle::{CancelIn, CancelOut, OpenIn, OpenOut};
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
 use busbar_contract::abi::sdk::door::Slot;
@@ -365,9 +368,26 @@ fn the_tail_states_inbound_sigv4_at_head_body_beside_the_outbound_style() {
         kinds.iter().map(|k| text(*k)).collect::<Vec<_>>(),
         ["sigv4"]
     );
-    assert_eq!(words.len(), 1);
-    assert_eq!(words[0].class, MARK_WORD_CARRIER);
-    assert_eq!(text(words[0].word), "authorization");
+    let owned: Vec<(u32, String)> = words.iter().map(|w| (w.class, text(w.word))).collect();
+    let marks: Vec<(u32, &str)> = owned.iter().map(|(c, w)| (*c, w.as_str())).collect();
+    assert_eq!(
+        marks,
+        [
+            (MARK_WORD_CARRIER, "authorization"),
+            (MARK_WORD_ISSUED_ID_PREFIX, "AKIA"),
+            (MARK_WORD_ISSUED_ID_LENGTH, "20"),
+            (
+                MARK_WORD_ISSUED_ID_ALPHABET,
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+            ),
+            (MARK_WORD_ISSUED_SECRET_LENGTH, "40"),
+            (
+                MARK_WORD_ISSUED_SECRET_ALPHABET,
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+            ),
+        ],
+        "the carrier, then the issued credential's shape: 1.5.5's AccessKeyId and secret"
+    );
     // The compiled-in entry is the same door.
     let (entry, door): (DoorFn, DoorFn) = (crate::compiled_in::door::door, crate::door);
     assert!(std::ptr::fn_addr_eq(entry, door));

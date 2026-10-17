@@ -606,3 +606,7 @@ impl Slot for Fields {
 #[cfg(test)]
 #[path = "tests/verify_door_tests.rs"]
 mod verify_door_tests;
+
+#[cfg(test)]
+#[path = "tests/policy_tests.rs"]
+mod policy_tests;

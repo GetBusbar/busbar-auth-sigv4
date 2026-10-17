@@ -342,3 +342,52 @@ fn fields_signs_the_content_type_only_as_sent() {
         "the sent value, signed"
     );
 }
+
+/// RED (contract `abi/auth/inbound.rs`, the request's query "For `fields`: as it will be sent (a
+/// signing style sorts and encodes it)"; AWS SigV4's canonical query string: each name and value
+/// URI-encoded over the unreserved set with uppercase hex, then sorted): a query the plane sends
+/// with reserved bytes, a lowercase escape, an escaped unreserved byte and a bare name is signed in
+/// the canonical form AWS recomputes, not as sent. The expected string is written out by hand here,
+/// never computed by the code under test.
+#[test]
+fn fields_signs_the_query_in_its_canonical_encoding() {
+    let s = SigV4::new(1, None);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    let walked = Walked {
+        method: "GET",
+        path: "/foundation-models",
+        query: Some("prefix=a/b:c&marker=x%2fy&k=%7E&flag"),
+        content_type: None,
+    };
+    assert_eq!(
+        authorization(&s, handle, &walked),
+        expected(
+            "GET",
+            "/foundation-models",
+            "flag=&k=~&marker=x%2Fy&prefix=a%2Fb%3Ac",
+            &[],
+        )
+    );
+}
+
+/// An already canonical query is signed unchanged: encoding is idempotent over the canonical form.
+#[test]
+fn fields_signs_an_already_canonical_query_unchanged() {
+    let s = SigV4::new(1, None);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    let walked = Walked {
+        method: "GET",
+        path: "/foundation-models",
+        query: Some("marker=x%2Fy&prefix=a%2Fb%3Ac"),
+        content_type: None,
+    };
+    assert_eq!(
+        authorization(&s, handle, &walked),
+        expected(
+            "GET",
+            "/foundation-models",
+            "marker=x%2Fy&prefix=a%2Fb%3Ac",
+            &[],
+        )
+    );
+}

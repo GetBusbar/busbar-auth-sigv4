@@ -265,7 +265,7 @@ impl SigV4Binding {
             set_header(&mut headers, "x-amz-security-token", t.reveal().clone());
         }
         let canonical_uri = sigv4::uri_encode_path(facts.path);
-        let canonical_query = crate::inbound::canonical_query_string(facts.query);
+        let canonical_query = sigv4::canonical_query(facts.query);
         self.derive(&datestamp);
         let sign_with = |key: &[u8]| {
             sigv4::sign_v4_with_key(

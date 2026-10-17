@@ -84,7 +84,7 @@ pub(crate) enum Held {
 }
 
 /// One handle: its generation, its binding, and its `fields` note ([`SigV4::note_unsendable`]).
-type Handle = (u64, Arc<SigV4Binding>, Arc<EnvStore>);
+type Handle = (u64, Arc<SigV4Binding>, Box<EnvStore>);
 
 /// One plugin instance.
 pub(crate) struct SigV4 {
@@ -156,22 +156,32 @@ impl SigV4 {
         self.handles
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(handle, (generation, Arc::new(binding), Arc::new(note)));
+            .insert(handle, (generation, Arc::new(binding), Box::new(note)));
         handle
     }
 
     /// The binding behind `handle`.
     pub(crate) fn binding(&self, handle: u64) -> Option<Arc<SigV4Binding>> {
-        self.bound(handle).map(|(b, _)| b)
-    }
-
-    /// The binding behind `handle`, and the note its `fields` envelope points into.
-    pub(crate) fn bound(&self, handle: u64) -> Option<(Arc<SigV4Binding>, Arc<EnvStore>)> {
         self.handles
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&handle)
-            .map(|(_, b, n)| (b.clone(), n.clone()))
+            .map(|(_, b, _)| b.clone())
+    }
+
+    /// `f` over the binding behind `handle` and the note its `fields` envelope points into, under
+    /// the handles' read lock. The note is boxed and dropped only when its handle retires, so the
+    /// envelope `f` points at it stays valid after the lock is released.
+    pub(crate) fn with_bound<R>(
+        &self,
+        handle: u64,
+        f: impl FnOnce(&SigV4Binding, &EnvStore) -> R,
+    ) -> Option<R> {
+        self.handles
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&handle)
+            .map(|(_, b, n)| f(b, n))
     }
 
     /// `retire`: drop the handles opened at `generation`.

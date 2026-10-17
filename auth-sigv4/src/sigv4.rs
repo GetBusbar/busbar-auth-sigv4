@@ -73,11 +73,10 @@ fn sha256_wiped(prefix: Option<&[u8; BLOCK]>, data: &[u8]) -> Zeroizing<[u8; 32]
         compress(&mut state, p);
         total += BLOCK as u64;
     }
-    let mut chunks = data.chunks_exact(BLOCK);
-    for c in &mut chunks {
+    let (blocks, rest) = data.as_chunks::<BLOCK>();
+    for c in blocks {
         compress(&mut state, c);
     }
-    let rest = chunks.remainder();
     let mut tail = Zeroizing::new([0_u8; 2 * BLOCK]);
     tail[..rest.len()].copy_from_slice(rest);
     tail[rest.len()] = 0x80;
@@ -87,12 +86,12 @@ fn sha256_wiped(prefix: Option<&[u8; BLOCK]>, data: &[u8]) -> Zeroizing<[u8; 32]
         2 * BLOCK
     };
     tail[end - 8..end].copy_from_slice(&total.wrapping_mul(8).to_be_bytes());
-    for c in tail[..end].chunks_exact(BLOCK) {
+    for c in tail[..end].as_chunks::<BLOCK>().0 {
         compress(&mut state, c);
     }
     let mut out = Zeroizing::new([0_u8; 32]);
-    for (o, w) in out.chunks_exact_mut(4).zip(state.iter()) {
-        o.copy_from_slice(&w.to_be_bytes());
+    for (o, w) in out.as_chunks_mut::<4>().0.iter_mut().zip(state.iter()) {
+        *o = w.to_be_bytes();
     }
     out
 }

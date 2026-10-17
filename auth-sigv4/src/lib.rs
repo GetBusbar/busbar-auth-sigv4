@@ -571,25 +571,24 @@ impl Slot for Fields {
         // The payload hash over the body the host lent at `HeadBody`; none lent is the empty body.
         let hash = crate::sigv4::sha256_hex(blob(&input.body).unwrap_or_default());
         match input.mode {
-            MODE_OWN => {
-                let Some((b, note)) = s.bound(input.handle) else {
-                    return Outcome::Refused;
-                };
-                sign_into(&b, &note, input, &hash, out, write)
-            }
-            MODE_PASSTHROUGH => {
-                let Some((b, note)) = s.bound(input.handle) else {
-                    return Outcome::Refused;
-                };
-                let caller = blob(&input.caller_credential)
-                    .and_then(|c| std::str::from_utf8(c).ok())
-                    .unwrap_or("");
-                // A FRESH binding, per request: the caller's key varies request to request, so it
-                // never enters the operator binding's day-key cache (`signing` module doc).
-                let signer =
-                    SigV4Binding::new(b.params().clone(), SigningCredential::split(caller));
-                sign_into(&signer, &note, input, &hash, out, write)
-            }
+            MODE_OWN => s
+                .with_bound(input.handle, |b, note| {
+                    sign_into(b, note, input, &hash, out, write)
+                })
+                .unwrap_or(Outcome::Refused),
+            MODE_PASSTHROUGH => s
+                .with_bound(input.handle, |b, note| {
+                    let caller = blob(&input.caller_credential)
+                        .and_then(|c| std::str::from_utf8(c).ok())
+                        .unwrap_or("");
+                    // A FRESH binding, per request: the caller's key varies request to request,
+                    // so it never enters the operator binding's day-key cache (`signing` module
+                    // doc).
+                    let signer =
+                        SigV4Binding::new(b.params().clone(), SigningCredential::split(caller));
+                    sign_into(&signer, note, input, &hash, out, write)
+                })
+                .unwrap_or(Outcome::Refused),
             _ => Outcome::Refused,
         }
     }

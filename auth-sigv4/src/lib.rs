@@ -81,7 +81,10 @@ use busbar_contract::abi::auth::{
 use busbar_contract::abi::mechanism::call::{
     AbiStr, Envelope, InHead, OutHead, Outcome, FLAG_RESUME,
 };
-use busbar_contract::abi::mechanism::door::{KindTailHead, MarkWord, Statement};
+use busbar_contract::abi::mechanism::door::{
+    KindTailHead, MarkWord, Statement, MARK_WORD_ISSUED_ID_ALPHABET, MARK_WORD_ISSUED_ID_LENGTH,
+    MARK_WORD_ISSUED_ID_PREFIX, MARK_WORD_ISSUED_SECRET_ALPHABET, MARK_WORD_ISSUED_SECRET_LENGTH,
+};
 use busbar_contract::abi::mechanism::lifecycle::{
     CancelIn, CancelOut, DriveIn, GenIn, OpenIn, OpenOut, RefreshIn, ReleaseIn, TickIn, TickOut,
     ValidateIn,
@@ -158,8 +161,34 @@ const TAIL: &AuthTail = &AuthTail {
     credential_kinds_len: CREDENTIAL_KINDS.len(),
 };
 
-/// The carrier `verify` reads its credential from, the Statement's one carrier word mark.
-const CARRIERS: [MarkWord; 1] = [carrier(inbound::AUTHORIZATION)];
+/// One issued-credential shape word mark of `class`.
+const fn issued(class: u32, word: &'static str) -> MarkWord {
+    MarkWord {
+        class,
+        _reserved: 0,
+        word: abi_str(word),
+    }
+}
+
+/// The Statement's word marks: the carrier `verify` reads its credential from, and the shape of
+/// the `sigv4` credential the host issues for it (1.5.5's AWS long-term key shape: an AccessKeyId
+/// of `AKIA` then 16 of [A-Z0-9], 20 in all, and a 40-character secret access key over the base64
+/// alphabet). The host draws every symbol from the OS CSPRNG over these alphabets and names no
+/// format of its own.
+const MARKS: [MarkWord; 6] = [
+    carrier(inbound::AUTHORIZATION),
+    issued(MARK_WORD_ISSUED_ID_PREFIX, "AKIA"),
+    issued(MARK_WORD_ISSUED_ID_LENGTH, "20"),
+    issued(
+        MARK_WORD_ISSUED_ID_ALPHABET,
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+    ),
+    issued(MARK_WORD_ISSUED_SECRET_LENGTH, "40"),
+    issued(
+        MARK_WORD_ISSUED_SECRET_ALPHABET,
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+    ),
+];
 
 /// The diagnostic ids, in [`instance::diag`] order: 1.5.5's catalog codes where the line had one.
 const DIAG_IDS: [AbiStr; 1] = [abi_str("auth.sigv4-session-token-invalid-bytes")];
@@ -170,8 +199,8 @@ busbar_contract::plugin_door! {
         kind_tail: ptr::from_ref(TAIL).cast::<KindTailHead>(),
         diag_ids: DIAG_IDS.as_ptr(),
         diag_ids_len: DIAG_IDS.len(),
-        mark_words: CARRIERS.as_ptr(),
-        mark_words_len: CARRIERS.len(),
+        mark_words: MARKS.as_ptr(),
+        mark_words_len: MARKS.len(),
         ..statement("busbar-auth-sigv4", env!("CARGO_PKG_VERSION"), 1024)
     },
     lifecycle: {

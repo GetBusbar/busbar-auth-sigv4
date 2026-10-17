@@ -96,17 +96,14 @@ use crate::inbound::{Judgement, Read, SecretSource};
 use crate::instance::{EnvStore, Held, SigV4};
 use crate::signing::{SigV4Binding, SignFacts, SigningCredential};
 
-thread_local! {
-    /// `fields`' envelope storage, per calling thread: the host copies a call's envelope before it
-    /// makes any other call on that thread, and `fields` is called from many at once.
-    static FIELDS_ENV: std::cell::RefCell<EnvStore> = std::cell::RefCell::default();
-}
-
 /// `fields` for `signer`: its signed fields, and — when its session token is no legal header
 /// value, so it signs nothing — the signer's line on this call's envelope, as 1.5.5 logged it on
-/// each such request.
+/// each such request. The line is `note`, built once when the handle was opened and kept with it
+/// until its generation retires: the envelope points into the instance's own handle, never into a
+/// per-thread or process-wide store (THE DESIGN §2).
 fn sign_into(
     signer: &SigV4Binding,
+    note: &EnvStore,
     input: &FieldsIn,
     hash: &str,
     out: &mut FieldsOut,
@@ -117,12 +114,7 @@ fn sign_into(
     };
     let outcome = write(&signer.sign(&facts), out);
     if signer.session_token_unsendable() {
-        FIELDS_ENV.with(|env| {
-            let mut env = env.borrow_mut();
-            env.clear();
-            SigV4::note_unsendable(&mut env, &signer.params().service);
-            envelope(&mut out.head, &env);
-        });
+        envelope(&mut out.head, note);
     }
     outcome
 }
@@ -579,25 +571,24 @@ impl Slot for Fields {
         // The payload hash over the body the host lent at `HeadBody`; none lent is the empty body.
         let hash = crate::sigv4::sha256_hex(blob(&input.body).unwrap_or_default());
         match input.mode {
-            MODE_OWN => {
-                let Some(b) = s.binding(input.handle) else {
-                    return Outcome::Refused;
-                };
-                sign_into(&b, input, &hash, out, write)
-            }
-            MODE_PASSTHROUGH => {
-                let Some(b) = s.binding(input.handle) else {
-                    return Outcome::Refused;
-                };
-                let caller = blob(&input.caller_credential)
-                    .and_then(|c| std::str::from_utf8(c).ok())
-                    .unwrap_or("");
-                // A FRESH binding, per request: the caller's key varies request to request, so it
-                // never enters the operator binding's day-key cache (`signing` module doc).
-                let signer =
-                    SigV4Binding::new(b.params().clone(), SigningCredential::split(caller));
-                sign_into(&signer, input, &hash, out, write)
-            }
+            MODE_OWN => s
+                .with_bound(input.handle, |b, note| {
+                    sign_into(b, note, input, &hash, out, write)
+                })
+                .unwrap_or(Outcome::Refused),
+            MODE_PASSTHROUGH => s
+                .with_bound(input.handle, |b, note| {
+                    let caller = blob(&input.caller_credential)
+                        .and_then(|c| std::str::from_utf8(c).ok())
+                        .unwrap_or("");
+                    // A FRESH binding, per request: the caller's key varies request to request,
+                    // so it never enters the operator binding's day-key cache (`signing` module
+                    // doc).
+                    let signer =
+                        SigV4Binding::new(b.params().clone(), SigningCredential::split(caller));
+                    sign_into(&signer, note, input, &hash, out, write)
+                })
+                .unwrap_or(Outcome::Refused),
             _ => Outcome::Refused,
         }
     }
@@ -606,3 +597,7 @@ impl Slot for Fields {
 #[cfg(test)]
 #[path = "tests/verify_door_tests.rs"]
 mod verify_door_tests;
+
+#[cfg(test)]
+#[path = "tests/policy_tests.rs"]
+mod policy_tests;

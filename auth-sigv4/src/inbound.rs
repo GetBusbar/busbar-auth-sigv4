@@ -130,7 +130,7 @@ pub fn sign_v4(
         sha256_hex(canonical_request.as_bytes())
     );
     let key = signing_key(secret, datestamp, region, service);
-    let signature = hex::encode(hmac(&key, string_to_sign.as_bytes()));
+    let signature = hex::encode(&hmac(&key, string_to_sign.as_bytes())[..]);
     (signature, signed_headers)
 }
 

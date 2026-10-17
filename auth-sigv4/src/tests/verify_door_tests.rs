@@ -75,7 +75,7 @@ extern "C" fn fake_records_secret(
     // SAFETY: the fake's own context, and the plugin's `RecordsSecretIn` / `ServiceOut`.
     let (host, i, out) = unsafe {
         (
-            &*ctx.ptr.cast::<FakeHost>(),
+            &*(ctx.handle as usize as *const FakeHost),
             input.cast::<RecordsSecretIn>().read_unaligned(),
             &mut *out,
         )
@@ -162,8 +162,9 @@ fn open_with(host: FakeHost, records_secret: bool, tables: bool) -> Opened {
     let t = Box::new(HostTables {
         size: size_of::<HostTables>() as u32,
         _reserved: 0,
+        // The fake host's address rides in the opaque handle: only this fake reads it back.
         ctx: HostCtx {
-            ptr: std::ptr::from_ref(&*host).cast_mut().cast(),
+            handle: std::ptr::from_ref(&*host) as usize as u64,
         },
         wake: None,
         conns: std::ptr::null(),

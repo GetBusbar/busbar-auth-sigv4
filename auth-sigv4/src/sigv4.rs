@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! AWS Signature Version 4 request signing — hand-rolled on ring (digest + hmac), no AWS
-//! SDK. MOVED VERBATIM from the identity unit's `egress_auth/sigv4/mod.rs` in the kernel, staged
+//! AWS Signature Version 4 request signing — hand-rolled, no AWS SDK: SHA-256 on ring's digest, the
+//! keyed HMAC over SHA-256's compression function with every key-derived state in this crate's own
+//! wiped buffers ([`hmac`]). MOVED VERBATIM from the identity unit's `egress_auth/sigv4/mod.rs` in the kernel, staged
 //! `busbar-auth-outbound::sigv4` (KERNEL<>PLUGINS step 22), then here (AUTH-SPLIT: sigv4 is its
 //! own mechanism, its own crate): the canonical-request -> string-to-sign -> signature chain is
 //! verified against AWS's own published worked example (GET iam ListUsers, 2015-08-30) in the
@@ -14,15 +15,19 @@
 //!   ahead of time"): [`sign_v4`] is split into [`signing_key`] (the HMAC chain over date, region,
 //!   service) and [`sign_v4_with_key`] (the per-request part), so a caller holding the day's key
 //!   signs without re-deriving it. [`sign_v4`] is the two composed, exactly the old function.
-//! * THE SECRET IS ZEROISED (TODO item 586, #53/#54): the `AWS4<secret>` key material and every
-//!   derived key are [`Zeroizing`] buffers, wiped on drop.
+//! * THE SECRET IS ZEROISED (TODO item 586, #53/#54; THE DESIGN §6: "auth material is zeroised"):
+//!   the `AWS4<secret>` key material, every derived key, and the HMAC's own key state (the padded
+//!   key blocks and the chaining state after each) are [`Zeroizing`] buffers, wiped on drop. A
+//!   library HMAC keeps its key's inner and outer pad states in a value it frees unwiped, so
+//!   [`hmac`] holds them itself.
 //!
 //! The signer's chain is shared with the INBOUND check ([`crate::inbound`], moved here from the
 //! kernel): it recomputes a client's signature through [`hmac`], [`signing_key`] and [`sha256_hex`],
 //! and derives the canonical URI with [`uri_encode_path`], keeping its own canonical signing (a
 //! quoted header value's interior spaces are kept verbatim there).
 
-use ring::{digest, hmac as ring_hmac};
+use ring::digest;
+use sha2::digest::generic_array::GenericArray;
 use zeroize::{Zeroize, Zeroizing};
 
 const SECS_PER_DAY: u64 = 86_400;
@@ -39,12 +44,78 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(digest::digest(&digest::SHA256, data))
 }
 
-/// HMAC-SHA256 of `data` under `key`, on ring (busbar's one crypto backend; HMAC accepts a key of
-/// any length, so there is no error arm).
-pub(crate) fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
-    ring_hmac::sign(&ring_hmac::Key::new(ring_hmac::HMAC_SHA256, key), data)
-        .as_ref()
-        .to_vec()
+/// SHA-256's block size, in bytes.
+const BLOCK: usize = 64;
+
+/// SHA-256's initial chaining state (FIPS 180-4, 5.3.3).
+const SHA256_IV: [u32; 8] = [
+    0x6a09_e667,
+    0xbb67_ae85,
+    0x3c6e_f372,
+    0xa54f_f53a,
+    0x510e_527f,
+    0x9b05_688c,
+    0x1f83_d9ab,
+    0x5be0_cd19,
+];
+
+/// Run SHA-256's compression function over one whole `block` into `state`.
+fn compress(state: &mut [u32; 8], block: &[u8]) {
+    sha2::compress256(state, std::slice::from_ref(GenericArray::from_slice(block)));
+}
+
+/// SHA-256 of `prefix` (one whole block, or none) followed by `data`. The chaining state and the
+/// padded final blocks (which carry `data`'s tail) are wiped on drop, and so is the digest.
+fn sha256_wiped(prefix: Option<&[u8; BLOCK]>, data: &[u8]) -> Zeroizing<[u8; 32]> {
+    let mut state = Zeroizing::new(SHA256_IV);
+    let mut total = data.len() as u64;
+    if let Some(p) = prefix {
+        compress(&mut state, p);
+        total += BLOCK as u64;
+    }
+    let (blocks, rest) = data.as_chunks::<BLOCK>();
+    for c in blocks {
+        compress(&mut state, c);
+    }
+    let mut tail = Zeroizing::new([0_u8; 2 * BLOCK]);
+    tail[..rest.len()].copy_from_slice(rest);
+    tail[rest.len()] = 0x80;
+    let end = if rest.len() + 9 <= BLOCK {
+        BLOCK
+    } else {
+        2 * BLOCK
+    };
+    tail[end - 8..end].copy_from_slice(&total.wrapping_mul(8).to_be_bytes());
+    for c in tail[..end].as_chunks::<BLOCK>().0 {
+        compress(&mut state, c);
+    }
+    let mut out = Zeroizing::new([0_u8; 32]);
+    for (o, w) in out.as_chunks_mut::<4>().0.iter_mut().zip(state.iter()) {
+        *o = w.to_be_bytes();
+    }
+    out
+}
+
+/// HMAC-SHA256 of `data` under `key` (RFC 2104; a key past the block size is hashed first). HMAC
+/// accepts a key of any length, so there is no error arm. Every key-derived value — the padded key,
+/// the inner and outer pad blocks, the chaining states and the inner digest — lives in a buffer
+/// wiped on drop, and so does the answer: no key state outlives the call unwiped.
+pub(crate) fn hmac(key: &[u8], data: &[u8]) -> Zeroizing<[u8; 32]> {
+    let mut k0 = Zeroizing::new([0_u8; BLOCK]);
+    if key.len() > BLOCK {
+        k0[..32].copy_from_slice(&sha256_wiped(None, key)[..]);
+    } else {
+        k0[..key.len()].copy_from_slice(key);
+    }
+    let mut pad = Zeroizing::new([0_u8; BLOCK]);
+    for (p, k) in pad.iter_mut().zip(k0.iter()) {
+        *p = k ^ 0x36;
+    }
+    let inner = sha256_wiped(Some(&*pad), data);
+    for (p, k) in pad.iter_mut().zip(k0.iter()) {
+        *p = k ^ 0x5c;
+    }
+    sha256_wiped(Some(&*pad), &inner[..])
 }
 
 /// Derive the SigV4 signing key: HMAC chain over date -> region -> service -> "aws4_request".
@@ -56,10 +127,10 @@ pub(crate) fn signing_key(
     service: &str,
 ) -> Zeroizing<Vec<u8>> {
     let seed = Zeroizing::new(format!("{SIGNATURE_KEY_PREFIX}{secret}"));
-    let k_date = Zeroizing::new(hmac(seed.as_bytes(), datestamp.as_bytes()));
-    let k_region = Zeroizing::new(hmac(&k_date, region.as_bytes()));
-    let k_service = Zeroizing::new(hmac(&k_region, service.as_bytes()));
-    Zeroizing::new(hmac(&k_service, SIGNATURE_TERMINATION.as_bytes()))
+    let k_date = hmac(seed.as_bytes(), datestamp.as_bytes());
+    let k_region = hmac(&k_date[..], region.as_bytes());
+    let k_service = hmac(&k_region[..], service.as_bytes());
+    Zeroizing::new(hmac(&k_service[..], SIGNATURE_TERMINATION.as_bytes()).to_vec())
 }
 
 /// Wipe every value of a header list (a session token rides in one), then drop the entries
@@ -71,6 +142,21 @@ pub(crate) fn wipe(headers: &mut Vec<(String, String)>) {
     headers.clear();
 }
 
+/// Append `b` URI-encoded per SigV4: a byte of the unreserved set (`A-Z a-z 0-9 - _ . ~`), or `/`
+/// when `keep_slash`, as itself; every other byte as `%XX` (uppercase hex).
+fn push_encoded(out: &mut String, b: u8, keep_slash: bool) {
+    match b {
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+        b'/' if keep_slash => out.push('/'),
+        _ => {
+            const HEX: &[u8; 16] = b"0123456789ABCDEF";
+            out.push('%');
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+    }
+}
+
 /// SigV4 URI-encode a request path: every byte outside the unreserved set (`A-Z a-z 0-9 - _ . ~`)
 /// and `/` becomes `%XX` (uppercase hex). MOVED VERBATIM from the kernel's
 /// `egress_auth/sigv4::uri_encode_path`, the encoder the inbound check derives the canonical URI
@@ -78,17 +164,68 @@ pub(crate) fn wipe(headers: &mut Vec<(String, String)>) {
 pub fn uri_encode_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for &b in path.as_bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                out.push(b as char)
+        push_encoded(&mut out, b, true);
+    }
+    out
+}
+
+/// One query name or value in SigV4's canonical form: its `%XX` escapes decoded once (a `%` that
+/// does not open two hex digits is a literal `%`), then every byte URI-encoded over the unreserved
+/// set with uppercase hex. Idempotent over the canonical form.
+fn canonical_query_component(raw: &str) -> String {
+    let b = raw.as_bytes();
+    let hex = |c: u8| (c as char).to_digit(16);
+    let mut out = String::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let escaped = if b[i] == b'%' && i + 2 < b.len() {
+            hex(b[i + 1])
+                .zip(hex(b[i + 2]))
+                .map(|(high, low)| ((high << 4) | low) as u8)
+        } else {
+            None
+        };
+        match escaped {
+            Some(byte) => {
+                push_encoded(&mut out, byte, false);
+                i += 3;
             }
-            _ => {
-                const HEX: &[u8; 16] = b"0123456789ABCDEF";
-                out.push('%');
-                out.push(HEX[(b >> 4) as usize] as char);
-                out.push(HEX[(b & 0x0f) as usize] as char);
+            None => {
+                push_encoded(&mut out, b[i], false);
+                i += 1;
             }
         }
+    }
+    out
+}
+
+/// The CANONICAL QUERY STRING an outbound request is signed over, from the query as it will be
+/// sent (without `?`): each `name=value` pair (a bare name has the empty value) with its name and
+/// value in canonical form ([`canonical_query_component`]), sorted by name then value, joined with
+/// `&`; `""` for none. The server recomputes it from what it receives the same way, so a reserved
+/// byte sent raw (`:`, `/`), a lowercase escape or an escaped unreserved byte signs as AWS checks
+/// it. (The inbound check keeps its own builder: a client's query is already canonical there.)
+pub fn canonical_query(query: Option<&str>) -> String {
+    let Some(q) = query.filter(|q| !q.is_empty()) else {
+        return String::new();
+    };
+    let mut pairs: Vec<(String, String)> = q
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .map(|pair| {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            (canonical_query_component(k), canonical_query_component(v))
+        })
+        .collect();
+    pairs.sort();
+    let mut out = String::with_capacity(q.len() + pairs.len());
+    for (i, (k, v)) in pairs.iter().enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        out.push_str(k);
+        out.push('=');
+        out.push_str(v);
     }
     out
 }
@@ -257,7 +394,7 @@ pub fn sign_v4_with_key(
         "{SIGV4_ALGORITHM}\n{amzdate}\n{scope}\n{}",
         sha256_hex(canonical_request.as_bytes())
     );
-    let signature = hex::encode(hmac(key, string_to_sign.as_bytes()));
+    let signature = hex::encode(&hmac(key, string_to_sign.as_bytes())[..]);
     (signature, signed_headers)
 }
 

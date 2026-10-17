@@ -53,7 +53,7 @@ fn long_secret() -> String {
     "L".repeat(300)
 }
 
-/// The fake host's state, behind `HostCtx`: whether a fresh handle pends once, and every read
+/// The fake host's state, behind `HostCtx` (its handle is the state's address): whether a fresh handle pends once, and every read
 /// (seq, kind, id) it served.
 #[derive(Default)]
 struct FakeHost {
@@ -75,7 +75,9 @@ extern "C" fn fake_records_secret(
     // SAFETY: the fake's own context, and the plugin's `RecordsSecretIn` / `ServiceOut`.
     let (host, i, out) = unsafe {
         (
-            &*(ctx.handle as usize as *const FakeHost),
+            &*std::ptr::with_exposed_provenance::<FakeHost>(
+                usize::try_from(ctx.handle).expect("the fake's handle is an address"),
+            ),
             input.cast::<RecordsSecretIn>().read_unaligned(),
             &mut *out,
         )
@@ -162,9 +164,10 @@ fn open_with(host: FakeHost, records_secret: bool, tables: bool) -> Opened {
     let t = Box::new(HostTables {
         size: size_of::<HostTables>() as u32,
         _reserved: 0,
-        // The fake host's address rides in the opaque handle: only this fake reads it back.
+        // The fake's handle is its state's address: the host side here is this test's own.
         ctx: HostCtx {
-            handle: std::ptr::from_ref(&*host) as usize as u64,
+            handle: u64::try_from(std::ptr::from_ref(&*host).expose_provenance())
+                .expect("an address fits a handle"),
         },
         wake: None,
         conns: std::ptr::null(),

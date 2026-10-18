@@ -494,6 +494,12 @@ impl Request<'_> {
 /// The kernel's `has_sigv4_authorization`: the FIRST `authorization` line, read as visible ASCII,
 /// trimmed at the start, opens with the algorithm token. Everything else (bearer, no Authorization)
 /// is not this plugin's credential.
+/// Whether the request's credential is this plugin's: a SigV4 `authorization` line, which `verify`
+/// names for the transport to strip whatever its verdict.
+pub(crate) fn carries_sigv4(req: &Request<'_>) -> bool {
+    sigv4_authorization(req).is_some()
+}
+
 fn sigv4_authorization<'r>(req: &'r Request<'_>) -> Option<&'r str> {
     req.first(AUTHORIZATION)
         .and_then(header_str)

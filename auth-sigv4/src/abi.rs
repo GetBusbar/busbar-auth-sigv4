@@ -16,8 +16,8 @@ use std::ffi::c_void;
 use std::mem::size_of;
 
 use busbar_contract::abi::auth::{
-    FieldSpan, FieldsIn, FieldsOut, IdentifyOut, VerifyIn, DECISION_CONTINUE, DECISION_STOP,
-    SPAN_ABSENT, VERDICT_REJECT,
+    FieldSpan, FieldsIn, FieldsOut, IdentifyOut, StripName, VerifyIn, DECISION_CONTINUE,
+    DECISION_STOP, SPAN_ABSENT, STRIP_FIELD, VERDICT_REJECT,
 };
 use busbar_contract::abi::host::service::{
     check_records_secret, op, HostSlots, ItemSpan, RecordsSecretIn, ServiceBufs, ServiceHead,
@@ -203,32 +203,48 @@ const ABSENT: Span = Span {
     len: 0,
 };
 
+/// The line `verify` names for the transport to strip when the request's credential is SigV4.
+const AUTHORIZATION: &[u8] = b"authorization";
+
 /// Write `verify`'s answer: `verdict` (with its default decision: STOP for a reject, CONTINUE
-/// otherwise), no strips, and for an identity its `subject`, copied into the host's identity buffer
-/// with every other identity field absent (no TTL, no replay claim, no credential). When the
-/// subject does not fit, the SHORT answer: FAILED with `needed_bytes` and nothing written.
+/// otherwise); with `strip`, the `authorization` line named for the transport to strip (THE DESIGN
+/// §6: every auth names its credential lines whatever its verdict); and for an identity its
+/// `subject`. Both are copied into the host's identity buffer (the subject first), every other
+/// identity field absent (no TTL, no replay claim, no credential). When they do not fit, the SHORT
+/// answer: FAILED with every `needed_*` at its full size and nothing written.
 pub(crate) fn write_verdict(
     input: &VerifyIn,
     out: &mut IdentifyOut,
     verdict: u32,
     subject: Option<&str>,
+    strip: bool,
 ) -> Outcome {
     out.needed_bytes = 0;
     out.needed_groups = 0;
     out.needed_strip = 0;
+    let subject_len = subject.map_or(0, str::len);
+    let strip_len = if strip { AUTHORIZATION.len() } else { 0 };
+    let needed = subject_len + strip_len;
+    let buf = input.out_buf;
+    let strips = u32::from(strip);
+    if needed > buf.buf_cap
+        || (needed > 0 && buf.buf.is_null())
+        || needed > u32::MAX as usize
+        || strips > input.strip_cap
+        || (strip && input.strip.is_null())
+    {
+        out.needed_bytes = needed as u64;
+        out.needed_strip = strips;
+        return Outcome::Failed;
+    }
     if let Some(subject) = subject {
-        let buf = input.out_buf;
-        if subject.len() > buf.buf_cap || buf.buf.is_null() || subject.len() > u32::MAX as usize {
-            out.needed_bytes = subject.len() as u64;
-            return Outcome::Failed;
-        }
-        // SAFETY: `out_buf.buf` addresses `buf_cap >= subject.len()` writable bytes for the call;
-        // `subject` is this plugin's own memory, not overlapping it.
-        unsafe { std::ptr::copy_nonoverlapping(subject.as_ptr(), buf.buf, subject.len()) };
+        // SAFETY: `out_buf.buf` addresses `buf_cap >= subject_len + strip_len` writable bytes for
+        // the call; `subject` is this plugin's own memory, not overlapping it.
+        unsafe { std::ptr::copy_nonoverlapping(subject.as_ptr(), buf.buf, subject_len) };
         let id = &mut out.identity;
         id.subject = Span {
             offset: 0,
-            len: subject.len() as u32,
+            len: subject_len as u32,
         };
         (id.key_id, id.key_name, id.user, id.provider, id.name) =
             (ABSENT, ABSENT, ABSENT, ABSENT, ABSENT);
@@ -236,12 +252,31 @@ pub(crate) fn write_verdict(
         (id.flags, id.ttl_secs, id.groups_len) = (0, 0, 0);
         (id.replay_key, id.replay_ttl_secs, id.credential) = (ABSENT, 0, ABSENT);
     }
+    if strip {
+        // SAFETY: as above, the bytes after the subject are the host's and within `buf_cap`; the
+        // strip array addresses `strip_cap >= 1` writable entries for the call.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                AUTHORIZATION.as_ptr(),
+                buf.buf.add(subject_len),
+                strip_len,
+            );
+            input.strip.write_unaligned(StripName {
+                name: Span {
+                    offset: subject_len as u32,
+                    len: strip_len as u32,
+                },
+                place: STRIP_FIELD,
+                _reserved: 0,
+            });
+        }
+    }
     out.decision = if verdict == VERDICT_REJECT {
         DECISION_STOP
     } else {
         DECISION_CONTINUE
     };
-    out.strip_len = 0;
+    out.strip_len = strips;
     out.verdict = verdict;
     Outcome::Ready
 }

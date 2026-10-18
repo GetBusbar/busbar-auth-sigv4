@@ -568,7 +568,11 @@ fn a_short_identity_buffer_answers_short_and_the_recall_is_served_from_it() {
     let req = signed(SECRET, AKID, b"");
     let short = verify(&o, &req, TICKET, 0, 4);
     assert_eq!(short.outcome, Outcome::Failed);
-    assert_eq!(short.out.needed_bytes, AKID.len() as u64);
+    assert_eq!(
+        short.out.needed_bytes,
+        (AKID.len() + "authorization".len()) as u64,
+        "the subject and the named line"
+    );
     let again = verify(&o, &req, TICKET, 0, 256);
     assert_eq!(again.subject.as_deref(), Some(AKID));
     assert_eq!(reads(&o).len(), 1, "the re-call never repeats the work");

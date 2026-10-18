@@ -11,9 +11,10 @@
 //!
 //! * `open_outbound` binds the style to its credential and settings and answers a handle
 //!   (generation data). It never touches the network.
-//! * `fields` is the ONE per-request call the kernel makes (BUSBAR-1.6.0.md §6.4, §11.6): the request is signed
-//!   for this attempt, the fields written into the host's buffer, which join the head before the
-//!   framer encodes it. It serves BOTH credential modes `sigv4` declares
+//! * `fields` is the call the binding's transport makes through the host auth handle at the
+//!   style's `HeadBody` point (THE DESIGN §6, "Auth points and guest lists"; §11.6): the request is
+//!   signed for this attempt, the fields written into the host's buffer, which join the head before
+//!   the framer encodes it. It serves BOTH credential modes `sigv4` declares
 //!   ([`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`]): the operator's own bound
 //!   credential ([`busbar_contract::abi::auth::MODE_OWN`], the day-key-cached
 //!   [`signing::SigV4Binding`]), and the caller's verified credential passed per-request
@@ -50,7 +51,8 @@
 //!   signature check over whatever came back. Only a verified signature over a LIVE credential
 //!   admits: an IDENTITY whose subject is the AccessKeyId (the kernel resolves the governance key
 //!   from the credential kind and the subject), no TTL (never cached: the kernel never cached a
-//!   SigV4 verdict), no replay claim, no credential, no strips. Every failure is the one REJECT,
+//!   SigV4 verdict), no replay claim, no credential. Whatever the verdict, a SigV4 `authorization`
+//!   line is named for the transport to strip (THE DESIGN §6). Every failure is the one REJECT,
 //!   the kernel's one opaque 401.
 //!
 //! The login pair is not served and answers REFUSED (the tail does not declare `CAP_LOGIN`).
@@ -466,18 +468,22 @@ impl Slot for Verify {
         // THE SHORT-BUFFER RE-CALL: a fresh call on a ticket whose identity did not fit is served
         // from the identity reached, never by repeating the work.
         // (A fresh call finding a stale PENDING handle drops it: it issues its own.)
+        let request = abi::request(input);
+        // THE CREDENTIAL LINE, named whatever the verdict (THE DESIGN §6, "Auth points and guest
+        // lists"): a SigV4 `authorization` line is this plugin's, and the plane never sees it.
+        let strip = inbound::carries_sigv4(&request);
         if !ticket.is_none() && !resume {
             if let Some(Held::Reached(subject)) = s.take(ticket) {
-                return abi::write_verdict(input, out, VERDICT_IDENTITY, Some(&subject));
+                return abi::write_verdict(input, out, VERDICT_IDENTITY, Some(&subject), strip);
             }
         }
-        let request = abi::request(input);
         let mut source = HostSecret { s, ticket, resume };
         match inbound::judge(&request, &mut source) {
-            Judgement::Pass => abi::write_verdict(input, out, VERDICT_PASS, None),
-            Judgement::Reject => abi::write_verdict(input, out, VERDICT_REJECT, None),
+            Judgement::Pass => abi::write_verdict(input, out, VERDICT_PASS, None, strip),
+            Judgement::Reject => abi::write_verdict(input, out, VERDICT_REJECT, None, strip),
             Judgement::Identity(subject) => {
-                let outcome = abi::write_verdict(input, out, VERDICT_IDENTITY, Some(&subject));
+                let outcome =
+                    abi::write_verdict(input, out, VERDICT_IDENTITY, Some(&subject), strip);
                 if outcome == Outcome::Failed && !ticket.is_none() {
                     s.hold(ticket, Held::Reached(subject));
                 }

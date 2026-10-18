@@ -25,17 +25,14 @@ crate-type = ["rlib"]
 dropped-in = []
 
 # DEPENDENCY POLICY. A plugin's closure is `busbar-contract` plus the third-party crates it needs to
-# do its job (owner ruling 2026-09-28, PLUGIN LIBRARIES): the SigV4 HMAC chain (`hmac`, `sha2`,
-# `hex`), and zeroisation of derived key material (`zeroize`). No kernel crate, no plane, no sibling
-# auth-kind plugin.
+# do its job (owner ruling 2026-09-28, PLUGIN LIBRARIES): the SigV4 HMAC chain (`hex`; SHA-256's
+# compression is this crate's own, in wiped buffers), and zeroisation of derived key material
+# (`zeroize`). No kernel crate, no plane, no sibling auth-kind plugin.
 # Every version is the workspace table's (busbar's at the pin).
 [dependencies]
 busbar-contract = { workspace = true }
 hex = { workspace = true }
 ring = { workspace = true }
-# The keyed HMAC's compression function: its pad and chaining states are held in this crate's own
-# wiped buffers (`sigv4::hmac`). Already in every plugin's closure through busbar-contract.
-sha2 = { workspace = true, features = ["compress"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 zeroize = { workspace = true }

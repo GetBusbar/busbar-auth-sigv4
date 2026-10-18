@@ -239,3 +239,47 @@ fn canonical_query_encodes_each_name_and_value() {
         "a name is encoded too"
     );
 }
+
+/// THE HAND-WRITTEN COMPRESSION IS SHA-256: every message length across the one- and two-block
+/// padding boundaries, with and without a whole prefix block, digests as ring's SHA-256 does.
+#[test]
+fn the_wiped_sha256_matches_ring_at_every_padding_boundary() {
+    let data: Vec<u8> = (0..=200_u8)
+        .map(|b| b.wrapping_mul(31).wrapping_add(7))
+        .collect();
+    let prefix = [0x5a_u8; BLOCK];
+    for n in 0..=data.len() {
+        let msg = &data[..n];
+        assert_eq!(
+            sha256_wiped(None, msg)[..],
+            *ring::digest::digest(&ring::digest::SHA256, msg).as_ref(),
+            "length {n}"
+        );
+        let mut whole = prefix.to_vec();
+        whole.extend_from_slice(msg);
+        assert_eq!(
+            sha256_wiped(Some(&prefix), msg)[..],
+            *ring::digest::digest(&ring::digest::SHA256, &whole).as_ref(),
+            "prefix + length {n}"
+        );
+    }
+}
+
+/// RFC 4231's HMAC-SHA-256 vectors: a short key (case 1) and a key past the block size, hashed
+/// first (case 6).
+#[test]
+fn the_hmac_answers_rfc_4231() {
+    assert_eq!(
+        hex::encode(&hmac(&[0x0b; 20], b"Hi There")[..]),
+        "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+    );
+    assert_eq!(
+        hex::encode(
+            &hmac(
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            )[..]
+        ),
+        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+    );
+}

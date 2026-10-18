@@ -275,6 +275,13 @@ struct Answer {
     outcome: Outcome,
     out: IdentifyOut,
     subject: Option<String>,
+    /// The strip names the answer wrote, as text.
+    strips: Vec<String>,
+}
+
+/// The lines `a` named for the transport to strip (all fields).
+fn strip_names(a: &Answer) -> Vec<String> {
+    a.strips.clone()
 }
 
 /// `verify` on `ticket` with `flags`, at `HeadBody`, over `req`, into buffers of `cap` bytes; the
@@ -330,10 +337,21 @@ fn verify(o: &Opened, req: &Req, ticket: Ticket, flags: u32, cap: usize) -> Answ
         String::from_utf8_lossy(&bufs.bytes[s.offset as usize..(s.offset + s.len) as usize])
             .into_owned()
     });
+    let strips = strips
+        .iter()
+        .map(|n| {
+            assert_eq!(n.place, busbar_contract::abi::auth::STRIP_FIELD);
+            String::from_utf8_lossy(
+                &bufs.bytes[n.name.offset as usize..(n.name.offset + n.name.len) as usize],
+            )
+            .into_owned()
+        })
+        .collect();
     Answer {
         outcome,
         out,
         subject,
+        strips,
     }
 }
 
@@ -401,10 +419,9 @@ fn a_signed_request_over_the_live_credential_identifies_its_access_key_id() {
     assert_eq!(a.out.verdict, VERDICT_IDENTITY);
     assert_eq!(a.subject.as_deref(), Some(AKID));
     assert_eq!(a.out.decision, DECISION_CONTINUE);
-    assert_eq!(
-        a.out.strip_len, 0,
-        "no strips: the kernel path never stripped"
-    );
+    // THE CREDENTIAL LINE IS NAMED (THE DESIGN §6, "Auth points and guest lists": every auth
+    // called names its credential lines whatever its verdict): the SigV4 `authorization` line.
+    assert_eq!(strip_names(&a), ["authorization"]);
     let id = a.out.identity;
     assert_eq!((id.flags, id.ttl_secs), (0, 0), "no TTL: never cached");
     assert_eq!(id.replay_key.offset, SPAN_ABSENT, "no replay claim");
@@ -430,6 +447,10 @@ fn a_bearer_authorization_passes_without_a_read() {
     let a = verify(&o, &req, TICKET, 0, 256);
     assert_eq!((a.outcome, a.out.verdict), (Outcome::Ready, VERDICT_PASS));
     assert_eq!(a.out.decision, DECISION_CONTINUE);
+    assert!(
+        strip_names(&a).is_empty(),
+        "a Bearer line is not this auth's credential"
+    );
     // On the spot (ticket-less) too.
     let a = verify(&o, &req, Ticket::NONE, 0, 256);
     assert_eq!((a.outcome, a.out.verdict), (Outcome::Ready, VERDICT_PASS));
@@ -464,6 +485,11 @@ fn a_wrong_signature_or_a_tampered_body_is_rejected() {
     let o = open();
     let a = verify(&o, &signed("not-the-secret", AKID, b""), TICKET, 0, 256);
     assert_eq!(a.out.verdict, VERDICT_REJECT);
+    assert_eq!(
+        strip_names(&a),
+        ["authorization"],
+        "named whatever the verdict"
+    );
     let mut req = signed(SECRET, AKID, b"{\"x\":1}");
     req.body = b"{\"x\":2}".to_vec();
     let a = verify(&o, &req, TICKET, 0, 256);

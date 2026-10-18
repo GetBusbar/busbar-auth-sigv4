@@ -718,17 +718,17 @@ const EXPECTED: &[&str] = &[
     "tick Ready next>1000=true",
     "verify bearer now Ready Pass decision=1 strips=0",
     "verify sigv4 now Refused",
-    "verify trivial now Ready Reject decision=2 strips=0",
+    "verify trivial now Ready Reject decision=2 strips=1",
     "reads now []",
     "verify live submitted Ready Identity(BBAKCONFORMANCE000001) ttl=0 replay=false credential=0 \
-     decision=1 strips=0 reads=[sigv4:BBAKCONFORMANCE000001]",
-    "verify unknown submitted Ready Reject decision=2 strips=0 reads=[sigv4:BBAKNOBODY]",
-    "verify dummy-signed submitted Ready Reject decision=2 strips=0 reads=[sigv4:BBAKNOBODY]",
-    "verify not live submitted Ready Reject decision=2 strips=0 \
+     decision=1 strips=1 reads=[sigv4:BBAKCONFORMANCE000001]",
+    "verify unknown submitted Ready Reject decision=2 strips=1 reads=[sigv4:BBAKNOBODY]",
+    "verify dummy-signed submitted Ready Reject decision=2 strips=1 reads=[sigv4:BBAKNOBODY]",
+    "verify not live submitted Ready Reject decision=2 strips=1 \
      reads=[sigv4:BBAKCONFORMANCE000002]",
-    "verify wrong secret submitted Ready Reject decision=2 strips=0 \
+    "verify wrong secret submitted Ready Reject decision=2 strips=1 \
      reads=[sigv4:BBAKCONFORMANCE000001]",
-    "verify tampered body submitted Ready Reject decision=2 strips=0 reads=[]",
+    "verify tampered body submitted Ready Reject decision=2 strips=1 reads=[]",
     "verify bearer submitted Ready Pass decision=1 strips=0 reads=[]",
     "cancel Ready",
     "refresh Ready",

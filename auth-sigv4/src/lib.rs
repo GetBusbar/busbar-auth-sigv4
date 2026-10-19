@@ -581,7 +581,9 @@ fn sign_facts<'a>(input: &'a FieldsIn, hash: &'a str) -> Option<SignFacts<'a>> {
         host: text(&input.request.authority)?,
         path: text(&input.request.canonical_path)?,
         query: text(&input.request.query).filter(|q| !q.is_empty()),
-        content_type: abi::sent_header(input, "content-type"),
+        // RED ARM: a style that lets the length line into what it signs.
+        content_type: abi::sent_header(input, "content-length")
+            .or_else(|| abi::sent_header(input, "content-type")),
         payload_hash: hash,
         timestamp_epoch: input.request.timestamp,
     })

@@ -391,3 +391,88 @@ fn fields_signs_an_already_canonical_query_unchanged() {
         )
     );
 }
+
+/// THE 1.5.5 SIGNATURE, WHATEVER ELSE THE HEAD CARRIES (busbar Q128 transport-http, §6 step 5,
+/// OWNER-LOCKED: the transport's own lines, `host` and the default `accept: */*`, join the head
+/// BEFORE the auth runs, so the auth sees the exact head that is sent). Seeing a line is not signing
+/// it: this style signs 1.5.5's set (v1.5.5 `proto/bedrock/writer.rs`: the sent content type, the
+/// host, `x-amz-content-sha256`, `x-amz-date`), so a head that also carries `host` and `accept`
+/// signs to the same bytes. The vector is 1.5.5's algorithm (v1.5.5 `sigv4.rs::sign_v4`) computed
+/// outside this crate: canonical request
+/// `POST\n/model/m/converse\n\ncontent-type:application/json\nhost:runtime.signer.example\n
+/// x-amz-content-sha256:5e4c…e30a\nx-amz-date:20150830T123600Z\n\n
+/// content-type;host;x-amz-content-sha256;x-amz-date\n5e4c…e30a`.
+#[test]
+fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
+    use busbar_contract::abi::auth::NamedValue;
+    use busbar_contract::abi::mechanism::call::AbiStr;
+    const VECTOR: &str = "AWS4-HMAC-SHA256 \
+        Credential=AKIDEXAMPLE/20150830/us-east-1/svc/aws4_request, \
+        SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, \
+        Signature=758de1b14d97b1d58b6307ff4c2924f7bdb3cbe3773ed02f7329925faee62472";
+    let s = SigV4::new(1, None);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    let body: &[u8] = br#"{"messages":[]}"#;
+    let at = |t: &'static str| AbiStr {
+        ptr: t.as_ptr(),
+        len: t.len(),
+    };
+    let line = |name: &'static str, value: &'static str| NamedValue {
+        name: at(name),
+        value: Blob {
+            ptr: value.as_ptr(),
+            len: value.len(),
+            fmt: BLOB_OCTETS,
+            flags: 0,
+        },
+    };
+    let sign = |head: &[NamedValue]| {
+        let mut buf = [0_u8; 1024];
+        let mut spans = [FieldSpan {
+            name: auth_span(),
+            value: auth_span(),
+            flags: 0,
+            _reserved: 0,
+        }; 8];
+        let mut i: FieldsIn = crate::abi::zeroed_in();
+        i.handle = handle;
+        i.mode = MODE_OWN;
+        i.request.method = at("POST");
+        i.request.authority = at("runtime.signer.example");
+        i.request.canonical_path = at("/model/m/converse");
+        i.request.timestamp = 1_440_938_160;
+        i.body = Blob {
+            ptr: body.as_ptr(),
+            len: body.len(),
+            fmt: BLOB_OCTETS,
+            flags: 0,
+        };
+        (i.headers, i.headers_len) = (head.as_ptr(), head.len());
+        (i.field_buf, i.field_buf_cap) = (buf.as_mut_ptr(), buf.len());
+        (i.fields, i.fields_cap) = (spans.as_mut_ptr(), 8);
+        let mut out: FieldsOut = crate::abi::zeroed_out();
+        let inst = std::ptr::from_ref(&s).cast_mut().cast::<c_void>();
+        assert_eq!(Fields::call(inst, &i, &mut out), Outcome::Ready);
+        let text = |sp: busbar_contract::abi::mechanism::call::Span| {
+            String::from_utf8_lossy(&buf[sp.offset as usize..(sp.offset + sp.len) as usize])
+                .into_owned()
+        };
+        (0..out.fields_len as usize)
+            .map(|k| spans[k])
+            .find(|f| text(f.name) == "authorization")
+            .map(|f| text(f.value))
+            .expect("an authorization is set")
+    };
+    let plane_only = [line("content-type", "application/json")];
+    let completed = [
+        line("content-type", "application/json"),
+        line("host", "runtime.signer.example"),
+        line("accept", "*/*"),
+    ];
+    assert_eq!(sign(&plane_only), VECTOR, "1.5.5's signature");
+    assert_eq!(
+        sign(&completed),
+        VECTOR,
+        "the transport's host and accept lines leave the signature 1.5.5's"
+    );
+}

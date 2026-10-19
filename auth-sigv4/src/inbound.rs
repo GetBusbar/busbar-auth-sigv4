@@ -653,6 +653,8 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
         Ok(s) => (s, true),
         Err(_) => (DUMMY_SECRET, false),
     };
+    #[cfg(test)]
+    VERIFIED_OVER.with(|v| *v.borrow_mut() = Some(text.to_owned()));
     let verified = verify_inbound_sigv4(&parsed, &inbound, text, req.now).is_ok();
     // Admission: the signature verified AND the host called the credential live (its key enabled,
     // not revoked, the credential neither revoked nor expired). Any one failing rejects alike.
@@ -661,6 +663,14 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
     } else {
         Judgement::Reject
     }
+}
+
+/// The secret the last [`judge`] on this thread ran its verification over: a test reads that a
+/// credential the host answered not live is verified in full over this plugin's own dummy.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static VERIFIED_OVER: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]

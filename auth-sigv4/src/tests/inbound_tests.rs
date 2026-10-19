@@ -688,8 +688,9 @@ impl SecretSource for Fake {
                     .unwrap_or_else(|| SECRET.as_bytes().to_vec()),
                 true,
             ),
-            DEAD_AKID => (DEAD_SECRET.as_bytes().to_vec(), false),
-            _ => (DUMMY_SECRET.as_bytes().to_vec(), false),
+            // The host answers an EMPTY secret, not live, for a credential it does not hold or
+            // does not call live (busbar Q128 auth-gate p10#2: the host's dummy secret is gone).
+            _ => (Vec::new(), false),
         };
         Read::Secret {
             secret: Zeroizing::new(secret),
@@ -1087,14 +1088,47 @@ fn a_duplicate_signed_header_is_comma_joined_in_request_order() {
     );
 }
 
-/// The fake's bookkeeping is itself what the other tests lean on: any id it does not hold answers
-/// the dummy secret, not live.
+/// The fake's bookkeeping is itself what the other tests lean on: any id it does not hold, and a
+/// credential that is not live, answers an EMPTY secret, not live, as the host does.
 #[test]
-fn the_fake_source_answers_the_dummy_for_any_other_id() {
+fn the_fake_source_answers_empty_not_live_for_any_other_id() {
     let mut fake = Fake::default();
-    let Read::Secret { secret, live } = fake.read("sigv4", "nobody") else {
-        panic!("a secret");
-    };
-    assert_eq!(&secret[..], DUMMY_SECRET.as_bytes());
-    assert!(!live);
+    for id in ["nobody", DEAD_AKID] {
+        let Read::Secret { secret, live } = fake.read("sigv4", id) else {
+            panic!("a secret");
+        };
+        assert!(secret.is_empty(), "{id}");
+        assert!(!live, "{id}");
+    }
+}
+
+/// A NOT-LIVE ANSWER COSTS WHAT A BAD SIGNATURE COSTS (busbar Q128 auth-gate p10#2): the host
+/// answers an empty secret, not live, for an unknown or not-live credential, so this plugin swaps
+/// in its OWN fixed dummy secret and runs the full verification over it before it refuses; the
+/// refusal is the one REJECT a bad signature gets (1.5.5 PB-101). RED before the fix: the
+/// verification ran over the host's empty answer.
+#[test]
+fn a_not_live_answer_is_verified_in_full_over_the_plugins_own_dummy_secret() {
+    for (secret, akid) in [(SECRET, "BBAKUNKNOWN000000000"), (DEAD_SECRET, DEAD_AKID)] {
+        let s = sign(secret, akid, None, b"", None);
+        crate::inbound::VERIFIED_OVER.with(|v| *v.borrow_mut() = None);
+        assert_eq!(
+            run(&s.lines, None, Some(b""), &mut Fake::default()),
+            Judgement::Reject,
+            "{akid}"
+        );
+        assert_eq!(
+            crate::inbound::VERIFIED_OVER
+                .with(|v| v.borrow().clone())
+                .as_deref(),
+            Some(DUMMY_SECRET),
+            "{akid}: the full verification ran over the plugin's own dummy"
+        );
+    }
+    // A request signed with the EMPTY secret the host answered never admits either.
+    let s = sign("", "BBAKUNKNOWN000000000", None, b"", None);
+    assert_eq!(
+        run(&s.lines, None, Some(b""), &mut Fake::default()),
+        Judgement::Reject
+    );
 }

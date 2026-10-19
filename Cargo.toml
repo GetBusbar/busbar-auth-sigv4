@@ -29,8 +29,8 @@ publish = false
 repository = "https://github.com/GetBusbar/busbar-auth-sigv4"
 
 [workspace.dependencies]
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "e7b9f08ea145435f9895667d5fb7a2c047f9118d" }
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "e7b9f08ea145435f9895667d5fb7a2c047f9118d" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "900405bbc1eb9eee3fc5d4823ac21596890751e1" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "900405bbc1eb9eee3fc5d4823ac21596890751e1" }
 # busbar's root [workspace.dependencies], third-party rows, at 565f24f25e42370f3f8b5d8b2d91d56950eb4866
 arc-swap = "1"
 async-trait = "0.1"

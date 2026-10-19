@@ -47,8 +47,8 @@
 //! * otherwise the kernel's check, in its order: the signed-header prefilter, `UNSIGNED-PAYLOAD`
 //!   refused, the body's hash against the signed `x-amz-content-sha256` (constant time), then the
 //!   secret read through the host's `records.secret` (kind `sigv4`, id the AccessKeyId; an unknown
-//!   id answers the host's fixed dummy secret, not live, in equal time) and the full constant-time
-//!   signature check over whatever came back. Only a verified signature over a LIVE credential
+//!   id answers an EMPTY secret, not live, in equal time) and the full constant-time signature
+//!   check, over the plugin's own fixed dummy secret for any answer that is not live. Only a verified signature over a LIVE credential
 //!   admits: an IDENTITY whose subject is the AccessKeyId (the kernel resolves the governance key
 //!   from the credential kind and the subject), no TTL (never cached: the kernel never cached a
 //!   SigV4 verdict), no replay claim, no credential. Whatever the verdict, a SigV4 `authorization`

@@ -20,9 +20,10 @@
 //!
 //! What changed is only WHERE THE SECRET COMES FROM: the kernel looked the AccessKeyId up in its
 //! governance store; this check reads it through the host's `records.secret` service
-//! ([`SecretSource`]), which answers a fixed dummy secret, not live, for an id it does not hold, in
-//! the time it answers a known one. The full constant-time verification ALWAYS runs over whatever
-//! secret came back, and only (signature verified AND live) admits: an unknown id, a disabled or
+//! ([`SecretSource`]), which answers an EMPTY secret, not live, for an id it does not hold or does
+//! not call live, in the time it answers a known one. The full constant-time verification ALWAYS
+//! runs, over the secret for a live credential and over this plugin's own fixed dummy secret
+//! otherwise, and only (signature verified AND live) admits: an unknown id, a disabled or
 //! revoked key and a bad signature reject alike.
 //!
 //! EVERY FAILURE IS ONE ANSWER ([`Judgement::Reject`]): the kernel maps it to its one opaque 401.
@@ -49,8 +50,10 @@ pub const CREDENTIAL_KIND: &str = "sigv4";
 /// The AWS sentinel for "I did not hash my body": refused for governed ingress.
 const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
 
-/// The secret a NON-UTF-8 host answer is verified against (never admitted): the kernel's
-/// `auth::DUMMY_SECRET`, the same bytes the host answers for an unknown id, so the work matches.
+/// THIS PLUGIN'S OWN fixed dummy secret: what the full verification runs over, never admitted, when
+/// the host's answer is not live (its EMPTY answer for an unknown, disabled, revoked or expired
+/// credential) or is not UTF-8, so a reject does the work a bad signature does. The bytes are
+/// 1.5.5's kernel `auth::DUMMY_SECRET`.
 const DUMMY_SECRET: &str = "AWS4-DUMMY-SECRET-FOR-CONSTANT-TIME-REJECT-PATH";
 
 /// Canonicalize a signed-header value per AWS SigV4: trim leading/trailing ASCII spaces (0x20) and
@@ -509,7 +512,7 @@ fn sigv4_authorization<'r>(req: &'r Request<'_>) -> Option<&'r str> {
 /// What the host's `records.secret` answered for one credential.
 pub enum Read {
     /// The secret (span `0`'s bytes, wiped on drop), and whether the credential is live. For an id
-    /// the host does not hold, its fixed dummy secret, not live.
+    /// the host does not hold or does not call live, EMPTY, not live.
     Secret {
         /// The secret's bytes.
         secret: Zeroizing<Vec<u8>>,
@@ -640,25 +643,26 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
         amzdate: &amzdate,
     };
 
-    // THE SECRET, from the host. An UNKNOWN AccessKeyId does NOT short-circuit: the host answers its
-    // fixed dummy secret (not live) in equal time, and the full constant-time verification runs over
-    // whatever came back.
+    // THE SECRET, from the host. An UNKNOWN AccessKeyId does NOT short-circuit: the host answers an
+    // EMPTY secret, not live, in equal time, and the full constant-time verification still runs.
     let (secret, live) = match source.read(CREDENTIAL_KIND, &parsed.access_key_id) {
         Read::Secret { secret, live } => (secret, live),
         Read::Pending => return Judgement::Pending,
         Read::NotNow => return Judgement::NotNow,
         Read::Unavailable => return Judgement::Reject,
     };
-    let (text, utf8) = match std::str::from_utf8(&secret) {
-        Ok(s) => (s, true),
-        Err(_) => (DUMMY_SECRET, false),
-    };
+    // A credential the host calls live, as UTF-8, is verified over its own secret; any other answer
+    // (the host's EMPTY not-live answer for an unknown, disabled, revoked or expired credential, or
+    // bytes that are not UTF-8) over this plugin's OWN fixed dummy secret, in full, so a reject
+    // costs exactly what a bad signature costs and is the same one REJECT (1.5.5 PB-101).
+    let real = std::str::from_utf8(&secret).ok().filter(|_| live);
+    let text = real.unwrap_or(DUMMY_SECRET);
     #[cfg(test)]
     VERIFIED_OVER.with(|v| *v.borrow_mut() = Some(text.to_owned()));
     let verified = verify_inbound_sigv4(&parsed, &inbound, text, req.now).is_ok();
     // Admission: the signature verified AND the host called the credential live (its key enabled,
     // not revoked, the credential neither revoked nor expired). Any one failing rejects alike.
-    if std::hint::black_box(u8::from(verified) & u8::from(live) & u8::from(utf8)) == 1 {
+    if std::hint::black_box(u8::from(verified) & u8::from(real.is_some())) == 1 {
         Judgement::Identity(parsed.access_key_id)
     } else {
         Judgement::Reject

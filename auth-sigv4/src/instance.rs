@@ -52,6 +52,7 @@ impl EnvStore {
             AbiStr {
                 ptr: std::ptr::null(),
                 len: 0,
+                ..AbiStr::ZERO
             },
             |t| abi(t),
         );
@@ -60,6 +61,7 @@ impl EnvStore {
             severity,
             _reserved: [0; 3],
             text: t,
+            ..Diag::ZERO
         });
     }
 

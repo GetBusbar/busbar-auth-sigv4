@@ -50,6 +50,7 @@ const PATH: &str = "/model/vendor.model/converse";
 const TICKET: Ticket = Ticket {
     slot: 7,
     generation: 3,
+    ..Ticket::ZERO
 };
 
 fn long_secret() -> String {
@@ -121,11 +122,14 @@ extern "C" fn fake_records_secret(
             key: Span {
                 offset: SPAN_ABSENT,
                 len: 0,
+                ..Span::ZERO
             },
             value: Span {
                 offset: 0,
                 len: secret.len() as u32,
+                ..Span::ZERO
             },
+            ..ItemSpan::ZERO
         });
     }
     out.value = live;
@@ -243,6 +247,7 @@ fn abi_str(s: &str) -> AbiStr {
     AbiStr {
         ptr: s.as_ptr(),
         len: s.len(),
+        ..AbiStr::ZERO
     }
 }
 
@@ -257,10 +262,21 @@ impl Bufs {
     fn new(cap: usize) -> Self {
         Self {
             bytes: vec![0; cap],
-            groups: vec![Span { offset: 0, len: 0 }; 4],
+            groups: vec![
+                Span {
+                    offset: 0,
+                    len: 0,
+                    ..Span::ZERO
+                };
+                4
+            ],
             strips: vec![
                 StripName {
-                    name: Span { offset: 0, len: 0 },
+                    name: Span {
+                        offset: 0,
+                        len: 0,
+                        ..Span::ZERO
+                    },
                     place: 0,
                     _reserved: 0,
                 };
@@ -297,6 +313,7 @@ fn verify(o: &Opened, req: &Req, ticket: Ticket, flags: u32, cap: usize) -> Answ
                 len: v.len(),
                 fmt: BLOB_OCTETS,
                 flags: 0,
+                ..Blob::ZERO
             },
         })
         .collect();
@@ -316,6 +333,7 @@ fn verify(o: &Opened, req: &Req, ticket: Ticket, flags: u32, cap: usize) -> Answ
         len: req.body.len(),
         fmt: BLOB_OCTETS,
         flags: 0,
+        ..Blob::ZERO
     };
     i.out_buf = IdentityBuf {
         buf: bufs.bytes.as_mut_ptr(),
@@ -537,6 +555,7 @@ fn a_pending_read_pends_and_the_resumed_call_reissues_the_same_handle() {
     let ticket = Ticket {
         slot: 8,
         generation: 1,
+        ..Ticket::ZERO
     };
     assert_eq!(verify(&o, &req, ticket, 0, 256).outcome, Outcome::Pending);
     assert_eq!(reads(&o).last().unwrap().0, 1);

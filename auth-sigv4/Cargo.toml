@@ -11,6 +11,9 @@ description = "AWS SigV4 as one auth-kind plugin on the auth kind's memory ABI: 
 # MOVED from busbar (crates/busbar-auth-sigv4 at busbar bb0c7f71d4, history imported;
 # BUSBAR-1.6.0.md §9: every plugin lives in its own repo). The source is busbar's verbatim.
 
+[lints]
+workspace = true
+
 [lib]
 # rlib only: the LINKED door (`busbar_auth_sigv4::door`, the `DoorFn` a compiled-in row holds) and the
 # tests. The DROPPED door is the sibling `busbar-auth-sigv4-plugin` cdylib, the same door behind the

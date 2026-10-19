@@ -13,7 +13,11 @@ use busbar_contract::abi::sdk::door::Slot;
 use std::ffi::c_void;
 
 fn auth_span() -> busbar_contract::abi::mechanism::call::Span {
-    busbar_contract::abi::mechanism::call::Span { offset: 0, len: 0 }
+    busbar_contract::abi::mechanism::call::Span {
+        offset: 0,
+        len: 0,
+        ..busbar_contract::abi::mechanism::call::Span::ZERO
+    }
 }
 
 const SETTINGS: &str =
@@ -32,6 +36,7 @@ fn fields_noted(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bo
         value: auth_span(),
         flags: 0,
         _reserved: 0,
+        ..FieldSpan::ZERO
     }; 8];
     let mut i: FieldsIn = crate::abi::zeroed_in();
     i.handle = handle;
@@ -39,15 +44,18 @@ fn fields_noted(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bo
     i.request.authority = busbar_contract::abi::mechanism::call::AbiStr {
         ptr: "runtime.signer.example".as_ptr(),
         len: "runtime.signer.example".len(),
+        ..busbar_contract::abi::mechanism::call::AbiStr::ZERO
     };
     i.request.canonical_path = busbar_contract::abi::mechanism::call::AbiStr {
         ptr: "/model/m/converse".as_ptr(),
         len: "/model/m/converse".len(),
+        ..busbar_contract::abi::mechanism::call::AbiStr::ZERO
     };
     // The host lends the walked request's method on every call.
     i.request.method = busbar_contract::abi::mechanism::call::AbiStr {
         ptr: "POST".as_ptr(),
         len: "POST".len(),
+        ..busbar_contract::abi::mechanism::call::AbiStr::ZERO
     };
     i.request.timestamp = 1_440_938_160;
     i.caller_credential = if caller.is_empty() {
@@ -56,6 +64,7 @@ fn fields_noted(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bo
             len: 0,
             fmt: 0,
             flags: 0,
+            ..Blob::ZERO
         }
     } else {
         Blob {
@@ -63,6 +72,7 @@ fn fields_noted(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bo
             len: caller.len(),
             fmt: BLOB_OCTETS,
             flags: 0,
+            ..Blob::ZERO
         }
     };
     (i.field_buf, i.field_buf_cap) = (buf.as_mut_ptr(), buf.len());
@@ -183,6 +193,7 @@ fn authorization(s: &SigV4, handle: u64, walked: &Walked) -> String {
     let at = |t: &'static str| AbiStr {
         ptr: t.as_ptr(),
         len: t.len(),
+        ..AbiStr::ZERO
     };
     let mut buf = [0_u8; 1024];
     let mut spans = [FieldSpan {
@@ -190,6 +201,7 @@ fn authorization(s: &SigV4, handle: u64, walked: &Walked) -> String {
         value: auth_span(),
         flags: 0,
         _reserved: 0,
+        ..FieldSpan::ZERO
     }; 8];
     let headers: Vec<NamedValue> = walked
         .content_type
@@ -200,6 +212,7 @@ fn authorization(s: &SigV4, handle: u64, walked: &Walked) -> String {
                 len: ct.len(),
                 fmt: BLOB_OCTETS,
                 flags: 0,
+                ..Blob::ZERO
             },
         })
         .into_iter()
@@ -416,6 +429,7 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
     let at = |t: &'static str| AbiStr {
         ptr: t.as_ptr(),
         len: t.len(),
+        ..AbiStr::ZERO
     };
     let line = |name: &'static str, value: &'static str| NamedValue {
         name: at(name),
@@ -424,6 +438,7 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
             len: value.len(),
             fmt: BLOB_OCTETS,
             flags: 0,
+            ..Blob::ZERO
         },
     };
     let sign = |head: &[NamedValue]| {
@@ -433,6 +448,7 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
             value: auth_span(),
             flags: 0,
             _reserved: 0,
+            ..FieldSpan::ZERO
         }; 8];
         let mut i: FieldsIn = crate::abi::zeroed_in();
         i.handle = handle;
@@ -446,6 +462,7 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
             len: body.len(),
             fmt: BLOB_OCTETS,
             flags: 0,
+            ..Blob::ZERO
         };
         (i.headers, i.headers_len) = (head.as_ptr(), head.len());
         (i.field_buf, i.field_buf_cap) = (buf.as_mut_ptr(), buf.len());

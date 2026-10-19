@@ -73,6 +73,7 @@ fn s(b: &'static str) -> AbiStr {
     AbiStr {
         ptr: b.as_ptr(),
         len: b.len(),
+        ..AbiStr::ZERO
     }
 }
 
@@ -82,6 +83,7 @@ fn blob(b: &'static str, fmt: u32, flags: u32) -> Blob {
         len: b.len(),
         fmt,
         flags,
+        ..Blob::ZERO
     }
 }
 
@@ -183,6 +185,7 @@ fn facts() -> RequestFacts {
         query: AbiStr {
             ptr: std::ptr::null(),
             len: 0,
+            ..AbiStr::ZERO
         },
         timestamp: 1_440_938_160,
     }
@@ -317,11 +320,14 @@ impl busbar_contract::services::double::ServicesDouble for Creds {
                 key: Span {
                     offset: SPAN_ABSENT,
                     len: 0,
+                    ..Span::ZERO
                 },
                 value: Span {
                     offset: 0,
                     len: secret.len() as u32,
+                    ..Span::ZERO
                 },
+                ..ItemSpan::ZERO
             }],
             ..Stored::ready(live)
         })
@@ -346,10 +352,21 @@ impl Inbound {
             named: Vec::new(),
             body: body.to_vec(),
             bytes: vec![0; auth::IDENTITY_BUF_BYTES],
-            groups: vec![Span { offset: 0, len: 0 }; 8],
+            groups: vec![
+                Span {
+                    offset: 0,
+                    len: 0,
+                    ..Span::ZERO
+                };
+                8
+            ],
             strips: vec![
                 StripName {
-                    name: Span { offset: 0, len: 0 },
+                    name: Span {
+                        offset: 0,
+                        len: 0,
+                        ..Span::ZERO
+                    },
                     place: 0,
                     _reserved: 0,
                 };
@@ -363,12 +380,14 @@ impl Inbound {
                 name: AbiStr {
                     ptr: n.as_ptr(),
                     len: n.len(),
+                    ..AbiStr::ZERO
                 },
                 value: Blob {
                     ptr: v.as_ptr(),
                     len: v.len(),
                     fmt: BLOB_OCTETS,
                     flags: 0,
+                    ..Blob::ZERO
                 },
             })
             .collect();
@@ -421,6 +440,7 @@ impl Inbound {
             query: AbiStr {
                 ptr: std::ptr::null(),
                 len: 0,
+                ..AbiStr::ZERO
             },
             timestamp: NOW,
         };
@@ -430,6 +450,7 @@ impl Inbound {
             len: self.body.len(),
             fmt: BLOB_OCTETS,
             flags: 0,
+            ..Blob::ZERO
         };
         f.input.out_buf = IdentityBuf {
             buf: self.bytes.as_mut_ptr(),

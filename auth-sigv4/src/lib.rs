@@ -138,6 +138,7 @@ const STYLE_DECLS: [StyleDecl; 1] = [StyleDecl {
     name: abi_str(style::SIGV4),
     flags: STYLE_CALLER_CREDENTIAL | STYLE_NEEDS_HEADERS,
     points: POINT_HEAD_BODY,
+    ..StyleDecl::ZERO
 }];
 
 /// The credential kinds `verify` reads through the host's `records.secret`: the host-held SigV4
@@ -151,6 +152,7 @@ const TAIL: &AuthTail = &AuthTail {
     head: KindTailHead {
         size: size_of::<AuthTail>() as u32,
         _reserved: 0,
+        ..KindTailHead::ZERO
     },
     caps: CAP_OUTBOUND | CAP_INBOUND,
     facts: FACT_INBOUND_ALL_HEADERS | FACT_READS_CREDENTIALS,
@@ -161,6 +163,7 @@ const TAIL: &AuthTail = &AuthTail {
     operator_principal: abi_str(""),
     credential_kinds: CREDENTIAL_KINDS.as_ptr(),
     credential_kinds_len: CREDENTIAL_KINDS.len(),
+    ..AuthTail::ZERO
 };
 
 /// One issued-credential shape word mark of `class`.
@@ -169,6 +172,7 @@ const fn issued(class: u32, word: &'static str) -> MarkWord {
         class,
         _reserved: 0,
         word: abi_str(word),
+        ..MarkWord::ZERO
     }
 }
 
@@ -258,6 +262,7 @@ fn envelope(head: &mut OutHead, env: &EnvStore) {
             d.as_ptr()
         },
         diags_len: d.len(),
+        ..Envelope::ZERO
     };
     if !env.error.is_empty() {
         head.error = abi(&env.error);
@@ -433,6 +438,7 @@ impl SecretSource for HostSecret<'_> {
             ticket: self.ticket,
             seq,
             _reserved: 0,
+            ..CompletionHandle::ZERO
         };
         let mut sizes = (256, 1);
         // At most two crossings: the call, and the ONE re-call a short answer asks for.

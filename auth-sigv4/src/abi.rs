@@ -56,6 +56,7 @@ pub(crate) fn abi(s: &str) -> AbiStr {
     AbiStr {
         ptr: s.as_ptr(),
         len: s.len(),
+        ..AbiStr::ZERO
     }
 }
 
@@ -107,6 +108,7 @@ pub(crate) fn write_fields(
             value: value_span,
             flags,
             _reserved: 0,
+            ..FieldSpan::ZERO
         };
         // SAFETY: `fields` addresses `fields_cap >= count > i` writable spans for the call.
         unsafe { input.fields.add(i).write_unaligned(span) };
@@ -136,6 +138,7 @@ fn put(input: &FieldsIn, at: &mut usize, b: &[u8]) -> Span {
     let span = Span {
         offset: *at as u32,
         len: b.len() as u32,
+        ..Span::ZERO
     };
     // SAFETY: `write_fields` checked the whole write fits `field_buf_cap`, and `field_buf` addresses
     // that many writable bytes for the call; `b` is this plugin's own memory, not overlapping it.
@@ -201,6 +204,7 @@ pub(crate) fn request(input: &VerifyIn) -> Request<'_> {
 const ABSENT: Span = Span {
     offset: SPAN_ABSENT,
     len: 0,
+    ..Span::ZERO
 };
 
 /// The line `verify` names for the transport to strip when the request's credential is SigV4.
@@ -245,6 +249,7 @@ pub(crate) fn write_verdict(
         id.subject = Span {
             offset: 0,
             len: subject_len as u32,
+            ..Span::ZERO
         };
         (id.key_id, id.key_name, id.user, id.provider, id.name) =
             (ABSENT, ABSENT, ABSENT, ABSENT, ABSENT);
@@ -265,6 +270,7 @@ pub(crate) fn write_verdict(
                 name: Span {
                     offset: subject_len as u32,
                     len: strip_len as u32,
+                    ..Span::ZERO
                 },
                 place: STRIP_FIELD,
                 _reserved: 0,
@@ -357,6 +363,7 @@ impl Host {
             ItemSpan {
                 key: ABSENT,
                 value: ABSENT,
+                ..ItemSpan::ZERO
             };
             items
         ];
@@ -365,6 +372,7 @@ impl Host {
                 size: size_of::<RecordsSecretIn>() as u32,
                 op: op::RECORDS_SECRET,
                 handle,
+                ..ServiceHead::ZERO
             },
             kind: abi(kind),
             id: abi(id),
@@ -373,7 +381,9 @@ impl Host {
                 cap: buf.len(),
                 spans: spans.as_mut_ptr(),
                 spans_cap: spans.len(),
+                ..ServiceBufs::ZERO
             },
+            ..RecordsSecretIn::ZERO
         };
         let mut out = ServiceOut {
             size: size_of::<ServiceOut>() as u32,
@@ -387,7 +397,9 @@ impl Host {
             error: AbiStr {
                 ptr: std::ptr::null(),
                 len: 0,
+                ..AbiStr::ZERO
             },
+            ..ServiceOut::ZERO
         };
         let ret = slot(
             self.ctx,

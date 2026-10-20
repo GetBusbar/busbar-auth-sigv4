@@ -476,3 +476,105 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
         "the transport's host and accept lines leave the signature 1.5.5's"
     );
 }
+
+/// THE LENGTH LINE IS NEVER SIGNED (busbar Q128 transport-http, ruling (D)). The fleet's one auth
+/// style handed the head (`STYLE_NEEDS_HEADERS`) is this one; every other style is handed none. So
+/// the one line a framing adds after the auth, HTTP/2's `content-length: 0` for an empty
+/// payload-method body (as 1.5.5's client added it), is signed by no auth: this style signs 1.5.5's
+/// fixed set (v1.5.5 `proto/bedrock/writer.rs`), and a head carrying a length line, any length or
+/// none, signs to the same bytes, with `SignedHeaders` never naming `content-length`.
+#[test]
+fn no_length_line_is_ever_signed() {
+    use busbar_contract::abi::auth::NamedValue;
+    use busbar_contract::abi::mechanism::call::AbiStr;
+    const VECTOR: &str = "AWS4-HMAC-SHA256 \
+        Credential=AKIDEXAMPLE/20150830/us-east-1/svc/aws4_request, \
+        SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, \
+        Signature=758de1b14d97b1d58b6307ff4c2924f7bdb3cbe3773ed02f7329925faee62472";
+    let s = SigV4::new(1, None);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    let body: &[u8] = br#"{"messages":[]}"#;
+    let at = |t: &'static str| AbiStr {
+        ptr: t.as_ptr(),
+        len: t.len(),
+    };
+    let line = |name: &'static str, value: &'static str| NamedValue {
+        name: at(name),
+        value: Blob {
+            ptr: value.as_ptr(),
+            len: value.len(),
+            fmt: BLOB_OCTETS,
+            flags: 0,
+        },
+    };
+    let sign = |head: &[NamedValue]| {
+        let mut buf = [0_u8; 1024];
+        let mut spans = [FieldSpan {
+            name: auth_span(),
+            value: auth_span(),
+            flags: 0,
+            _reserved: 0,
+        }; 8];
+        let mut i: FieldsIn = crate::abi::zeroed_in();
+        i.handle = handle;
+        i.mode = MODE_OWN;
+        i.request.method = at("POST");
+        i.request.authority = at("runtime.signer.example");
+        i.request.canonical_path = at("/model/m/converse");
+        i.request.timestamp = 1_440_938_160;
+        i.body = Blob {
+            ptr: body.as_ptr(),
+            len: body.len(),
+            fmt: BLOB_OCTETS,
+            flags: 0,
+        };
+        (i.headers, i.headers_len) = (head.as_ptr(), head.len());
+        (i.field_buf, i.field_buf_cap) = (buf.as_mut_ptr(), buf.len());
+        (i.fields, i.fields_cap) = (spans.as_mut_ptr(), 8);
+        let mut out: FieldsOut = crate::abi::zeroed_out();
+        let inst = std::ptr::from_ref(&s).cast_mut().cast::<c_void>();
+        assert_eq!(Fields::call(inst, &i, &mut out), Outcome::Ready);
+        let text = |sp: busbar_contract::abi::mechanism::call::Span| {
+            String::from_utf8_lossy(&buf[sp.offset as usize..(sp.offset + sp.len) as usize])
+                .into_owned()
+        };
+        (0..out.fields_len as usize)
+            .map(|k| spans[k])
+            .find(|f| text(f.name) == "authorization")
+            .map(|f| text(f.value))
+            .expect("an authorization is set")
+    };
+    let heads: [&[NamedValue]; 4] = [
+        &[line("content-type", "application/json")],
+        &[
+            line("content-type", "application/json"),
+            line("content-length", "15"),
+        ],
+        &[
+            line("content-type", "application/json"),
+            line("content-length", "0"),
+        ],
+        &[
+            line("content-type", "application/json"),
+            line("host", "runtime.signer.example"),
+            line("accept", "*/*"),
+            line("content-length", "15"),
+        ],
+    ];
+    for head in heads {
+        let authorization = sign(head);
+        let signed = authorization
+            .split("SignedHeaders=")
+            .nth(1)
+            .and_then(|r| r.split(',').next())
+            .expect("a SignedHeaders list");
+        assert!(
+            !signed.split(';').any(|h| h == "content-length"),
+            "no length line is signed: {authorization}"
+        );
+        assert_eq!(
+            authorization, VECTOR,
+            "a head with or without a length line signs to 1.5.5's bytes"
+        );
+    }
+}

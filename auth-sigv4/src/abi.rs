@@ -390,11 +390,19 @@ impl Host {
                 len: 0,
             },
         };
-        let ret = slot(
-            self.ctx,
-            std::ptr::from_ref(&input).cast::<c_void>(),
-            &mut out,
-        );
+        // SAFETY: the host lent this slot and `ctx` together in the tables `open` was handed, and
+        // those tables outlive the instance, so the call; `input` is a local `RecordsSecretIn`, its
+        // head stamped above and its buffers this frame's, and `out` a local `ServiceOut`. The
+        // block is needed once busbar #1469 makes `ServiceFn` an `unsafe extern "C" fn`, and
+        // unused (allowed) before it.
+        #[allow(unused_unsafe)]
+        let ret = unsafe {
+            slot(
+                self.ctx,
+                std::ptr::from_ref(&input).cast::<c_void>(),
+                &mut out,
+            )
+        };
         let Ok(filled) = check_records_secret(&input, ret, &out) else {
             return Crossed::Unavailable;
         };

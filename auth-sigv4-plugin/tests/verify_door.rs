@@ -20,6 +20,7 @@ use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use busbar_auth_sigv4::inbound::{X_AMZ_CONTENT_SHA256, X_AMZ_DATE};
 use busbar_contract::abi::auth::{
     check_identify, slot, AuthTail, IdentifyOut, IdentityBuf, NamedValue, StripName, VerifyIn,
     CANCEL_ABANDONED, CAP_INBOUND, CAP_OUTBOUND, DECISION_CONTINUE, DECISION_STOP,
@@ -617,6 +618,9 @@ fn a_long_secret_is_re_read_once_with_the_size_the_host_named() {
     assert_eq!(r[0], r[1], "the re-call is on the same handle");
 }
 
+/// The short answer writes nothing, and the host's one re-call (a fresh call on the same ticket)
+/// judges again: the secret is read on the call's same handle, never kept by the plugin between
+/// the two (nothing of `verify`'s is cached), so a credential revoked in between is rejected.
 #[test]
 fn a_short_identity_buffer_answers_short_and_the_recall_reads_the_same_handle() {
     let o = open();

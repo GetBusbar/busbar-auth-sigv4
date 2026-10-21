@@ -417,3 +417,67 @@ fn a_request_with_no_facts_fails_on_a_held_handle() {
         (Outcome::Refused, false, 0)
     );
 }
+
+/// PARITY WITH 1.5.5 (busbar testing/shadow-oracle/golden/1.5.5/cells: `egress.auth__sigv4__session-token`,
+/// `egress.auth__cred-identity__bedrock`): for every request 1.5.5 could send, the door's facts sign
+/// to the signature 1.5.5's `sign_v4` computed over the writer's header set (v1.5.5
+/// `proto/bedrock/writer.rs`: content-type, host, x-amz-content-sha256, x-amz-date and, with a
+/// session token, x-amz-security-token; method `POST`, empty query), whatever method, query or
+/// content type the walked request carried.
+#[test]
+fn the_door_signs_every_request_1_5_5_could_send_as_1_5_5_signed_it() {
+    const TS: u64 = 1_440_938_160;
+    for (cred, token) in [
+        ("AKIDORACLECAPTURE02:SECRET", None),
+        (
+            "AKIDORACLECAPTURE02:SECRET:OracleSessionToken//+capture=0002",
+            Some("OracleSessionToken//+capture=0002"),
+        ),
+    ] {
+        for (path, body) in [
+            (
+                "/model/m-cap/converse",
+                &br#"{"messages":[{"content":[{"text":"ping"}],"role":"user"}]}"#[..],
+            ),
+            ("/model/acme.model-1:0/converse-stream", &b"{}"[..]),
+            ("/model/m/converse", &b""[..]),
+        ] {
+            let hash = sha256_hex(body);
+            let host = "127.0.0.1:8080";
+            let s = SigV4::new(1);
+            let handle = open(&s, Some(cred));
+            let got = the_authorization(s.sign(
+                handle,
+                Who::Own,
+                Some(crate::legacy_facts(host, path, &hash, TS)),
+            ));
+
+            let (amzdate, datestamp) = crate::sigv4::format_amz_time(TS);
+            let mut signed = vec![
+                ("content-type".to_string(), "application/json".to_string()),
+                ("host".to_string(), host.to_string()),
+                ("x-amz-content-sha256".to_string(), hash.clone()),
+                ("x-amz-date".to_string(), amzdate.clone()),
+            ];
+            if let Some(t) = token {
+                signed.push(("x-amz-security-token".to_string(), t.to_string()));
+            }
+            let (signature, signed_headers) = crate::sigv4::sign_v4(
+                "SECRET",
+                "us-east-1",
+                "svc",
+                "POST",
+                &crate::sigv4::uri_encode_path(path),
+                "",
+                &signed,
+                &hash,
+                &amzdate,
+                &datestamp,
+            );
+            let want = format!(
+                "AWS4-HMAC-SHA256 Credential=AKIDORACLECAPTURE02/{datestamp}/us-east-1/svc/aws4_request, SignedHeaders={signed_headers}, Signature={signature}"
+            );
+            assert_eq!(got, want, "{path} {token:?}");
+        }
+    }
+}

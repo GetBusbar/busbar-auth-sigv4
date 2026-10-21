@@ -15,12 +15,11 @@
 //! 2026-09-29) is instead constructed fresh per request in `crate::instance::SigV4::sign` and never enters this
 //! cache — the caller's key varies request to request, so there is nothing to hold ahead of time.
 //!
-//! THE REQUEST IT SIGNS (BUSBAR-1.6.0.md THE DESIGN §6, "the per-request auth call on the route
-//! walk": "SigV4 signs the real method and query of the walked request"): the method, the query
-//! and the content type are the walked request's own, as the host lends them; the canonical URI is
-//! the wire path URI-encoded once more (SigV4's non-S3 rule, 1.5.5's `sign_and_wire_path_parts`,
-//! `proxy/egress.rs`, v1.5.5). For the request 1.5.5 signed — a POST of a JSON body to its path,
-//! no query — every signed byte is 1.5.5's.
+//! THE REQUEST IT SIGNS: the door lends [`SignFacts`] as 1.5.5 signed (v1.5.5
+//! `proto/bedrock/writer.rs`): a POST of an `application/json` body, the empty query. The signer
+//! itself signs whatever facts it is handed (the walked request's own method, query and content
+//! type are `proposed-sigv4-outbound-generalised`); the canonical URI is the wire path URI-encoded
+//! once more (SigV4's non-S3 rule, 1.5.5's `sign_and_wire_path_parts`, `proxy/egress.rs`, v1.5.5).
 
 use std::sync::RwLock;
 

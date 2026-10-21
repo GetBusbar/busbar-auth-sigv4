@@ -29,10 +29,7 @@ fn open() -> usize {
     let mut i: OpenIn = zeroed_in();
     i.generation = 1;
     let mut o: OpenOut = zeroed_out();
-    assert_eq!(
-        Open::call(std::ptr::null_mut(), &i, &mut o),
-        Outcome::Ready
-    );
+    assert_eq!(Open::call(std::ptr::null_mut(), &i, &mut o), Outcome::Ready);
     o.instance as usize
 }
 

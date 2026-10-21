@@ -25,10 +25,11 @@
 use std::sync::RwLock;
 
 use busbar_contract::header::is_legal_header_value;
+use busbar_contract::Secret;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
-use crate::held::Held;
+use crate::held::Own;
 use crate::sigv4;
 
 /// The seconds in a day.
@@ -73,11 +74,11 @@ pub struct SignFacts<'a> {
 pub type Field = (String, Zeroizing<String>);
 
 /// A credential split for signing: the secret and the session token are each held redacted
-/// (`Held`) and wiped on drop ([`Zeroizing`]).
+/// under this crate's own seal (`Secret<_, Own>`) and wiped on drop ([`Zeroizing`]).
 pub struct SigningCredential {
     access_key_id: String,
-    secret: Held<Zeroizing<String>>,
-    session_token: Option<Held<Zeroizing<String>>>,
+    secret: Secret<Zeroizing<String>, Own>,
+    session_token: Option<Secret<Zeroizing<String>, Own>>,
 }
 
 impl std::fmt::Debug for SigningCredential {
@@ -100,8 +101,8 @@ impl SigningCredential {
         let (access, secret, token) = sigv4::split_credential(raw)?;
         Some(Self {
             access_key_id: access.to_string(),
-            secret: Held::new(Zeroizing::new(secret.to_string())),
-            session_token: token.map(|t| Held::new(Zeroizing::new(t.to_string()))),
+            secret: Secret::held(Zeroizing::new(secret.to_string())),
+            session_token: token.map(|t| Secret::held(Zeroizing::new(t.to_string()))),
         })
     }
 
@@ -110,7 +111,7 @@ impl SigningCredential {
     pub fn session_token_unsendable(&self) -> bool {
         self.session_token
             .as_ref()
-            .is_some_and(|t| !is_legal_header_value(t.reveal()))
+            .is_some_and(|t| !is_legal_header_value(t.expose_own(&Own::here())))
     }
 }
 
@@ -190,7 +191,7 @@ impl SigV4Binding {
             return;
         }
         let key = sigv4::signing_key(
-            cred.secret.reveal(),
+            cred.secret.expose_own(&Own::here()),
             datestamp,
             &self.params.region,
             &self.params.service,
@@ -250,7 +251,7 @@ impl SigV4Binding {
         // Validated BEFORE signing, so the signed set and the sent set are gated by the same
         // check: a token the wire cannot carry must not be signed over and then dropped.
         if cred.access_key_id.is_empty()
-            || cred.secret.reveal().is_empty()
+            || cred.secret.expose_own(&Own::here()).is_empty()
             || cred.session_token_unsendable()
         {
             return Vec::new();
@@ -273,7 +274,7 @@ impl SigV4Binding {
             set_header(
                 &mut headers,
                 "x-amz-security-token",
-                t.reveal().as_str().to_owned(),
+                t.expose_own(&Own::here()).as_str().to_owned(),
             );
         }
         let canonical_uri = sigv4::uri_encode_path(facts.path);
@@ -306,7 +307,7 @@ impl SigV4Binding {
         // `tick`'s ([`Self::prederive`]), never a request's, so no request evicts a day key.
         let (signature, signed_headers) = held.unwrap_or_else(|| {
             sign_with(&sigv4::signing_key(
-                cred.secret.reveal(),
+                cred.secret.expose_own(&Own::here()),
                 &datestamp,
                 region,
                 service,
@@ -336,7 +337,10 @@ impl SigV4Binding {
             ),
         ];
         if let Some(t) = &cred.session_token {
-            fields.push(("x-amz-security-token".to_string(), t.reveal().clone()));
+            fields.push((
+                "x-amz-security-token".to_string(),
+                t.expose_own(&Own::here()).clone(),
+            ));
         }
         fields
     }

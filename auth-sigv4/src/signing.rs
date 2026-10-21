@@ -72,11 +72,12 @@ pub struct SignFacts<'a> {
 /// rides in one).
 pub type Field = (String, Zeroizing<String>);
 
-/// A credential split for signing, the secret held redacted.
+/// A credential split for signing: the secret and the session token are each held redacted
+/// (`Held`) and wiped on drop ([`Zeroizing`]).
 pub struct SigningCredential {
     access_key_id: String,
-    secret: Held<String>,
-    session_token: Option<Held<String>>,
+    secret: Held<Zeroizing<String>>,
+    session_token: Option<Held<Zeroizing<String>>>,
 }
 
 impl std::fmt::Debug for SigningCredential {
@@ -99,8 +100,8 @@ impl SigningCredential {
         let (access, secret, token) = sigv4::split_credential(raw)?;
         Some(Self {
             access_key_id: access.to_string(),
-            secret: Held::new(secret.to_string()),
-            session_token: token.map(|t| Held::new(t.to_string())),
+            secret: Held::new(Zeroizing::new(secret.to_string())),
+            session_token: token.map(|t| Held::new(Zeroizing::new(t.to_string()))),
         })
     }
 
@@ -262,7 +263,11 @@ impl SigV4Binding {
         set_header(&mut headers, "x-amz-date", amzdate.clone());
         set_header(&mut headers, "x-amz-content-sha256", payload_hash.clone());
         if let Some(t) = &cred.session_token {
-            set_header(&mut headers, "x-amz-security-token", t.reveal().clone());
+            set_header(
+                &mut headers,
+                "x-amz-security-token",
+                t.reveal().as_str().to_owned(),
+            );
         }
         let canonical_uri = sigv4::uri_encode_path(facts.path);
         let canonical_query = sigv4::canonical_query(facts.query);
@@ -324,10 +329,7 @@ impl SigV4Binding {
             ),
         ];
         if let Some(t) = &cred.session_token {
-            fields.push((
-                "x-amz-security-token".to_string(),
-                Zeroizing::new(t.reveal().clone()),
-            ));
+            fields.push(("x-amz-security-token".to_string(), t.reveal().clone()));
         }
         fields
     }

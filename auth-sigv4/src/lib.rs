@@ -635,3 +635,7 @@ mod verify_door_tests;
 #[cfg(test)]
 #[path = "tests/policy_tests.rs"]
 mod policy_tests;
+
+#[cfg(test)]
+#[path = "tests/open_outbound_tests.rs"]
+mod open_outbound_tests;

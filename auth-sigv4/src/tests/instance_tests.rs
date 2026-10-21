@@ -423,7 +423,7 @@ fn a_request_with_no_facts_fails_on_a_held_handle() {
 /// `egress.auth__cred-identity__bedrock`): for every request 1.5.5 could send (POST,
 /// `application/json`, empty query, the writer's header set: v1.5.5 `proto/bedrock/writer.rs`), the
 /// signer signs to the signature 1.5.5's `sign_v4` computed. The expected values are literals from
-/// the reviewer's independent script `/tmp/r194x/rev-opus/auth8-scripts/cells.py` (python `-I`,
+/// the reviewer's independent script `cells.py` (with its `vec.py`; both in the PR body; python `-I`,
 /// hmac and hashlib only; it also reproduces AWS's published ListUsers vector), over the secret
 /// `SECRET`, us-east-1 / svc, host `127.0.0.1:8080`, 2015-08-30T12:36:00Z; the canonical URI is the
 /// path encoded once more, as the script's `uenc(path)`.

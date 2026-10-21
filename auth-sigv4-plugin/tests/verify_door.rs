@@ -1,23 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE `verify` SLOT, through the door's own trampolines as a host calls them: an instance opened
-//! over a host table whose `records.secret` serves one live credential, one that is not live, and
-//! the fixed dummy (not live) for any other id; the tail and Statement it states; every answer
-//! judged by the kind's own `check_identify`.
+//! THE `verify` SLOT, through the door's own table as a host calls it: an instance opened over a
+//! host table whose `records.secret` serves one live credential, one that is not live, and the
+//! fixed dummy (not live) for any other id, recording every crossing (its handle, kind and id); the
+//! tail and Statement it states; every answer judged by the kind's own `check_identify`.
+//!
+//! The door is the contract kit's (`auth_door!(verify_and_outbound: ..)`): `verify` reads the
+//! secret through the SDK's `records.secret` on the call's ticket, each entry issuing its handles
+//! from `0`, so a RESUME (or the host's re-call after a short answer) re-issues the SAME handle and
+//! the host serves the answer it stored. THE PLUGIN KEEPS NOTHING between two calls: no secret, no
+//! verdict, no handle.
 
-#![allow(unsafe_code)] // the fake host's `extern "C"` service reads the plugin's raw `in`
+mod frames;
 
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use busbar_contract::abi::auth::{
-    check_identify, AuthTail, IdentifyOut, IdentityBuf, NamedValue, StripName, VerifyIn,
-    CAP_INBOUND, CAP_OUTBOUND, DECISION_CONTINUE, DECISION_STOP, FACT_INBOUND_ALL_HEADERS,
-    FACT_READS_CREDENTIALS, POINT_HEAD_BODY, SPAN_ABSENT, VERDICT_IDENTITY, VERDICT_PASS,
-    VERDICT_REJECT,
+    check_identify, slot, AuthTail, IdentifyOut, IdentityBuf, NamedValue, StripName, VerifyIn,
+    CANCEL_ABANDONED, CAP_INBOUND, CAP_OUTBOUND, DECISION_CONTINUE, DECISION_STOP,
+    FACT_INBOUND_ALL_HEADERS, FACT_READS_CREDENTIALS, POINT_HEAD_BODY, SPAN_ABSENT,
+    VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
 };
 use busbar_contract::abi::host::service::{
     op, HostSlots, ItemSpan, RecordsSecretIn, ServiceOut, SECRET_LIVE, SECRET_NOT_LIVE, SERVICES,
@@ -29,23 +36,23 @@ use busbar_contract::abi::mechanism::door::{
     Statement, MARK_WORD_CARRIER, MARK_WORD_ISSUED_ID_ALPHABET, MARK_WORD_ISSUED_ID_LENGTH,
     MARK_WORD_ISSUED_ID_PREFIX, MARK_WORD_ISSUED_SECRET_ALPHABET, MARK_WORD_ISSUED_SECRET_LENGTH,
 };
-use busbar_contract::abi::mechanism::lifecycle::{CancelIn, CancelOut, OpenIn, OpenOut};
+use busbar_contract::abi::mechanism::lifecycle::{slot as life, CancelIn, CancelOut};
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
-use busbar_contract::abi::sdk::door::Slot;
+use busbar_contract::redacted::sha256_hex;
 
-use crate::inbound::{X_AMZ_CONTENT_SHA256, X_AMZ_DATE};
-use crate::sigv4::{format_amz_time, sha256_hex, uri_encode_path};
-use crate::{Cancel, Close, Open, Verify};
+use frames::{call, in_head, ops, out_head, z};
 
 const AKID: &str = "BBAKLIVE0000000000001";
 const SECRET: &str = "live/secret+KEY0000000000000000000000000";
 const DEAD_AKID: &str = "BBAKDEAD0000000000002";
 const DEAD_SECRET: &str = "dead/secret+KEY0000000000000000000000000";
-/// A live credential whose secret is longer than the plugin's first buffer: the host answers
-/// short and the plugin re-calls once.
+/// A live credential whose secret is longer than the SDK's first buffer: the host answers short
+/// and the SDK re-calls once.
 const LONG_AKID: &str = "BBAKLONG0000000000003";
 const DUMMY: &str = "AWS4-DUMMY-SECRET-FOR-CONSTANT-TIME-REJECT-PATH";
+/// The request's clock, and the `x-amz-date` it is signed at: AWS's example timestamp.
 const NOW: u64 = 1_440_938_160;
+const AMZDATE: &str = "20150830T123600Z";
 const PATH: &str = "/model/vendor.model/converse";
 const TICKET: Ticket = Ticket {
     slot: 7,
@@ -56,13 +63,18 @@ fn long_secret() -> String {
     "L".repeat(300)
 }
 
-/// The fake host's state, behind `HostCtx` (its handle is the state's address): whether a fresh handle pends once, and every read
-/// (seq, kind, id) it served.
+/// One `records.secret` crossing the host served: its handle (ticket, seq), the kind and the id.
+type Crossing = (Ticket, u32, String, String);
+
+/// The fake host's state, behind `HostCtx` (its handle is the state's address): whether a fresh
+/// handle pends once, whether the live credential has since been REVOKED (it then answers not
+/// live), and every crossing it served.
 #[derive(Default)]
 struct FakeHost {
     pend_first: bool,
-    pended: Mutex<HashSet<u32>>,
-    reads: Mutex<Vec<(u32, String, String)>>,
+    revoked: AtomicBool,
+    pended: Mutex<HashSet<(Ticket, u32)>>,
+    reads: Mutex<Vec<Crossing>>,
 }
 
 fn text(s: AbiStr) -> String {
@@ -88,10 +100,11 @@ extern "C" fn fake_records_secret(
     assert_eq!(i.head.op, op::RECORDS_SECRET);
     assert_eq!(i.head.size as usize, size_of::<RecordsSecretIn>());
     let (kind, id) = (text(i.kind), text(i.id));
+    let handle = (i.head.handle.ticket, i.head.handle.seq);
     host.reads
         .lock()
         .unwrap()
-        .push((i.head.handle.seq, kind.clone(), id.clone()));
+        .push((handle.0, handle.1, kind.clone(), id.clone()));
     let mut answer = |o: Outcome| {
         out.outcome = RawOutcome::of(o);
         RawOutcome::of(o)
@@ -99,11 +112,12 @@ extern "C" fn fake_records_secret(
     if kind != "sigv4" {
         return answer(Outcome::Refused);
     }
-    if host.pend_first && host.pended.lock().unwrap().insert(i.head.handle.seq) {
+    if host.pend_first && host.pended.lock().unwrap().insert(handle) {
         return answer(Outcome::Pending);
     }
     let long = long_secret();
     let (secret, live) = match id.as_str() {
+        AKID if host.revoked.load(Ordering::SeqCst) => (SECRET, SECRET_NOT_LIVE),
         AKID => (SECRET, SECRET_LIVE),
         DEAD_AKID => (DEAD_SECRET, SECRET_NOT_LIVE),
         LONG_AKID => (long.as_str(), SECRET_LIVE),
@@ -136,8 +150,7 @@ extern "C" fn fake_records_secret(
 
 /// A host services table with only `records.secret` (or none at all).
 fn slots(records_secret: bool) -> HostSlots {
-    // SAFETY: `HostSlots` is integers and nullable function pointers: all-zero is every slot NULL.
-    let mut t: HostSlots = unsafe { std::mem::zeroed() };
+    let mut t: HostSlots = z();
     t.size = size_of::<HostSlots>() as u32;
     t.slots = SERVICES;
     if records_secret {
@@ -156,8 +169,7 @@ struct Opened {
 
 impl Drop for Opened {
     fn drop(&mut self) {
-        let mut out = crate::abi::zeroed_out();
-        Close::call(self.instance, &crate::abi::zeroed_in(), &mut out);
+        frames::close(self.instance);
     }
 }
 
@@ -178,17 +190,13 @@ fn open_with(host: FakeHost, records_secret: bool, tables: bool) -> Opened {
         // The host I/O table: this host offers none (the door reads no handle).
         io: std::ptr::null(),
     });
-    let mut i: OpenIn = crate::abi::zeroed_in();
-    i.host = if tables {
+    let instance = frames::open(if tables {
         std::ptr::from_ref(&*t)
     } else {
         std::ptr::null()
-    };
-    i.generation = 1;
-    let mut o: OpenOut = crate::abi::zeroed_out();
-    assert_eq!(Open::call(std::ptr::null_mut(), &i, &mut o), Outcome::Ready);
+    });
     Opened {
-        instance: o.instance,
+        instance,
         _tables: t,
         _slots: slots,
         host,
@@ -205,31 +213,70 @@ struct Req {
     body: Vec<u8>,
 }
 
+/// The client-side SigV4 signature of a POST to [`PATH`] (region `us-east-1`, service `bedrock`,
+/// no query) over `headers`, at [`AMZDATE`], as the AWS SDKs compute it: `(signature hex,
+/// SignedHeaders)`. The test signs on its own: the logic crate's only public item is its door.
+fn sign_v4(secret: &str, headers: &[(String, String)], payload_hash: &str) -> (String, String) {
+    use sha2::{Digest, Sha256};
+    fn hmac(key: &[u8], msg: &[u8]) -> Vec<u8> {
+        let mut k = if key.len() > 64 {
+            Sha256::digest(key).to_vec()
+        } else {
+            key.to_vec()
+        };
+        k.resize(64, 0);
+        let inner = Sha256::new()
+            .chain_update(k.iter().map(|b| b ^ 0x36).collect::<Vec<u8>>())
+            .chain_update(msg)
+            .finalize();
+        Sha256::new()
+            .chain_update(k.iter().map(|b| b ^ 0x5c).collect::<Vec<u8>>())
+            .chain_update(inner)
+            .finalize()
+            .to_vec()
+    }
+    let mut h: Vec<(String, String)> = headers
+        .iter()
+        .map(|(k, v)| (k.to_lowercase(), v.trim().to_string()))
+        .collect();
+    h.sort();
+    let canonical_headers: String = h.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
+    let signed_headers = h
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .collect::<Vec<_>>()
+        .join(";");
+    let canonical_request =
+        format!("POST\n{PATH}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
+    let datestamp = &AMZDATE[..8];
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{AMZDATE}\n{datestamp}/us-east-1/bedrock/aws4_request\n{}",
+        sha256_hex(canonical_request.as_bytes())
+    );
+    let k_date = hmac(format!("AWS4{secret}").as_bytes(), datestamp.as_bytes());
+    let k_region = hmac(&k_date, b"us-east-1");
+    let k_service = hmac(&k_region, b"bedrock");
+    let k_signing = hmac(&k_service, b"aws4_request");
+    (
+        hex::encode(hmac(&k_signing, string_to_sign.as_bytes())),
+        signed_headers,
+    )
+}
+
 fn signed(secret: &str, akid: &str, body: &[u8]) -> Req {
-    let (amzdate, datestamp) = format_amz_time(NOW);
     let payload_hash = sha256_hex(body);
     let headers = vec![
         ("host".to_string(), "busbar.example".to_string()),
-        (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
-        (X_AMZ_DATE.to_string(), amzdate.clone()),
+        ("x-amz-content-sha256".to_string(), payload_hash.clone()),
+        ("x-amz-date".to_string(), AMZDATE.to_string()),
     ];
-    let (sig, signed_headers) = crate::sigv4::sign_v4(
-        secret,
-        "us-east-1",
-        "bedrock",
-        "POST",
-        &uri_encode_path(PATH),
-        "",
-        &headers,
-        &payload_hash,
-        &amzdate,
-        &datestamp,
-    );
+    let (sig, signed_headers) = sign_v4(secret, &headers, &payload_hash);
     let mut lines = vec![(
         "Authorization".to_string(),
         format!(
-            "AWS4-HMAC-SHA256 Credential={akid}/{datestamp}/us-east-1/bedrock/aws4_request, \
-             SignedHeaders={signed_headers}, Signature={sig}"
+            "AWS4-HMAC-SHA256 Credential={akid}/{}/us-east-1/bedrock/aws4_request, \
+             SignedHeaders={signed_headers}, Signature={sig}",
+            &AMZDATE[..8]
         ),
     )];
     lines.extend(headers);
@@ -301,7 +348,8 @@ fn verify(o: &Opened, req: &Req, ticket: Ticket, flags: u32, cap: usize) -> Answ
         })
         .collect();
     let mut bufs = Bufs::new(cap);
-    let mut i: VerifyIn = crate::abi::zeroed_in();
+    let mut i: VerifyIn = z();
+    i.head = in_head::<VerifyIn>(slot::VERIFY);
     i.head.ticket = ticket;
     i.head.flags = flags;
     i.lines = lines.as_ptr();
@@ -326,8 +374,9 @@ fn verify(o: &Opened, req: &Req, ticket: Ticket, flags: u32, cap: usize) -> Answ
     };
     i.strip = bufs.strips.as_mut_ptr();
     i.strip_cap = bufs.strips.len() as u32;
-    let mut out: IdentifyOut = crate::abi::zeroed_out();
-    let outcome = Verify::call(o.instance, &i, &mut out);
+    let mut out: IdentifyOut = z();
+    out.head = out_head::<IdentifyOut>();
+    let outcome = call(ops().verify, o.instance, &i, &mut out);
     let strips = &bufs.strips[..(out.strip_len as usize).min(bufs.strips.len())];
     let groups = &bufs.groups[..(out.identity.groups_len as usize).min(bufs.groups.len())];
     check_identify(outcome, &out, &i.out_buf, groups, i.strip_cap, strips)
@@ -355,14 +404,19 @@ fn verify(o: &Opened, req: &Req, ticket: Ticket, flags: u32, cap: usize) -> Answ
     }
 }
 
-fn reads(o: &Opened) -> Vec<(u32, String, String)> {
+fn reads(o: &Opened) -> Vec<Crossing> {
     o.host.reads.lock().unwrap().clone()
+}
+
+/// The handle (ticket, seq) of every crossing so far.
+fn handles(o: &Opened) -> Vec<(Ticket, u32)> {
+    reads(o).iter().map(|r| (r.0, r.1)).collect()
 }
 
 #[test]
 fn the_tail_states_inbound_sigv4_at_head_body_beside_the_outbound_style() {
-    let door = crate::door();
-    // SAFETY: the door is this crate's `'static` plain data.
+    let door = busbar_auth_sigv4::door();
+    // SAFETY: the door is the plugin's `'static` plain data.
     let (st, tail): (Statement, AuthTail) = unsafe {
         let st: *const Statement = std::ptr::addr_of!((*door).statement).read_unaligned();
         let st = st.read_unaligned();
@@ -426,7 +480,7 @@ fn a_signed_request_over_the_live_credential_identifies_its_access_key_id() {
     assert_eq!(id.key_id.offset, SPAN_ABSENT);
     assert_eq!(
         reads(&o),
-        [(0, "sigv4".to_string(), AKID.to_string())],
+        [(TICKET, 0, "sigv4".to_string(), AKID.to_string())],
         "one read, kind sigv4, id the AccessKeyId"
     );
 }
@@ -528,25 +582,36 @@ fn a_pending_read_pends_and_the_resumed_call_reissues_the_same_handle() {
     let resumed = verify(&o, &req, TICKET, FLAG_RESUME, 256);
     assert_eq!(resumed.outcome, Outcome::Ready);
     assert_eq!(resumed.subject.as_deref(), Some(AKID));
-    let seqs: Vec<u32> = reads(&o).iter().map(|r| r.0).collect();
-    assert_eq!(seqs, [0, 0], "the resumed call re-issues the SAME handle");
-    // A fresh verify on another ticket issues a new handle.
+    assert_eq!(
+        handles(&o),
+        [(TICKET, 0), (TICKET, 0)],
+        "the resumed call re-issues the SAME handle"
+    );
+    // A fresh verify on another ticket issues a new handle: its own ticket's first.
     let ticket = Ticket {
         slot: 8,
         generation: 1,
     };
     assert_eq!(verify(&o, &req, ticket, 0, 256).outcome, Outcome::Pending);
-    assert_eq!(reads(&o).last().unwrap().0, 1);
-    // `cancel` forgets what the ticket held: the next call is fresh (a new handle).
-    let mut ci: CancelIn = crate::abi::zeroed_in();
+    assert_eq!(handles(&o).last(), Some(&(ticket, 0)));
+    assert_ne!((ticket, 0), (TICKET, 0), "a new handle");
+    // `cancel` of the ticket: nothing of the plugin's waits on it (the pending read is the host's,
+    // dropped with the ticket), so it answers ABANDONED and keeps nothing for the next call, which
+    // runs from the top and issues the ticket's first handle again.
+    let mut ci: CancelIn = z();
+    ci.head = in_head::<CancelIn>(life::CANCEL);
     ci.ticket = ticket;
-    let mut co: CancelOut = crate::abi::zeroed_out();
-    assert_eq!(Cancel::call(o.instance, &ci, &mut co), Outcome::Ready);
+    let mut co: CancelOut = z();
+    co.head = out_head::<CancelOut>();
     assert_eq!(
-        verify(&o, &req, ticket, FLAG_RESUME, 256).outcome,
-        Outcome::Pending
+        call(ops().head.cancel, o.instance, &ci, &mut co),
+        Outcome::Ready
     );
-    assert_eq!(reads(&o).last().unwrap().0, 2);
+    assert_eq!(co.disposition, CANCEL_ABANDONED);
+    let again = verify(&o, &req, ticket, FLAG_RESUME, 256);
+    assert_eq!(again.subject.as_deref(), Some(AKID));
+    assert_eq!(handles(&o).last(), Some(&(ticket, 0)));
+    assert_eq!(reads(&o).len(), 4, "every call crossed to the host");
 }
 
 #[test]
@@ -554,13 +619,13 @@ fn a_long_secret_is_re_read_once_with_the_size_the_host_named() {
     let o = open();
     let a = verify(&o, &signed(&long_secret(), LONG_AKID, b""), TICKET, 0, 256);
     assert_eq!(a.subject.as_deref(), Some(LONG_AKID));
-    let r = reads(&o);
+    let r = handles(&o);
     assert_eq!(r.len(), 2, "the call and its ONE re-call");
-    assert_eq!(r[0].0, r[1].0, "the re-call is on the same handle");
+    assert_eq!(r[0], r[1], "the re-call is on the same handle");
 }
 
 #[test]
-fn a_short_identity_buffer_answers_short_and_the_recall_is_served_from_it() {
+fn a_short_identity_buffer_answers_short_and_the_recall_reads_the_same_handle() {
     let o = open();
     let req = signed(SECRET, AKID, b"");
     let short = verify(&o, &req, TICKET, 0, 4);
@@ -572,7 +637,48 @@ fn a_short_identity_buffer_answers_short_and_the_recall_is_served_from_it() {
     );
     let again = verify(&o, &req, TICKET, 0, 256);
     assert_eq!(again.subject.as_deref(), Some(AKID));
-    assert_eq!(reads(&o).len(), 1, "the re-call never repeats the work");
+    // The re-call judges again from the top: it re-issues the call's first handle, where a host
+    // serves the answer it stored (nothing of the plugin's is kept between the two).
+    assert_eq!(handles(&o), [(TICKET, 0), (TICKET, 0)]);
+}
+
+/// RED (HIGH1: no secret cache, no verdict cache; `verify` reads through the host's
+/// `records.secret` every time). The SECOND `verify` for the same AccessKeyId calls the host again,
+/// whether it is a fresh call or the host's re-call after a short answer, and its verdict is the
+/// host's answer of that crossing: a credential revoked between the two is REJECTED on the second.
+/// Before the contract kit, the plugin held the identity a short answer reached under its ticket
+/// and served the re-call from it without asking the host: the revoked credential was admitted.
+#[test]
+fn red_the_second_verify_for_one_key_id_calls_the_host_again() {
+    let o = open();
+    let req = signed(SECRET, AKID, b"");
+    let first = verify(&o, &req, TICKET, 0, 256);
+    assert_eq!(first.subject.as_deref(), Some(AKID));
+    let second = verify(&o, &req, TICKET, 0, 256);
+    assert_eq!(second.subject.as_deref(), Some(AKID));
+    assert_eq!(
+        reads(&o).len(),
+        2,
+        "the second verify for one key id read the host again"
+    );
+
+    // The identity a short answer reached is not kept for the re-call: the credential is revoked
+    // in between, the re-call crosses to the host again and is rejected.
+    let o = open();
+    let short = verify(&o, &req, TICKET, 0, 4);
+    assert_eq!(short.outcome, Outcome::Failed, "the identity does not fit");
+    o.host.revoked.store(true, Ordering::SeqCst);
+    let recall = verify(&o, &req, TICKET, 0, 256);
+    assert_eq!(
+        reads(&o).len(),
+        2,
+        "the re-call read the host again: no identity was kept"
+    );
+    assert_eq!(
+        (recall.outcome, recall.out.verdict, recall.subject),
+        (Outcome::Ready, VERDICT_REJECT, None),
+        "judged by the host's answer of the moment: revoked"
+    );
 }
 
 #[test]

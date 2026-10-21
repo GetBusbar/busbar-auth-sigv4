@@ -1,23 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE `open_outbound` REPLY, through the door's own trampolines as a host calls them: each bind's
+//! THE `open_outbound` REPLY, through the door's own table as a host calls it: each bind's
 //! refusal text is that bind's own, kept by the instance until the host has copied it. Two kind
 //! ops may run at once on one instance (busbar-contract `abi::mechanism::lifecycle`), so a bind on
 //! another thread must never free or rewrite the text a reply already points at.
 
-#![allow(unsafe_code)] // reads the plugin's raw `out` as a host does
+mod frames;
 
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use busbar_contract::abi::auth::{OpenOutboundIn, OpenOutboundOut};
+use busbar_contract::abi::auth::{slot, OpenOutboundIn, OpenOutboundOut};
 use busbar_contract::abi::mechanism::call::{AbiStr, Outcome};
-use busbar_contract::abi::mechanism::lifecycle::{OpenIn, OpenOut};
-use busbar_contract::abi::sdk::door::Slot;
 
-use crate::abi::{zeroed_in, zeroed_out};
-use crate::{Close, Open, OpenOutbound};
+use frames::{call, in_head, ops, out_head, z};
 
 /// How many binds run at once on the one instance.
 const BINDS: usize = 8;
@@ -26,27 +23,24 @@ const ROUNDS: usize = 64;
 
 /// An instance with no host tables (`open_outbound` reads none); its address, sendable.
 fn open() -> usize {
-    let mut i: OpenIn = zeroed_in();
-    i.generation = 1;
-    let mut o: OpenOut = zeroed_out();
-    assert_eq!(Open::call(std::ptr::null_mut(), &i, &mut o), Outcome::Ready);
-    o.instance as usize
+    frames::open(std::ptr::null()) as usize
 }
 
 fn close(instance: usize) {
-    let mut out = zeroed_out();
-    Close::call(instance as *mut _, &zeroed_in(), &mut out);
+    frames::close(instance as *mut _);
 }
 
 /// `open_outbound` of `style`, no credential, no settings: the reply as the host holds it.
 fn bind(instance: usize, style: &str) -> (Outcome, OpenOutboundOut) {
-    let mut i: OpenOutboundIn = zeroed_in();
+    let mut i: OpenOutboundIn = z();
+    i.head = in_head::<OpenOutboundIn>(slot::OPEN_OUTBOUND);
     i.style = AbiStr {
         ptr: style.as_ptr(),
         len: style.len(),
     };
-    let mut out: OpenOutboundOut = zeroed_out();
-    let outcome = OpenOutbound::call(instance as *mut _, &i, &mut out);
+    let mut out: OpenOutboundOut = z();
+    out.head = out_head::<OpenOutboundOut>();
+    let outcome = call(ops().open_outbound, instance as *mut _, &i, &mut out);
     (outcome, out)
 }
 

@@ -25,9 +25,10 @@
 //! identity on the spot.
 
 // THE PUBLISHED CONFORMANCE SUITE (busbar-plugin-loader's `conformance` feature, TODO ABI-b4): the
-// auth kind's OUTBOUND script over this crate's linked door and its dropped-in cdylib (built with
-// `dropped-in`), driven by `conformance.json`; the hand-written both-ways proof below stays beside
-// it. `plugin-ci.yml` runs the suite under `--release` once the crate lives in its own repo.
+// auth kind's OUTBOUND script over this crate's linked door and its dropped-in cdylib (this
+// crate's own, exporting the logic crate's door), driven by `conformance.json`; the hand-written
+// both-ways proof below stays beside it. `plugin-ci.yml` runs the suite under `--release` once the
+// crate lives in its own repo.
 busbar_plugin_loader::conformance_suite! {
     door: busbar_auth_sigv4::door,
     cdylib: "busbar_auth_sigv4_plugin",
@@ -916,13 +917,19 @@ fn sign_v4(secret: &str, headers: &[(String, String)], payload_hash: &str) -> (S
     )
 }
 
-/// The door's Statement carries the whole `declares` document under `EXT_DECLARES`.
+/// The door's Statement carries the whole `declares` document under `declares` (busbar #1399's
+/// `EXT_DECLARES`), and nothing else.
 #[test]
 fn the_statement_carries_the_declares_document() {
     let row = LinkedRow::of(busbar_auth_sigv4::door).unwrap();
     let read = busbar_contract::abi::mechanism::rendering::read(&row.statement).unwrap();
+    let ext = &read.extensions.bytes;
     assert_eq!(
-        busbar_contract::abi::mechanism::extensions::declares(&read.extensions.bytes),
+        busbar_contract::abi::mechanism::extensions::get(ext, "declares"),
         Some(&include_bytes!("../../auth-sigv4/declares.json")[..]),
+    );
+    assert_eq!(
+        busbar_contract::abi::mechanism::extensions::entries(ext).count(),
+        1
     );
 }

@@ -694,6 +694,8 @@ struct Fake {
 }
 
 impl SecretSource for Fake {
+    type Secret = Zeroizing<Vec<u8>>;
+
     fn read(&mut self, kind: &str, id: &str) -> Read {
         self.reads.push((kind.to_string(), id.to_string()));
         if let Some(a) = self.answer {
@@ -1041,8 +1043,6 @@ fn a_pending_read_pends_and_an_unavailable_one_rejects() {
         run(&s.lines, None, Some(b""), &mut fake),
         Judgement::Pending
     );
-    fake.answer = Some(|| Read::NotNow);
-    assert_eq!(run(&s.lines, None, Some(b""), &mut fake), Judgement::NotNow);
     fake.answer = Some(|| Read::Unavailable);
     assert_eq!(run(&s.lines, None, Some(b""), &mut fake), Judgement::Reject);
 }

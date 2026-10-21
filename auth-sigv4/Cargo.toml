@@ -14,15 +14,8 @@ description = "AWS SigV4 as one auth-kind plugin on the auth kind's memory ABI: 
 [lib]
 # rlib only: the LINKED door (`busbar_auth_sigv4::door`, the `DoorFn` a compiled-in row holds) and the
 # tests. The DROPPED door is the sibling `busbar-auth-sigv4-plugin` cdylib, the same door behind the
-# one exported symbol.
+# one exported symbol: this crate exports none, and is `#![forbid(unsafe_code)]`.
 crate-type = ["rlib"]
-
-[features]
-# DECLARED SO THE SOURCE COMPILES VERBATIM (src/lib.rs gates its `export_door!` on it). Nothing in
-# this repo enables it: the dropped-in artifact is the sibling `busbar-auth-sigv4-plugin` cdylib, which
-# exports this crate's door unconditionally. Enabling it here as well would export the one
-# `busbar_plugin_door` symbol twice.
-dropped-in = []
 
 # DEPENDENCY POLICY. A plugin's closure is `busbar-contract` plus the third-party crates it needs to
 # do its job (owner ruling 2026-09-28, PLUGIN LIBRARIES): the SigV4 HMAC chain (`hex`; SHA-256's

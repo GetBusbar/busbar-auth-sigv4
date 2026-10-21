@@ -34,10 +34,8 @@ fn close(instance: usize) {
 fn bind(instance: usize, style: &str) -> (Outcome, OpenOutboundOut) {
     let mut i: OpenOutboundIn = z();
     i.head = in_head::<OpenOutboundIn>(slot::OPEN_OUTBOUND);
-    i.style = AbiStr {
-        ptr: style.as_ptr(),
-        len: style.len(),
-    };
+    // SAFETY: `style` outlives the call this `in` is read by.
+    i.style = unsafe { AbiStr::from_raw_parts(style.as_ptr(), style.len()) };
     let mut out: OpenOutboundOut = z();
     out.head = out_head::<OpenOutboundOut>();
     let outcome = call(ops().open_outbound, instance as *mut _, &i, &mut out);
@@ -47,11 +45,11 @@ fn bind(instance: usize, style: &str) -> (Outcome, OpenOutboundOut) {
 /// The reply's error text, read as the host reads it after the call returned.
 fn error_text(out: &OpenOutboundOut) -> String {
     let e = out.head.error;
-    if e.ptr.is_null() {
+    if e.is_absent() {
         return String::new();
     }
-    // SAFETY: the plugin's reply names `len` bytes it keeps until the host has copied them.
-    String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(e.ptr, e.len) }).into_owned()
+    // SAFETY: the plugin's reply names bytes it keeps until the host has copied them.
+    String::from_utf8_lossy(unsafe { e.bytes() }).into_owned()
 }
 
 /// Every bind's reply still reads its OWN refusal after every other bind on the instance has

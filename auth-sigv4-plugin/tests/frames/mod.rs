@@ -45,12 +45,18 @@ pub fn out_head<O>() -> OutHead {
 /// Call `entry` on `instance` with `input` and `out`, as the host does.
 pub fn call<I, O>(entry: Option<Op>, instance: *mut c_void, input: &I, out: &mut O) -> Outcome {
     let entry = entry.expect("the door states the slot");
-    entry(
-        instance,
-        std::ptr::from_ref(input).cast(),
-        std::ptr::from_mut(out).cast(),
-    )
-    .outcome()
+    // SAFETY: the entry is the plugin's own slot, called with the host's live `in` and `out`; the
+    // block is needed once busbar #1469 makes the slots `unsafe extern "C" fn`, and unused
+    // (allowed) before it.
+    #[allow(unused_unsafe)]
+    let raw = unsafe {
+        entry(
+            instance,
+            std::ptr::from_ref(input).cast(),
+            std::ptr::from_mut(out).cast(),
+        )
+    };
+    raw.outcome()
 }
 
 /// `open` at generation 1 over `host` (NULL: the host hands no tables); the instance.

@@ -9,22 +9,32 @@
 //! verified against AWS's own published worked example (GET iam ListUsers, 2015-08-30) in the
 //! tests, so correctness does not rely on trusting the move.
 //!
-//! Two changes, both at the edge of the chain and neither touching a signed byte:
+//! Three departures from the moved signer, each named here:
 //!
-//! * THE DAILY KEY (BUSBAR-1.6.0.md THE DESIGN, §6.5: "SigV4 signs per request with a daily signing key derived
-//!   ahead of time"): [`sign_v4`] is split into [`signing_key`] (the HMAC chain over date, region,
-//!   service) and [`sign_v4_with_key`] (the per-request part), so a caller holding the day's key
-//!   signs without re-deriving it. [`sign_v4`] is the two composed, exactly the old function.
+//! * THE DAILY KEY (BUSBAR-1.6.0.md THE DESIGN, §6.5: "SigV4 signs per request with a daily signing
+//!   key derived ahead of time"): [`sign_v4`] is split into [`signing_key`] (the HMAC chain over
+//!   date, region, service) and [`sign_v4_with_key`] (the per-request part), so a caller holding the
+//!   day's key signs without re-deriving it. [`sign_v4`] is the two composed, exactly the old
+//!   function. No signed byte changes.
 //! * THE SECRET IS ZEROISED (TODO item 586, #53/#54; THE DESIGN §6: "auth material is zeroised"):
 //!   the `AWS4<secret>` key material, every derived key, and the HMAC's own key state (the padded
 //!   key blocks and the chaining state after each) are [`Zeroizing`] buffers, wiped on drop. A
 //!   library HMAC keeps its key's inner and outer pad states in a value it frees unwiped, so the
-//!   contract's wiped HMAC holds them.
+//!   contract's wiped HMAC holds them. No signed byte changes.
+//! * THE CANONICAL QUERY ([`canonical_query`]): each query name and value is decoded once and
+//!   re-encoded over the unreserved set with uppercase hex, then sorted, where the moved signer
+//!   sorted the query as sent. This DOES change signed bytes for a query sent with a reserved byte
+//!   raw, a lowercase escape or an escaped unreserved byte (AWS recomputes the canonical form, so
+//!   the moved signer's bytes were refused for those). For the request 1.5.5 signed, a POST of a
+//!   JSON body with no query, every signed byte is 1.5.5's.
+//!
+//! [`sign_v4_with_key`] canonicalises the header list it is handed exactly as 1.5.5's `sign_v4`
+//! did: one canonical line and one `SignedHeaders` name per entry, nothing merged.
 //!
 //! The signer's chain is shared with the INBOUND check ([`crate::inbound`], moved here from the
 //! kernel): it recomputes a client's signature through [`hmac`], [`signing_key`] and [`sha256_hex`],
-//! and derives the canonical URI with [`uri_encode_path`], keeping its own canonical signing (a
-//! quoted header value's interior spaces are kept verbatim there).
+//! and derives the canonical URI with [`uri_encode_path`], keeping its own canonical signing (1.5.5's
+//! verify-side header selection and canonicalisation).
 
 use ring::digest;
 use zeroize::{Zeroize, Zeroizing};
@@ -263,26 +273,8 @@ pub fn sign_v4_with_key(
         .map(|(k, v)| (k.to_lowercase(), canonicalize_header_value(v)))
         .collect();
     h.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // The SigV4 canonicalisation rule does not sort the values of a header that appears more than
-    // once; it combines them into one comma-separated list under that header's single entry. A
-    // caller CAN hand this function the same name twice (`decorate` builds its header list by
-    // pushing onto whatever the envelope already carries), so merging here rather than assuming the
-    // caller never repeats a name is what keeps `SignedHeaders` and the canonical headers block in
-    // the one-entry-per-name shape AWS's servers expect. The sort above already made same-named
-    // entries adjacent, so a single pass merges them in their original relative order.
-    let mut merged: Vec<(String, String)> = Vec::with_capacity(h.len());
-    for (k, mut v) in h {
-        match merged.last_mut() {
-            Some((last_k, last_v)) if *last_k == k => {
-                last_v.push(',');
-                last_v.push_str(&v);
-                v.zeroize();
-            }
-            _ => merged.push((k, v)),
-        }
-    }
-    let mut h = merged;
+    // One canonical line per entry, as 1.5.5's `sign_v4` wrote them: its one caller
+    // (`signing::SigV4Binding::sign`) sets each name once.
 
     // The canonical headers carry a session token's value: they and the canonical request built
     // from them are sized once (no growth leaves a copy behind) and wiped on drop, as is every

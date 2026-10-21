@@ -10,9 +10,11 @@
 //! Two sources, each ported verbatim:
 //!
 //! * `busbar-kernel-identity/src/ingress_sigv4.rs`: the `Authorization` parse, the `x-amz-date`
-//!   window, and the canonical signing the check recomputes ([`sign_v4`], which keeps a quoted
-//!   header value's interior spaces verbatim, unlike the outbound signer). The HMAC chain, the key
-//!   derivation and the algorithm tokens are the outbound signer's ([`crate::sigv4`]), shared.
+//!   window, and the canonical signing the check recomputes ([`sign_v4`]). Its header
+//!   canonicalisation is 1.5.5's (v1.5.5 `crates/busbar/src/sigv4.rs`): every ASCII space run
+//!   collapses, quoted or not, and a repeated signed header is read at its first value. The HMAC
+//!   chain, the key derivation and the algorithm tokens are the outbound signer's
+//!   ([`crate::sigv4`]), shared.
 //! * `busbar-kernel/src/auth/mod.rs`: `has_sigv4_authorization`, `canonical_query_string`, the
 //!   structural gate `auth_middleware` ran before buffering the body, and
 //!   `verify_sigv4_ingress_credential` (the signed-header prefilter, `UNSIGNED-PAYLOAD` refused, the
@@ -53,27 +55,20 @@ const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
 /// `auth::DUMMY_SECRET`, the same bytes the host answers for an unknown id, so the work matches.
 const DUMMY_SECRET: &str = "AWS4-DUMMY-SECRET-FOR-CONSTANT-TIME-REJECT-PATH";
 
-/// Canonicalize a signed-header value per AWS SigV4: trim leading/trailing ASCII spaces (0x20) and
-/// collapse each run of sequential ASCII spaces to a single space — EXCEPT inside a quoted string,
-/// whose spaces are significant and pass through verbatim. ONLY the ASCII space character is treated
-/// as whitespace — tabs, NBSP (U+00A0), newlines, and every other Unicode whitespace codepoint are
-/// preserved verbatim, because AWS does the same. (This is intentionally NOT `split_whitespace`,
-/// which would also fold tabs/NBSP/newlines and break the signature.)
-///
-/// The quote state matters because a header whose value carries a quoted string (a `user-agent`
-/// comment, a `content-disposition` filename) is signed by the client with those interior spaces
-/// intact; folding them here produced a canonical value the client never signed, so a correctly
-/// signed request was rejected.
+/// Canonicalize a signed-header value per AWS SigV4, EXACTLY as 1.5.5 did (v1.5.5
+/// `crates/busbar/src/sigv4.rs:131-155`, `canonicalize_header_value`): trim leading/trailing ASCII
+/// spaces (0x20) and collapse each run of sequential ASCII spaces to a single space, with no quote
+/// state (a run inside double quotes collapses too, as botocore's `' '.join(value.split())` signs
+/// it). ONLY the ASCII space character is treated as whitespace — tabs, NBSP (U+00A0), newlines,
+/// and every other Unicode whitespace codepoint are preserved verbatim, because AWS does the same.
+/// (This is intentionally NOT `split_whitespace`, which would also fold tabs/NBSP/newlines and break
+/// the signature.)
 fn canonicalize_header_value(v: &str) -> String {
     let mut out = String::with_capacity(v.len());
     let mut prev_space = false;
-    let mut in_quotes = false;
     for ch in v.chars() {
-        if ch == '"' {
-            in_quotes = !in_quotes;
-        }
-        if ch == ' ' && !in_quotes {
-            // Defer emitting until we know it is not a trailing run; mark that a space is pending.
+        if ch == ' ' {
+            // Hold the run until it is known not to be trailing.
             prev_space = true;
         } else {
             // Emit a single collapsed space before this non-space char, but only if we have already
@@ -369,28 +364,19 @@ pub fn verify_inbound_sigv4(
     if !signed.iter().any(|h| h.eq_ignore_ascii_case("host")) {
         return Err(VerifyError::SignedHeadersMismatch);
     }
-    // A header name may legally appear SEVERAL times in one request. AWS canonicalizes such a name
-    // to ONE entry whose value is every occurrence's value joined with a comma, in the order the
-    // values appear in the request.
+    // A header the request carries more than once is read at its FIRST value, as 1.5.5 selected it
+    // (v1.5.5 `crates/busbar/src/sigv4.rs:452-460`): never comma-joined.
     let mut selected: Vec<(String, String)> = Vec::with_capacity(signed.len());
     for name in &signed {
         let lname = name.to_ascii_lowercase();
-        let mut values = req
+        let Some((_, value)) = req
             .headers
             .iter()
-            .filter(|(k, _)| k.eq_ignore_ascii_case(&lname))
-            .map(|(_, v)| v.as_str())
-            .peekable();
-        if values.peek().is_none() {
+            .find(|(k, _)| k.eq_ignore_ascii_case(&lname))
+        else {
             return Err(VerifyError::SignedHeadersMismatch);
-        }
-        // Canonicalize each occurrence BEFORE joining: AWS trims and collapses each value, then
-        // joins. `sign_v4` canonicalizes again, which is idempotent.
-        let joined = values
-            .map(canonicalize_header_value)
-            .collect::<Vec<_>>()
-            .join(",");
-        selected.push((lname, joined));
+        };
+        selected.push((lname, value.clone()));
     }
 
     // (4) Recompute — same canonicalization, byte-for-byte.

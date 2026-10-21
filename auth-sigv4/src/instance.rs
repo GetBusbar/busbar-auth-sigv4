@@ -3,8 +3,9 @@
 
 //! ONE INSTANCE: the handles (generation data, each with the unsendable-token line its `fields`
 //! envelope points into), each `open_outbound` answer's own envelope (kept until the host has
-//! copied it), the host services `open` was handed, and the inbound `verify`'s per-ticket state. No token cache, no waker: a sigv4 binding never mints and never pends — `tick`
-//! only pre-derives day keys ahead of midnight. Only `verify` may pend, on the host's
+//! copied it), the host services `open` was handed, and the inbound `verify`'s per-ticket state.
+//! No token cache, no waker: a sigv4 binding never mints and never pends — a bind and `tick` only
+//! pre-derive day keys ahead of midnight. Only `verify` may pend, on the host's
 //! `records.secret` read; it keeps the completion handle it issued under the ticket until the read
 //! answers, and nothing else (never a secret, never a verdict cache: the kernel never cached a SigV4
 //! verdict).
@@ -168,6 +169,9 @@ impl SigV4 {
         // input it varies on: built here, once, so `fields` allocates nothing for it.
         let mut note = EnvStore::default();
         Self::note_unsendable(&mut note, &binding.params().service);
+        // Today's key (and tomorrow's near midnight) is held from the bind on, not first at the
+        // next `tick` (THE DESIGN §6.5: "a daily signing key derived ahead of time").
+        binding.prederive(crate::now_epoch());
         self.handles
             .write()
             .unwrap_or_else(PoisonError::into_inner)

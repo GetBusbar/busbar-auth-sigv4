@@ -174,7 +174,8 @@ impl SigV4Binding {
             .is_some_and(SigningCredential::session_token_unsendable)
     }
 
-    /// Derive (and keep) the key for `datestamp` unless held; at most two days are kept.
+    /// Derive (and keep) the key for `datestamp` unless held; at most two days are kept. Called by
+    /// [`Self::prederive`] alone, with the instance clock's today and tomorrow.
     fn derive(&self, datestamp: &str) {
         let Some(cred) = &self.credential else {
             return;
@@ -222,7 +223,9 @@ impl SigV4Binding {
             .collect()
     }
 
-    /// `tick`: hold today's key, and tomorrow's once within [`PREDERIVE_AHEAD_SECS`] of midnight.
+    /// `tick`: hold today's key, and tomorrow's once within [`PREDERIVE_AHEAD_SECS`] of midnight,
+    /// and drop any key for a day before today. The held days follow the instance's clock alone:
+    /// [`Self::sign`] never adds one.
     pub fn prederive(&self, now_epoch: u64) {
         let (_, today) = sigv4::format_amz_time(now_epoch);
         self.derive(&today);
@@ -230,6 +233,10 @@ impl SigV4Binding {
             let (_, tomorrow) = sigv4::format_amz_time(now_epoch + DAY_SECS);
             self.derive(&tomorrow);
         }
+        self.keys
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|k| k.datestamp >= today);
     }
 
     /// Sign one request: the fields to set, in order, or NONE when the credential cannot sign
@@ -271,7 +278,6 @@ impl SigV4Binding {
         }
         let canonical_uri = sigv4::uri_encode_path(facts.path);
         let canonical_query = sigv4::canonical_query(facts.query);
-        self.derive(&datestamp);
         let sign_with = |key: &[u8]| {
             sigv4::sign_v4_with_key(
                 key,
@@ -295,8 +301,9 @@ impl SigV4Binding {
                 .find(|k| k.datestamp == datestamp)
                 .map(|k| sign_with(&k.key))
         };
-        // A date older than both held keys (a skewed request clock) is derived for this request
-        // alone rather than evicting a day key.
+        // A date no held key covers (a request clock skewed ahead of tomorrow or behind today, or a
+        // binding `tick` has not reached yet) is derived for this request alone: the held days are
+        // `tick`'s ([`Self::prederive`]), never a request's, so no request evicts a day key.
         let (signature, signed_headers) = held.unwrap_or_else(|| {
             sign_with(&sigv4::signing_key(
                 cred.secret.reveal(),

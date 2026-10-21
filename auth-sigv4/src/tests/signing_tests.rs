@@ -127,13 +127,14 @@ fn an_access_key_id_the_wire_cannot_carry_signs_nothing() {
     assert!(b.sign(&facts(&hash)).is_empty());
 }
 
-/// Re-signing the same request is idempotent: the day key held after the first signature signs the
-/// second exactly as a fresh derivation would.
+/// The day key `tick` holds signs exactly as a fresh derivation would, every time.
 #[test]
 fn the_held_day_key_signs_exactly_as_a_fresh_derivation() {
     let hash = sigv4::sha256_hex(b"{}");
     let cred = || SigningCredential::split(&format!("AKIDEXAMPLE:{SECRET}"));
     let warm = SigV4Binding::new(params(), cred());
+    warm.prederive(facts(&hash).timestamp_epoch);
+    assert_eq!(warm.held(), ["20150830"]);
     let first = warm.sign(&facts(&hash));
     let second = warm.sign(&facts(&hash));
     let cold = SigV4Binding::new(params(), cred()).sign(&facts(&hash));

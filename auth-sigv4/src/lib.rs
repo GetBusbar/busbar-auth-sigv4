@@ -109,7 +109,7 @@ use busbar_contract::abi::sdk::exchange::Op;
 use busbar_contract::abi::sdk::life::Refusal;
 use busbar_contract::abi::sdk::services::CredentialSecret;
 
-use crate::inbound::{Judgement, Read, SecretSource};
+use crate::inbound::{Judgement, Read};
 use crate::instance::{diag, SigV4, Signed, Who, WARN};
 use crate::signing::SignFacts;
 
@@ -373,22 +373,17 @@ impl OutboundPlugin for SigV4 {
     }
 }
 
-/// The secret source `verify` reads through: the host's `records.secret`, on the op's ticket, on
-/// every call.
-impl SecretSource for &VerifyOp {
-    type Secret = CredentialSecret;
-
-    fn read(&mut self, kind: &str, id: &str) -> Read<CredentialSecret> {
-        match self.records_secret(kind, id) {
-            // On no ticket too, with no crossing: the kit answers that `verify` REFUSED and the
-            // host submits it on a ticket.
-            Poll::Pending => Read::Pending,
-            Poll::Ready(Ok(secret)) => {
-                let live = secret.live();
-                Read::Secret { secret, live }
-            }
-            Poll::Ready(Err(_)) => Read::Unavailable,
+/// The secret `verify` reads: the host's `records.secret`, on the op's ticket, on every call.
+fn read_secret(op: &VerifyOp, kind: &str, id: &str) -> Read<CredentialSecret> {
+    match op.records_secret(kind, id) {
+        // On no ticket too, with no crossing: the kit answers that `verify` REFUSED and the
+        // host submits it on a ticket.
+        Poll::Pending => Read::Pending,
+        Poll::Ready(Ok(secret)) => {
+            let live = secret.live();
+            Read::Secret { secret, live }
         }
+        Poll::Ready(Err(_)) => Read::Unavailable,
     }
 }
 
@@ -411,8 +406,7 @@ impl VerifyPlugin for SigV4 {
             body: view.body(),
             now: view.timestamp(),
         };
-        let mut source = op;
-        let verdict = match inbound::judge(&request, &mut source) {
+        let verdict = match inbound::judge(&request, &mut |kind, id| read_secret(op, kind, id)) {
             Judgement::Pass => Verdict::Pass,
             Judgement::Reject => Verdict::Reject,
             Judgement::Identity(subject) => Verdict::Identity(VerifiedIdentity {

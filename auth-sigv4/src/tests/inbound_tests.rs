@@ -693,9 +693,7 @@ struct Fake {
     raw: Option<Vec<u8>>,
 }
 
-impl SecretSource for Fake {
-    type Secret = Zeroizing<Vec<u8>>;
-
+impl Fake {
     fn read(&mut self, kind: &str, id: &str) -> Read {
         self.reads.push((kind.to_string(), id.to_string()));
         if let Some(a) = self.answer {
@@ -783,7 +781,7 @@ fn run(
         body,
         now: NOW,
     };
-    judge(&req, fake)
+    judge(&req, &mut |k, i| fake.read(k, i))
 }
 
 #[test]
@@ -904,7 +902,10 @@ fn an_expired_signature_rejects() {
         body: Some(b""),
         now: NOW + CLOCK_SKEW_SECS + 60,
     };
-    assert_eq!(judge(&req, &mut Fake::default()), Judgement::Reject);
+    assert_eq!(
+        judge(&req, &mut |k, i| Fake::default().read(k, i)),
+        Judgement::Reject
+    );
 }
 
 #[test]
@@ -1023,13 +1024,19 @@ fn a_tampered_path_query_or_method_rejects() {
         body: Some(b""),
         now: NOW,
     };
-    assert_eq!(judge(&req, &mut Fake::default()), Judgement::Reject);
+    assert_eq!(
+        judge(&req, &mut |k, i| Fake::default().read(k, i)),
+        Judgement::Reject
+    );
     let req = Request {
         method: b"POST",
         path: b"/model/other/converse",
         ..req
     };
-    assert_eq!(judge(&req, &mut Fake::default()), Judgement::Reject);
+    assert_eq!(
+        judge(&req, &mut |k, i| Fake::default().read(k, i)),
+        Judgement::Reject
+    );
 }
 
 #[test]

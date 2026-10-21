@@ -22,7 +22,7 @@
 //!
 //! What changed is only WHERE THE SECRET COMES FROM: the kernel looked the AccessKeyId up in its
 //! governance store; this check reads it through the host's `records.secret` service
-//! ([`SecretSource`]), which answers a fixed dummy secret, not live, for an id it does not hold, in
+//! (the `source` closure `judge` takes), which answers a fixed dummy secret, not live, for an id it does not hold, in
 //! the time it answers a known one. The full constant-time verification ALWAYS runs over whatever
 //! secret came back, and only (signature verified AND live) admits: an unknown id, a disabled or
 //! revoked key and a bad signature reject alike.
@@ -530,16 +530,6 @@ pub enum Read<S: SecretBytes = Zeroizing<Vec<u8>>> {
     Unavailable,
 }
 
-/// Where the check reads a credential's secret: the host's `records.secret` on the request path, a
-/// fake in the unit tests. Read on EVERY check: nothing is cached between two.
-pub trait SecretSource {
-    /// The secret's holder.
-    type Secret: SecretBytes;
-
-    /// The secret of credential `id` of `kind`.
-    fn read(&mut self, kind: &str, id: &str) -> Read<Self::Secret>;
-}
-
 /// The check's answer for one request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Judgement {
@@ -555,7 +545,10 @@ pub enum Judgement {
 
 /// Judge one request: the kernel's SigV4 pre-step and `verify_sigv4_ingress_credential`, in its
 /// order, the secret read through `source`.
-pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
+pub fn judge<S: SecretBytes>(
+    req: &Request<'_>,
+    source: &mut impl FnMut(&str, &str) -> Read<S>,
+) -> Judgement {
     // ENTRY (the kernel's `has_sigv4_authorization`): not a SigV4 Authorization is not ours.
     let Some(auth_value) = sigv4_authorization(req) else {
         return Judgement::Pass;
@@ -648,7 +641,7 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
     // THE SECRET, from the host. An UNKNOWN AccessKeyId does NOT short-circuit: the host answers its
     // fixed dummy secret (not live) in equal time, and the full constant-time verification runs over
     // whatever came back.
-    let (secret, live) = match source.read(CREDENTIAL_KIND, &parsed.access_key_id) {
+    let (secret, live) = match source(CREDENTIAL_KIND, &parsed.access_key_id) {
         Read::Secret { secret, live } => (secret, live),
         Read::Pending => return Judgement::Pending,
         Read::Unavailable => return Judgement::Reject,

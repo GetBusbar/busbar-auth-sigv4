@@ -233,28 +233,36 @@ fn fact(b: &[u8]) -> Option<&str> {
     std::str::from_utf8(b).ok().filter(|s| !s.is_empty())
 }
 
-/// The value of the first `content-type` line (ASCII case-insensitive) in the header envelope the
-/// host lent `fields` (the style declares `STYLE_NEEDS_HEADERS`); `None` when none is sent, or its
-/// value is not text.
+/// The `content-type` the request is sent with, from the header envelope the host lent `fields`
+/// (the style declares `STYLE_NEEDS_HEADERS`): every `content-type` line (ASCII case-insensitive)
+/// whose value is text, each trimmed of spaces, comma-joined in order as SigV4 combines a repeated
+/// header; `None` when none is sent.
 pub(crate) fn sent_content_type<'a>(
     headers: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
-) -> Option<&'a str> {
-    headers
+) -> Option<String> {
+    let values: Vec<&str> = headers
         .into_iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(b"content-type"))
-        .and_then(|(_, v)| std::str::from_utf8(v).ok())
+        .filter(|(n, _)| n.eq_ignore_ascii_case(b"content-type"))
+        .filter_map(|(_, v)| std::str::from_utf8(v).ok())
+        .map(|v| v.trim_matches(' '))
+        .collect();
+    (!values.is_empty()).then(|| values.join(","))
 }
 
 /// The SigV4 facts of a `fields` call: the walked request's method, host, path, query and sent
 /// content type (BUSBAR-1.6.0.md THE DESIGN §6: "SigV4 signs the real method and query of the
 /// walked request"); `None` when the host sent no method, host or path.
-fn sign_facts<'v: 'h, 'h>(view: &FieldsView<'v>, hash: &'h str) -> Option<SignFacts<'h>> {
+fn sign_facts<'v: 'h, 'h>(
+    view: &FieldsView<'v>,
+    hash: &'h str,
+    content_type: Option<&'h str>,
+) -> Option<SignFacts<'h>> {
     Some(SignFacts {
         method: fact(view.method())?,
         host: fact(view.authority())?,
         path: fact(view.path())?,
         query: view.query().and_then(fact),
-        content_type: sent_content_type(view.headers()),
+        content_type,
         payload_hash: hash,
         timestamp_epoch: view.timestamp(),
     })
@@ -314,8 +322,13 @@ impl OutboundPlugin for SigV4 {
             Mode::Own => Who::Own,
             Mode::Passthrough => Who::Caller(view.caller_credential()),
         };
+        let content_type = sent_content_type(view.headers());
         Poll::Ready(
-            match self.sign(view.handle(), who, sign_facts(view, &hash)) {
+            match self.sign(
+                view.handle(),
+                who,
+                sign_facts(view, &hash, content_type.as_deref()),
+            ) {
                 None => FieldsAnswer::Refused,
                 Some(Signed::NoFacts) => FieldsAnswer::Failed(Cow::Borrowed("")),
                 Some(Signed::Fields { fields, note }) => {

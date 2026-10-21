@@ -169,12 +169,13 @@ fn authorization(s: &SigV4, handle: u64, walked: &Walked) -> String {
         .map(|ct| (&b"Content-Type"[..], ct.as_bytes()))
         .into_iter()
         .collect();
+    let content_type = crate::sent_content_type(head);
     let facts = SignFacts {
         method: walked.method,
         host: "runtime.signer.example",
         path: walked.path,
         query: walked.query.filter(|q| !q.is_empty()),
-        content_type: crate::sent_content_type(head),
+        content_type: content_type.as_deref(),
         payload_hash: &hash,
         timestamp_epoch: 1_440_938_160,
     };
@@ -375,14 +376,14 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
     let body: &[u8] = br#"{"messages":[]}"#;
     let hash = sha256_hex(body);
     let sign = |head: &[(&'static str, &'static str)]| {
+        let content_type =
+            crate::sent_content_type(head.iter().map(|(n, v)| (n.as_bytes(), v.as_bytes())));
         let facts = SignFacts {
             method: "POST",
             host: "runtime.signer.example",
             path: "/model/m/converse",
             query: None,
-            content_type: crate::sent_content_type(
-                head.iter().map(|(n, v)| (n.as_bytes(), v.as_bytes())),
-            ),
+            content_type: content_type.as_deref(),
             payload_hash: &hash,
             timestamp_epoch: 1_440_938_160,
         };
@@ -427,7 +428,7 @@ fn a_request_with_no_facts_fails_on_a_held_handle() {
 /// `SECRET`, us-east-1 / svc, host `127.0.0.1:8080`, 2015-08-30T12:36:00Z; the canonical URI is the
 /// path encoded once more, as the script's `uenc(path)`.
 #[test]
-fn the_door_signs_every_request_1_5_5_could_send_as_1_5_5_signed_it() {
+fn the_signer_signs_every_request_1_5_5_could_send_as_1_5_5_signed_it() {
     const TS: u64 = 1_440_938_160;
     const TOKEN: &str = "OracleSessionToken//+capture=0002";
     const SIGNED: &str = "content-type;host;x-amz-content-sha256;x-amz-date";
@@ -513,8 +514,8 @@ fn the_door_signs_every_request_1_5_5_could_send_as_1_5_5_signed_it() {
 /// THE WALKED REQUEST IS SIGNED (owner-approved 2026-10-21; BUSBAR-1.6.0.md section 6): a GET, a
 /// query (names and values decoded once and re-encoded over the unreserved set with uppercase hex,
 /// sorted by name then value, a name repeated kept) and a non-JSON content type each sign to the
-/// vector `/tmp/r194x/mytools/sigv4_vectors.py` computes independently (python `-I`, `hmac` and
-/// `hashlib` only; script text in the PR body): AKIDEXAMPLE:SECRET, us-east-1 / svc, host
+/// vector an independent script computes (python `-I`, `hmac` and `hashlib` only; the script text is
+/// in the PR body): AKIDEXAMPLE:SECRET, us-east-1 / svc, host
 /// `runtime.signer.example`, path `/model/m/converse`, empty body, 2015-08-30T12:36:00Z.
 #[test]
 fn the_walked_methods_queries_and_content_types_sign_to_independent_vectors() {
@@ -569,5 +570,29 @@ fn the_walked_methods_queries_and_content_types_sign_to_independent_vectors() {
             "501c33d7676055ea5944e5f18c29650c00226e58ed5488a5e2b4918991690760"
         ),
         "a non-JSON content type"
+    );
+}
+
+/// EVERY `content-type` LINE IS SIGNED, comma-joined in order (SigV4's rule for a repeated header),
+/// names matched case-insensitively, values trimmed of spaces; none sent, none signed.
+#[test]
+fn every_content_type_line_is_comma_joined() {
+    let lines = |v: &[(&'static str, &'static str)]| {
+        crate::sent_content_type(v.iter().map(|(n, v)| (n.as_bytes(), v.as_bytes())))
+    };
+    assert_eq!(lines(&[]), None);
+    assert_eq!(lines(&[("accept", "*/*")]), None);
+    assert_eq!(
+        lines(&[("Content-Type", "application/json")]).as_deref(),
+        Some("application/json")
+    );
+    assert_eq!(
+        lines(&[
+            ("content-type", " text/plain "),
+            ("accept", "*/*"),
+            ("CONTENT-TYPE", "application/json"),
+        ])
+        .as_deref(),
+        Some("text/plain,application/json")
     );
 }

@@ -240,25 +240,6 @@ fn canonical_query_encodes_each_name_and_value() {
     );
 }
 
-/// RFC 4231's HMAC-SHA-256 vectors: a short key (case 1) and a key past the block size, hashed
-/// first (case 6).
-#[test]
-fn the_hmac_answers_rfc_4231() {
-    assert_eq!(
-        hex::encode(&hmac(&[0x0b; 20], b"Hi There")[..]),
-        "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
-    );
-    assert_eq!(
-        hex::encode(
-            &hmac(
-                &[0xaa; 131],
-                b"Test Using Larger Than Block-Size Key - Hash Key First"
-            )[..]
-        ),
-        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
-    );
-}
-
 // ── the HMAC the signer and the inbound check share, proven against RFC 4231 and against ring's ──
 
 fn hmac_hex(key: &[u8], data: &[u8]) -> String {

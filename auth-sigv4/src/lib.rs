@@ -524,14 +524,15 @@ impl Slot for OpenOutbound {
         let Some(s) = inst(instance) else {
             return Outcome::Fault;
         };
-        let mut env = s
-            .open_env
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        env.clear();
+        // THIS BIND'S OWN ENVELOPE: the reply points into it, and the instance keeps it after the
+        // call returns (`SigV4::keep_reply`), so a concurrent bind on another thread never frees or
+        // rewrites the text this reply names (two kind ops may run at once on one instance:
+        // busbar-contract `abi::mechanism::lifecycle`).
+        let mut env = Box::new(EnvStore::default());
         let Some(style) = text(&input.style) else {
             env.error = "settings: no outbound auth style was named".to_string();
             envelope(&mut out.head, &env);
+            s.keep_reply(env);
             return Outcome::Refused;
         };
         let opened = style::open_binding(style, blob(&input.credential), blob(&input.settings));
@@ -550,6 +551,7 @@ impl Slot for OpenOutbound {
             }
         };
         envelope(&mut out.head, &env);
+        s.keep_reply(env);
         outcome
     }
 }

@@ -2,14 +2,14 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! ONE INSTANCE: the handles (generation data, each with the unsendable-token line its `fields`
-//! envelope points into), the per-op envelope storage the host copies after each control-lane call, the host services `open` was handed, and the inbound `verify`'s
-//! per-ticket state. No token cache, no waker: a sigv4 binding never mints and never pends — `tick`
+//! envelope points into), each `open_outbound` answer's own envelope (kept until the host has
+//! copied it), the host services `open` was handed, and the inbound `verify`'s per-ticket state. No token cache, no waker: a sigv4 binding never mints and never pends — `tick`
 //! only pre-derives day keys ahead of midnight. Only `verify` may pend, on the host's
 //! `records.secret` read; it keeps the completion handle it issued under the ticket until the read
 //! answers, and nothing else (never a secret, never a verdict cache: the kernel never cached a SigV4
 //! verdict).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
@@ -27,8 +27,15 @@ pub(crate) mod diag {
 
 const WARN: u8 = 1;
 
-/// One op's envelope storage: the diagnostics and the texts they point into, kept until the next
-/// call of the same op (the host copies them before it makes any other call on that thread).
+/// How many `open_outbound` replies one instance keeps alive at once, oldest dropped first: the
+/// contract SDK's own bound for the answers an instance keeps (`busbar_contract::abi::sdk::out`,
+/// `KEPT_RING`). The host copies a reply as its crossing returns, so a reply is dropped only once
+/// this many newer binds of the same instance have answered.
+pub(crate) const KEPT_OPEN_REPLIES: usize = 4096;
+
+/// One answer's envelope storage: the diagnostics, the texts they point into and the error text.
+/// Each answer owns its own (a handle's `fields` note, or one `open_outbound` reply kept by
+/// [`SigV4::keep_reply`]); none is cleared or rewritten while the host may still read it.
 #[derive(Default)]
 pub(crate) struct EnvStore {
     texts: Vec<String>,
@@ -38,13 +45,6 @@ pub(crate) struct EnvStore {
 }
 
 impl EnvStore {
-    /// Start a call: drop what the previous call left.
-    pub(crate) fn clear(&mut self) {
-        self.diags.clear();
-        self.texts.clear();
-        self.error.clear();
-    }
-
     /// Add one diagnostic.
     pub(crate) fn push(&mut self, id: u32, severity: u8, text: String) {
         self.texts.push(text);
@@ -93,8 +93,9 @@ pub(crate) struct SigV4 {
     /// Each handle: its generation, its binding, and the envelope its `fields` answers when the
     /// signing credential's session token is unsendable (built once at open, kept until retire).
     handles: RwLock<HashMap<u64, Handle>>,
-    /// `open_outbound`'s envelope and error.
-    pub(crate) open_env: Mutex<EnvStore>,
+    /// The last [`KEPT_OPEN_REPLIES`] `open_outbound` replies, each its own envelope: a concurrent
+    /// bind never frees or rewrites the text another bind's reply points at.
+    open_replies: Mutex<VecDeque<Box<EnvStore>>>,
     /// The host services `open` was handed (`records.secret`); `None` when the host offers none.
     pub(crate) host: Option<Host>,
     /// The next completion-handle `seq` a fresh `records.secret` read issues: unique per instance,
@@ -112,11 +113,25 @@ impl SigV4 {
             generation: AtomicU64::new(generation),
             next_handle: AtomicU64::new(1),
             handles: RwLock::new(HashMap::new()),
-            open_env: Mutex::default(),
+            open_replies: Mutex::new(VecDeque::new()),
             host,
             next_seq: AtomicU32::new(0),
             held: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Keep `reply`, one `open_outbound` answer's own envelope, until [`KEPT_OPEN_REPLIES`] newer
+    /// replies are kept. Moving the box moves no text: the envelope already points at the reply's
+    /// heap bytes, which stay where they are until the reply is dropped.
+    pub(crate) fn keep_reply(&self, reply: Box<EnvStore>) {
+        let mut ring = self
+            .open_replies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if ring.len() >= KEPT_OPEN_REPLIES {
+            ring.pop_front();
+        }
+        ring.push_back(reply);
     }
 
     /// A fresh completion-handle `seq`.

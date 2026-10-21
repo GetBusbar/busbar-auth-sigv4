@@ -48,13 +48,7 @@ impl EnvStore {
     /// Add one diagnostic.
     pub(crate) fn push(&mut self, id: u32, severity: u8, text: String) {
         self.texts.push(text);
-        let t = self.texts.last().map_or(
-            AbiStr {
-                ptr: std::ptr::null(),
-                len: 0,
-            },
-            |t| abi(t),
-        );
+        let t = self.texts.last().map_or(AbiStr::ABSENT, |t| abi(t));
         self.diags.push(Diag {
             id_idx: id,
             severity,
@@ -229,5 +223,6 @@ impl SigV4 {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)] // the tests state test-owned bytes through `from_raw_parts`
 #[path = "tests/instance_tests.rs"]
 mod tests;

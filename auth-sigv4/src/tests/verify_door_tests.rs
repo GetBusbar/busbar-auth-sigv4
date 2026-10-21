@@ -67,7 +67,7 @@ struct FakeHost {
 
 fn text(s: AbiStr) -> String {
     // SAFETY: the plugin's own `in`, live for the call.
-    String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(s.ptr, s.len) }).into_owned()
+    String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(s.ptr(), s.len()) }).into_owned()
 }
 
 extern "C" fn fake_records_secret(
@@ -240,10 +240,8 @@ fn signed(secret: &str, akid: &str, body: &[u8]) -> Req {
 }
 
 fn abi_str(s: &str) -> AbiStr {
-    AbiStr {
-        ptr: s.as_ptr(),
-        len: s.len(),
-    }
+    // SAFETY: `s` outlives the `in` this view is stated in (a test-owned buffer).
+    unsafe { AbiStr::from_raw_parts(s.as_ptr(), s.len()) }
 }
 
 /// The host's buffers for one `verify`.
@@ -292,12 +290,8 @@ fn verify(o: &Opened, req: &Req, ticket: Ticket, flags: u32, cap: usize) -> Answ
         .iter()
         .map(|(n, v)| NamedValue {
             name: abi_str(n),
-            value: Blob {
-                ptr: v.as_ptr(),
-                len: v.len(),
-                fmt: BLOB_OCTETS,
-                flags: 0,
-            },
+            // SAFETY: `v` is owned by `names`, which outlives the `in` this view is stated in.
+            value: unsafe { Blob::from_raw_parts(v.as_ptr(), v.len(), BLOB_OCTETS, 0) },
         })
         .collect();
     let mut bufs = Bufs::new(cap);
@@ -311,12 +305,8 @@ fn verify(o: &Opened, req: &Req, ticket: Ticket, flags: u32, cap: usize) -> Answ
     i.request.canonical_path = abi_str(PATH);
     i.request.timestamp = NOW;
     i.point = POINT_HEAD_BODY;
-    i.body = Blob {
-        ptr: req.body.as_ptr(),
-        len: req.body.len(),
-        fmt: BLOB_OCTETS,
-        flags: 0,
-    };
+    // SAFETY: `req` outlives the `in` this view is stated in.
+    i.body = unsafe { Blob::from_raw_parts(req.body.as_ptr(), req.body.len(), BLOB_OCTETS, 0) };
     i.out_buf = IdentityBuf {
         buf: bufs.bytes.as_mut_ptr(),
         buf_cap: bufs.bytes.len(),
@@ -361,12 +351,15 @@ fn reads(o: &Opened) -> Vec<(u32, String, String)> {
 
 #[test]
 fn the_tail_states_inbound_sigv4_at_head_body_beside_the_outbound_style() {
-    let door = crate::door();
+    // SAFETY: the door is this crate's own `'static` door; the block is needed once busbar #1469
+    // makes `door` an `unsafe fn`, and unused (allowed) before it.
+    #[allow(unused_unsafe)]
+    let door = unsafe { crate::door() };
     // SAFETY: the door is this crate's `'static` plain data.
     let (st, tail): (Statement, AuthTail) = unsafe {
         let st: *const Statement = std::ptr::addr_of!((*door).statement).read_unaligned();
         let st = st.read_unaligned();
-        (st, st.kind_tail.cast::<AuthTail>().read_unaligned())
+        (st, st.kind_tail().cast::<AuthTail>().read_unaligned())
     };
     assert_eq!(tail.caps, CAP_OUTBOUND | CAP_INBOUND);
     assert_eq!(
@@ -374,12 +367,12 @@ fn the_tail_states_inbound_sigv4_at_head_body_beside_the_outbound_style() {
         FACT_INBOUND_ALL_HEADERS | FACT_READS_CREDENTIALS
     );
     assert_eq!(tail.inbound_points, POINT_HEAD_BODY);
-    assert_eq!(tail.styles_len, 1);
+    assert_eq!(tail.styles_len(), 1);
     // SAFETY: `'static` tail arrays of the stated lengths.
     let (kinds, words) = unsafe {
         (
-            std::slice::from_raw_parts(tail.credential_kinds, tail.credential_kinds_len),
-            std::slice::from_raw_parts(st.mark_words, st.mark_words_len),
+            std::slice::from_raw_parts(tail.credential_kinds_ptr(), tail.credential_kinds_len()),
+            std::slice::from_raw_parts(st.mark_words_ptr(), st.mark_words_len()),
         )
     };
     assert_eq!(

@@ -33,30 +33,29 @@ use crate::inbound::Request;
 
 /// Borrowed bytes of an [`AbiStr`] the host handed in for this call; `None` when absent.
 pub(crate) fn text(s: &AbiStr) -> Option<&str> {
-    if s.ptr.is_null() {
+    if s.ptr().is_null() {
         return None;
     }
     // SAFETY: a non-NULL `AbiStr` in a host `in` addresses `len` readable bytes for the call (the
     // mechanism's call convention); the borrow does not outlive the `in` it was read from.
-    let bytes = unsafe { std::slice::from_raw_parts(s.ptr, s.len) };
+    let bytes = unsafe { std::slice::from_raw_parts(s.ptr(), s.len()) };
     std::str::from_utf8(bytes).ok()
 }
 
 /// Borrowed bytes of a [`Blob`] the host handed in for this call; `None` when absent.
 pub(crate) fn blob(b: &Blob) -> Option<&[u8]> {
-    if b.ptr.is_null() || b.fmt == BLOB_ABSENT {
+    if b.ptr().is_null() || b.fmt == BLOB_ABSENT {
         return None;
     }
     // SAFETY: a present `Blob` in a host `in` addresses `len` readable bytes for the call.
-    Some(unsafe { std::slice::from_raw_parts(b.ptr, b.len) })
+    Some(unsafe { std::slice::from_raw_parts(b.ptr(), b.len()) })
 }
 
 /// An [`AbiStr`] over bytes this plugin holds.
 pub(crate) fn abi(s: &str) -> AbiStr {
-    AbiStr {
-        ptr: s.as_ptr(),
-        len: s.len(),
-    }
+    // SAFETY: `s` is bytes this plugin holds; the view is read only while they are alive (the
+    // callers keep the backing `String` for the call).
+    unsafe { AbiStr::from_raw_parts(s.as_ptr(), s.len()) }
 }
 
 /// The instance behind the pointer `open` answered.
@@ -159,10 +158,10 @@ fn bytes<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
 
 /// A string the host handed in, raw; `None` when absent (NULL).
 fn raw(s: &AbiStr) -> Option<&[u8]> {
-    if s.ptr.is_null() {
+    if s.ptr().is_null() {
         return None;
     }
-    bytes(s.ptr, s.len)
+    bytes(s.ptr(), s.len())
 }
 
 /// A blob the host handed in, raw; `None` when absent ([`BLOB_ABSENT`], or NULL with a length).
@@ -170,7 +169,7 @@ fn lent(b: &Blob) -> Option<&[u8]> {
     if b.fmt == BLOB_ABSENT {
         return None;
     }
-    bytes(b.ptr, b.len)
+    bytes(b.ptr(), b.len())
 }
 
 /// `verify`'s request as [`crate::inbound`] reads it: method, path and query raw as received,
@@ -384,10 +383,7 @@ impl Host {
             items: 0,
             needed_bytes: 0,
             needed_items: 0,
-            error: AbiStr {
-                ptr: std::ptr::null(),
-                len: 0,
-            },
+            error: AbiStr::ABSENT,
         };
         // SAFETY: the host lent this slot and `ctx` together in the tables `open` was handed, and
         // those tables outlive the instance, so the call; `input` is a local `RecordsSecretIn`, its

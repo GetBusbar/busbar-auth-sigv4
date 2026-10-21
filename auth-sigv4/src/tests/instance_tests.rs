@@ -36,34 +36,18 @@ fn fields_noted(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bo
     let mut i: FieldsIn = crate::abi::zeroed_in();
     i.handle = handle;
     i.mode = mode;
-    i.request.authority = busbar_contract::abi::mechanism::call::AbiStr {
-        ptr: "runtime.signer.example".as_ptr(),
-        len: "runtime.signer.example".len(),
-    };
-    i.request.canonical_path = busbar_contract::abi::mechanism::call::AbiStr {
-        ptr: "/model/m/converse".as_ptr(),
-        len: "/model/m/converse".len(),
-    };
+    i.request.authority =
+        busbar_contract::abi::mechanism::call::AbiStr::of("runtime.signer.example");
+    i.request.canonical_path =
+        busbar_contract::abi::mechanism::call::AbiStr::of("/model/m/converse");
     // The host lends the walked request's method on every call.
-    i.request.method = busbar_contract::abi::mechanism::call::AbiStr {
-        ptr: "POST".as_ptr(),
-        len: "POST".len(),
-    };
+    i.request.method = busbar_contract::abi::mechanism::call::AbiStr::of("POST");
     i.request.timestamp = 1_440_938_160;
     i.caller_credential = if caller.is_empty() {
-        Blob {
-            ptr: std::ptr::null(),
-            len: 0,
-            fmt: 0,
-            flags: 0,
-        }
+        Blob::ABSENT
     } else {
-        Blob {
-            ptr: caller.as_ptr(),
-            len: caller.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
-        }
+        // SAFETY: `caller` outlives the call this `in` is read by.
+        unsafe { Blob::from_raw_parts(caller.as_ptr(), caller.len(), BLOB_OCTETS, 0) }
     };
     (i.field_buf, i.field_buf_cap) = (buf.as_mut_ptr(), buf.len());
     (i.fields, i.fields_cap) = (spans.as_mut_ptr(), 8);
@@ -180,10 +164,7 @@ struct Walked {
 fn authorization(s: &SigV4, handle: u64, walked: &Walked) -> String {
     use busbar_contract::abi::auth::NamedValue;
     use busbar_contract::abi::mechanism::call::AbiStr;
-    let at = |t: &'static str| AbiStr {
-        ptr: t.as_ptr(),
-        len: t.len(),
-    };
+    let at = |t: &'static str| AbiStr::of(t);
     let mut buf = [0_u8; 1024];
     let mut spans = [FieldSpan {
         name: auth_span(),
@@ -195,12 +176,7 @@ fn authorization(s: &SigV4, handle: u64, walked: &Walked) -> String {
         .content_type
         .map(|ct| NamedValue {
             name: at("Content-Type"),
-            value: Blob {
-                ptr: ct.as_ptr(),
-                len: ct.len(),
-                fmt: BLOB_OCTETS,
-                flags: 0,
-            },
+            value: Blob::of(ct.as_bytes()).with_fmt(BLOB_OCTETS),
         })
         .into_iter()
         .collect();
@@ -413,18 +389,10 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
     let s = SigV4::new(1, None);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     let body: &[u8] = br#"{"messages":[]}"#;
-    let at = |t: &'static str| AbiStr {
-        ptr: t.as_ptr(),
-        len: t.len(),
-    };
+    let at = |t: &'static str| AbiStr::of(t);
     let line = |name: &'static str, value: &'static str| NamedValue {
         name: at(name),
-        value: Blob {
-            ptr: value.as_ptr(),
-            len: value.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
-        },
+        value: Blob::of(value.as_bytes()).with_fmt(BLOB_OCTETS),
     };
     let sign = |head: &[NamedValue]| {
         let mut buf = [0_u8; 1024];
@@ -441,12 +409,7 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
         i.request.authority = at("runtime.signer.example");
         i.request.canonical_path = at("/model/m/converse");
         i.request.timestamp = 1_440_938_160;
-        i.body = Blob {
-            ptr: body.as_ptr(),
-            len: body.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
-        };
+        i.body = Blob::of(body).with_fmt(BLOB_OCTETS);
         (i.headers, i.headers_len) = (head.as_ptr(), head.len());
         (i.field_buf, i.field_buf_cap) = (buf.as_mut_ptr(), buf.len());
         (i.fields, i.fields_cap) = (spans.as_mut_ptr(), 8);

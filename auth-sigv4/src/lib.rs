@@ -69,7 +69,6 @@ mod sigv4;
 mod style;
 
 use std::ffi::c_void;
-use std::mem::size_of;
 use std::ptr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -84,8 +83,8 @@ use busbar_contract::abi::mechanism::call::{
     AbiStr, Envelope, InHead, OutHead, Outcome, FLAG_RESUME,
 };
 use busbar_contract::abi::mechanism::door::{
-    KindTailHead, MarkWord, Statement, MARK_WORD_ISSUED_ID_ALPHABET, MARK_WORD_ISSUED_ID_LENGTH,
-    MARK_WORD_ISSUED_ID_PREFIX, MARK_WORD_ISSUED_SECRET_ALPHABET, MARK_WORD_ISSUED_SECRET_LENGTH,
+    MarkWord, MARK_WORD_ISSUED_ID_ALPHABET, MARK_WORD_ISSUED_ID_LENGTH, MARK_WORD_ISSUED_ID_PREFIX,
+    MARK_WORD_ISSUED_SECRET_ALPHABET, MARK_WORD_ISSUED_SECRET_LENGTH,
 };
 use busbar_contract::abi::mechanism::lifecycle::{
     CancelIn, CancelOut, DriveIn, GenIn, OpenIn, OpenOut, RefreshIn, ReleaseIn, TickIn, TickOut,
@@ -147,20 +146,16 @@ const CREDENTIAL_KINDS: [AbiStr; 1] = [abi_str(inbound::CREDENTIAL_KIND)];
 /// THE AUTH STATEMENT TAIL: the outbound `sigv4` style, and the inbound SigV4 check at the
 /// `HeadBody` point (it hashes the body against the signed `x-amz-content-sha256`), reading EVERY
 /// header line (the signed set varies per request) and the host-held `sigv4` credentials. No login.
-const TAIL: &AuthTail = &AuthTail {
-    head: KindTailHead {
-        size: size_of::<AuthTail>() as u32,
-        _reserved: 0,
-    },
-    caps: CAP_OUTBOUND | CAP_INBOUND,
-    facts: FACT_INBOUND_ALL_HEADERS | FACT_READS_CREDENTIALS,
-    login_kind: LOGIN_KIND_NONE,
-    inbound_points: POINT_HEAD_BODY,
-    styles: STYLE_DECLS.as_ptr(),
-    styles_len: STYLE_DECLS.len(),
-    operator_principal: abi_str(""),
-    credential_kinds: CREDENTIAL_KINDS.as_ptr(),
-    credential_kinds_len: CREDENTIAL_KINDS.len(),
+const TAIL: &AuthTail = &{
+    let mut t = AuthTail::EMPTY
+        .with_styles(&STYLE_DECLS)
+        .with_credential_kinds(&CREDENTIAL_KINDS);
+    t.caps = CAP_OUTBOUND | CAP_INBOUND;
+    t.facts = FACT_INBOUND_ALL_HEADERS | FACT_READS_CREDENTIALS;
+    t.login_kind = LOGIN_KIND_NONE;
+    t.inbound_points = POINT_HEAD_BODY;
+    t.operator_principal = abi_str("");
+    t
 };
 
 /// One issued-credential shape word mark of `class`.
@@ -197,14 +192,10 @@ const DIAG_IDS: [AbiStr; 1] = [abi_str("auth.sigv4-session-token-invalid-bytes")
 
 busbar_contract::plugin_door! {
     ops: busbar_contract::abi::auth::Ops,
-    statement: Statement {
-        kind_tail: ptr::from_ref(TAIL).cast::<KindTailHead>(),
-        diag_ids: DIAG_IDS.as_ptr(),
-        diag_ids_len: DIAG_IDS.len(),
-        mark_words: MARKS.as_ptr(),
-        mark_words_len: MARKS.len(),
-        ..statement("busbar-auth-sigv4", env!("CARGO_PKG_VERSION"), 1024)
-    },
+    statement: statement("busbar-auth-sigv4", env!("CARGO_PKG_VERSION"), 1024)
+        .with_kind_tail(TAIL)
+        .with_diag_ids(&DIAG_IDS)
+        .with_mark_words(&MARKS),
     lifecycle: {
         validate: Validate, open: Open, refresh: Refresh, retire: Retire, tick: Tick,
         drive: Drive, cancel: Cancel, release: Release, close: Close,

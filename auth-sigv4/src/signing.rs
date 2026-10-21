@@ -263,7 +263,11 @@ impl SigV4Binding {
         set_header(&mut headers, "x-amz-date", amzdate.clone());
         set_header(&mut headers, "x-amz-content-sha256", payload_hash.clone());
         if let Some(t) = &cred.session_token {
-            set_header(&mut headers, "x-amz-security-token", t.reveal().as_str().to_owned());
+            set_header(
+                &mut headers,
+                "x-amz-security-token",
+                t.reveal().as_str().to_owned(),
+            );
         }
         let canonical_uri = sigv4::uri_encode_path(facts.path);
         let canonical_query = sigv4::canonical_query(facts.query);

@@ -106,10 +106,10 @@ fn each_concurrent_bind_reads_back_its_own_refusal_text() {
     );
 }
 
-/// A bind's reply outlives a later bind on the same thread too: the host copies after the call
+/// A bind's reply outlives the next bind on the same thread too: the host copies after the call
 /// returns, and the next bind must not have freed what the first reply names.
 #[test]
-fn a_later_bind_leaves_an_earlier_reply_readable() {
+fn the_next_bind_leaves_the_first_reply_readable() {
     let instance = open();
     let first_style = "first-style-not-served-by-this-plugin";
     let (first_outcome, first) = bind(instance, first_style);

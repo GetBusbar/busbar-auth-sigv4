@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! **THE PLUGIN TESTS ITSELF, BOTH WAYS** (BUSBAR-1.6.0.md THE DESIGN, §2; §11.4). See
-//! `busbar-auth-header/tests/conformance.rs` for the shared harness shape; this is `sigv4`'s own
-//! script.
+//! **THE PLUGIN TESTS ITSELF, BOTH WAYS** (BUSBAR-1.6.0.md THE DESIGN, §2; §11.4): busbar's
+//! published conformance harness, over `sigv4`'s own script.
 //!
 //! ## The RED arms stay in the file
 //!

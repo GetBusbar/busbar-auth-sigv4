@@ -90,6 +90,6 @@ fn an_unknown_style_or_malformed_settings_is_refused() {
     assert_eq!(
         lines(open("bearer", Some("k"), "{}")),
         ["settings: outbound auth style `bearer` is not served by this plugin"],
-        "bearer is a different mechanism, busbar-auth-header"
+        "bearer is not this plugin's style"
     );
 }

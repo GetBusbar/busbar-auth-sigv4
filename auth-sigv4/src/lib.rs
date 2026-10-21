@@ -37,7 +37,7 @@
 //! host store service"; Appendix A, B.3: "Inbound SigV4 moves into an auth plugin's verify over a
 //! store-read host service, keeping the dummy-secret timing equivalence for an unknown
 //! AccessKeyId". The kernel's pre-step and `verify_sigv4_ingress_credential` (and
-//! `busbar-kernel-identity`'s `ingress_sigv4`) are [`inbound`], verbatim; `verify` serves them at
+//! `busbar-kernel-identity`'s `ingress_sigv4`) are `inbound`, verbatim; `verify` serves them at
 //! the `HeadBody` point (`CAP_INBOUND`, every header line, the body):
 //!
 //! * no `authorization` line, or one that does not open with `AWS4-HMAC-SHA256`: PASS (not this
@@ -56,53 +56,52 @@
 //!   the kernel's one opaque 401.
 //!
 //! NOTHING OF `verify`'S IS CACHED. Every `verify` reads the secret through the host's
-//! `records.secret` (the contract SDK's `VerifyOp::records_secret`): a `verify` whose read pends
-//! answers PENDING on its ticket, and the host re-enters it from the top, where the re-issued handle
-//! reads the stored answer. A ticket-less `verify` that needs the read answers REFUSED, and the host
-//! submits it on a ticket. Neither the secret nor a verdict outlives the call.
+//! `records.secret` (the contract SDK's [`VerifyOp::records_secret`]): a `verify` whose read
+//! pends answers PENDING on its ticket, and the host re-enters it from the top, where the
+//! re-issued handle reads the stored answer. A ticket-less `verify` that needs the read answers
+//! REFUSED, and the host submits it on a ticket. Neither the secret nor a verdict outlives the
+//! call, so a rotated or revoked credential is judged by the host's answer of the moment.
 //!
 //! The login pair is not served and answers REFUSED (the tail does not declare `CAP_LOGIN`).
 //!
 //! THE DOOR is the contract SDK's safe auth kit (`auth_door!(verify_and_outbound: ..)` over
-//! `instance::SigV4`, a `VerifyPlugin` and an `OutboundPlugin` over one instance): the kit reads the
-//! host's frames, writes the fields and the verdict under the short-buffer rule, calls the host's
-//! services and keeps every answer's memory in the answering instance. So this crate is
-//! `#![forbid(unsafe_code)]` and holds no per-thread or process-global state (THE DESIGN §2: "Plane,
-//! hook, auth (inbound and outbound) and secret plugins are `#![forbid(unsafe_code)]`"; "A plugin
-//! holds no process-global state"). The one exported symbol is the sibling `-plugin` cdylib's.
+//! `instance::SigV4`, a `VerifyPlugin` and an `OutboundPlugin` over one instance): the kit
+//! reads the host's frames, writes the fields and the verdict under the short-buffer rule, calls
+//! the host's services and keeps every answer's memory in the answering instance, so this crate is
+//! `#![forbid(unsafe_code)]` and holds no per-thread or process-global state (THE DESIGN §2).
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 mod held;
-pub mod inbound;
+mod inbound;
 mod instance;
 mod signing;
 mod sigv4;
 mod style;
 
 use std::borrow::Cow;
-use std::mem::size_of;
-use std::ptr;
 use std::task::Poll;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use busbar_contract::abi::auth::{
-    AuthTail, StyleDecl, CAP_INBOUND, CAP_OUTBOUND, FACT_INBOUND_ALL_HEADERS,
-    FACT_READS_CREDENTIALS, LOGIN_KIND_NONE, POINT_HEAD_BODY, STYLE_CALLER_CREDENTIAL,
+    AuthPoints, AuthTail, StyleDecl, FACT_INBOUND_ALL_HEADERS, STYLE_CALLER_CREDENTIAL,
     STYLE_NEEDS_HEADERS,
 };
 use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::mechanism::door::{
-    KindTailHead, MarkWord, Statement, MARK_WORD_ISSUED_ID_ALPHABET, MARK_WORD_ISSUED_ID_LENGTH,
+    MarkWord, Statement, MARK_WORD_ISSUED_ID_ALPHABET, MARK_WORD_ISSUED_ID_LENGTH,
     MARK_WORD_ISSUED_ID_PREFIX, MARK_WORD_ISSUED_SECRET_ALPHABET, MARK_WORD_ISSUED_SECRET_LENGTH,
 };
+use busbar_contract::abi::mechanism::extensions;
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::{
-    carrier, Answer, Strip, Verdict, VerifiedIdentity, VerifyOp, VerifyPlugin, VerifyView,
+    carrier, with_credential_kinds, with_tail, Answer, Strip, Verdict, VerifiedIdentity, VerifyOp,
+    VerifyPlugin, VerifyView,
 };
 use busbar_contract::abi::sdk::auth_outbound::{
-    Diags, Driven, FieldsAnswer, FieldsView, FieldsWriter, Mode, OpenRefusal, OutboundPlugin,
+    outbound_tail, style as declare, with_inbound, Diags, Driven, FieldsAnswer, FieldsView,
+    FieldsWriter, Mode, OpenRefusal, OutboundPlugin,
 };
 use busbar_contract::abi::sdk::conn::Host;
 use busbar_contract::abi::sdk::door::{abi_str, statement};
@@ -110,7 +109,7 @@ use busbar_contract::abi::sdk::exchange::Op;
 use busbar_contract::abi::sdk::life::Refusal;
 use busbar_contract::abi::sdk::services::CredentialSecret;
 
-use crate::inbound::{Judgement, Read, SecretSource};
+use crate::inbound::{Judgement, Read};
 use crate::instance::{diag, SigV4, Signed, Who, WARN};
 use crate::signing::SignFacts;
 
@@ -124,34 +123,26 @@ const FIELD_FLAGS: u32 = 0;
 /// DESIGN, "Auth points and guest lists") and hashes the body itself; it signs the content type
 /// the request is sent with, so it needs the header envelope; it serves the caller's credential
 /// too.
-const STYLE_DECLS: [StyleDecl; 1] = [StyleDecl {
-    name: abi_str(style::SIGV4),
-    flags: STYLE_CALLER_CREDENTIAL | STYLE_NEEDS_HEADERS,
-    points: POINT_HEAD_BODY,
-}];
+const STYLE_DECLS: &[StyleDecl] = &[declare(
+    style::SIGV4,
+    STYLE_CALLER_CREDENTIAL | STYLE_NEEDS_HEADERS,
+    AuthPoints::HEAD_BODY,
+)];
 
 /// The credential kinds `verify` reads through the host's `records.secret`: the host-held SigV4
 /// credentials (a busbar key's AccessKeyId and secret).
-const CREDENTIAL_KINDS: [AbiStr; 1] = [abi_str(inbound::CREDENTIAL_KIND)];
+const CREDENTIAL_KINDS: &[AbiStr] = &[abi_str(inbound::CREDENTIAL_KIND)];
 
 /// THE AUTH STATEMENT TAIL: the outbound `sigv4` style, and the inbound SigV4 check at the
 /// `HeadBody` point (it hashes the body against the signed `x-amz-content-sha256`), reading EVERY
 /// header line (the signed set varies per request) and the host-held `sigv4` credentials. No login.
-const TAIL: &AuthTail = &AuthTail {
-    head: KindTailHead {
-        size: size_of::<AuthTail>() as u32,
-        _reserved: 0,
-    },
-    caps: CAP_OUTBOUND | CAP_INBOUND,
-    facts: FACT_INBOUND_ALL_HEADERS | FACT_READS_CREDENTIALS,
-    login_kind: LOGIN_KIND_NONE,
-    inbound_points: POINT_HEAD_BODY,
-    styles: STYLE_DECLS.as_ptr(),
-    styles_len: STYLE_DECLS.len(),
-    operator_principal: abi_str(""),
-    credential_kinds: CREDENTIAL_KINDS.as_ptr(),
-    credential_kinds_len: CREDENTIAL_KINDS.len(),
-};
+const TAIL: &AuthTail = &with_credential_kinds(
+    with_inbound(
+        outbound_tail(FACT_INBOUND_ALL_HEADERS, STYLE_DECLS),
+        AuthPoints::HEAD_BODY,
+    ),
+    CREDENTIAL_KINDS,
+);
 
 /// One issued-credential shape word mark of `class`.
 const fn issued(class: u32, word: &'static str) -> MarkWord {
@@ -185,27 +176,33 @@ const MARKS: [MarkWord; 6] = [
 /// The diagnostic ids, in [`instance::diag`] order: 1.5.5's catalog codes where the line had one.
 const DIAG_IDS: [AbiStr; 1] = [abi_str("auth.sigv4-session-token-invalid-bytes")];
 
-/// What the plugin states: its name, version, concurrency, diagnostics, marks and auth tail.
-const STATEMENT: Statement = Statement {
-    kind_tail: ptr::from_ref(TAIL).cast::<KindTailHead>(),
-    diag_ids: DIAG_IDS.as_ptr(),
-    diag_ids_len: DIAG_IDS.len(),
-    mark_words: MARKS.as_ptr(),
-    mark_words_len: MARKS.len(),
-    ..statement("busbar-auth-sigv4", env!("CARGO_PKG_VERSION"), 1024)
-};
+/// This plugin's whole `declares` document (BUSBAR-1.6.0.md l.246).
+const DECLARES: &[u8] = include_bytes!("../declares.json");
 
-busbar_contract::auth_door!(verify_and_outbound: SigV4, STATEMENT);
+busbar_contract::statement_extensions!(
+    /// The Statement's extensions: the `declares` document under `EXT_DECLARES`.
+    EXTENSIONS: [(extensions::EXT_DECLARES, DECLARES)]
+);
 
-/// THE COMPILED-IN ENTRY a composition root's `auths` row names: the door at
-/// `compiled_in::door::door`, the same [`door`] the dropped-in build (the sibling `-plugin`
-/// cdylib) exports (compiled-in = dropped-in).
-pub mod compiled_in {
-    /// The door and its `MACRO_DOOR` (the `plugin_door!` door a linked table names).
-    pub mod door {
-        pub use crate::{door, MACRO_DOOR};
-    }
+/// What the plugin states: its name, version, concurrency, diagnostics, marks, extensions and auth
+/// tail.
+const STATEMENT: Statement = with_tail(
+    {
+        let mut s = statement("busbar-auth-sigv4", env!("CARGO_PKG_VERSION"), 1024)
+            .with_diag_ids(&DIAG_IDS)
+            .with_mark_words(&MARKS);
+        s.extensions = EXTENSIONS;
+        s
+    },
+    TAIL,
+);
+
+mod door {
+    busbar_contract::auth_door!(verify_and_outbound: super::SigV4, super::STATEMENT);
 }
+
+/// THE DOOR: this plugin's one public item (BUSBAR-1.6.0.md l.3567, Crate shape).
+pub use door::door;
 
 /// Wall-clock seconds since the epoch (1970-01-01 UTC) — the clock `tick`'s day-key pre-derivation
 /// reads against.
@@ -236,35 +233,42 @@ fn fact(b: &[u8]) -> Option<&str> {
     std::str::from_utf8(b).ok().filter(|s| !s.is_empty())
 }
 
-/// The value of the first `content-type` line (ASCII case-insensitive) in the header envelope the
-/// host lent `fields` (the style declares `STYLE_NEEDS_HEADERS`); `None` when none is sent, or its
-/// value is not text.
+/// The `content-type` the request is sent with, from the header envelope the host lent `fields`
+/// (the style declares `STYLE_NEEDS_HEADERS`): every `content-type` line (ASCII case-insensitive)
+/// whose value is text, each trimmed of spaces, comma-joined in order as SigV4 combines a repeated
+/// header; `None` when none is sent.
 pub(crate) fn sent_content_type<'a>(
     headers: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
-) -> Option<&'a str> {
-    headers
+) -> Option<String> {
+    let values: Vec<&str> = headers
         .into_iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case(b"content-type"))
-        .and_then(|(_, v)| std::str::from_utf8(v).ok())
+        .filter(|(n, _)| n.eq_ignore_ascii_case(b"content-type"))
+        .filter_map(|(_, v)| std::str::from_utf8(v).ok())
+        .map(|v| v.trim_matches(' '))
+        .collect();
+    (!values.is_empty()).then(|| values.join(","))
 }
 
 /// The SigV4 facts of a `fields` call: the walked request's method, host, path, query and sent
 /// content type (BUSBAR-1.6.0.md THE DESIGN §6: "SigV4 signs the real method and query of the
 /// walked request"); `None` when the host sent no method, host or path.
-fn sign_facts<'a>(view: &FieldsView<'a>, hash: &'a str) -> Option<SignFacts<'a>> {
+fn sign_facts<'v: 'h, 'h>(
+    view: &FieldsView<'v>,
+    hash: &'h str,
+    content_type: Option<&'h str>,
+) -> Option<SignFacts<'h>> {
     Some(SignFacts {
         method: fact(view.method())?,
         host: fact(view.authority())?,
         path: fact(view.path())?,
         query: view.query().and_then(fact),
-        content_type: sent_content_type(view.headers()),
+        content_type,
         payload_hash: hash,
         timestamp_epoch: view.timestamp(),
     })
 }
 
 impl OutboundPlugin for SigV4 {
-    /// `validate`: present settings must be a JSON object (REFUSED with the reason).
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
         if settings_ok(settings) {
             Ok(())
@@ -318,8 +322,13 @@ impl OutboundPlugin for SigV4 {
             Mode::Own => Who::Own,
             Mode::Passthrough => Who::Caller(view.caller_credential()),
         };
+        let content_type = sent_content_type(view.headers());
         Poll::Ready(
-            match self.sign(view.handle(), who, sign_facts(view, &hash)) {
+            match self.sign(
+                view.handle(),
+                who,
+                sign_facts(view, &hash, content_type.as_deref()),
+            ) {
                 None => FieldsAnswer::Refused,
                 Some(Signed::NoFacts) => FieldsAnswer::Failed(Cow::Borrowed("")),
                 Some(Signed::Fields { fields, note }) => {
@@ -328,7 +337,7 @@ impl OutboundPlugin for SigV4 {
                     }
                     // The signer's line, as 1.5.5 logged it on each such request.
                     if let Some(note) = note {
-                        out.diag(diag::SESSION_TOKEN_INVALID_BYTES, WARN, &*note);
+                        out.diag(diag::SESSION_TOKEN_INVALID_BYTES, WARN, note);
                     }
                     FieldsAnswer::Ready
                 }
@@ -366,27 +375,21 @@ impl OutboundPlugin for SigV4 {
     }
 }
 
-/// The secret source `verify` reads through: the host's `records.secret`, on the op's ticket, on
-/// every call.
-impl SecretSource for &VerifyOp {
-    type Secret = CredentialSecret;
-
-    fn read(&mut self, kind: &str, id: &str) -> Read<CredentialSecret> {
-        match self.records_secret(kind, id) {
-            // On no ticket too, with no crossing: the kit answers that `verify` REFUSED and the
-            // host submits it on a ticket.
-            Poll::Pending => Read::Pending,
-            Poll::Ready(Ok(secret)) => {
-                let live = secret.live();
-                Read::Secret { secret, live }
-            }
-            Poll::Ready(Err(_)) => Read::Unavailable,
+/// The secret `verify` reads: the host's `records.secret`, on the op's ticket, on every call.
+fn read_secret(op: &VerifyOp, kind: &str, id: &str) -> Read<CredentialSecret> {
+    match op.records_secret(kind, id) {
+        // On no ticket too, with no crossing: the kit answers that `verify` REFUSED and the
+        // host submits it on a ticket.
+        Poll::Pending => Read::Pending,
+        Poll::Ready(Ok(secret)) => {
+            let live = secret.live();
+            Read::Secret { secret, live }
         }
+        Poll::Ready(Err(_)) => Read::Unavailable,
     }
 }
 
 impl VerifyPlugin for SigV4 {
-    /// The kit opens the one instance through [`OutboundPlugin::open`]; this builds the same.
     fn open(settings: &[u8], _: &[&[u8]]) -> Result<Self, &'static str> {
         if !settings_ok(settings) {
             return Err(SETTINGS_NOT_OBJECT);
@@ -394,7 +397,7 @@ impl VerifyPlugin for SigV4 {
         Ok(SigV4::new(0))
     }
 
-    /// `verify` at the `HeadBody` point: the inbound SigV4 check ([`inbound::judge`]), its secret
+    /// `verify` at the `HeadBody` point: the inbound SigV4 check (`inbound::judge`), its secret
     /// read through the host's `records.secret` on every call.
     fn verify_ticketed(&self, view: &VerifyView<'_>, op: &VerifyOp) -> Poll<Answer> {
         let request = inbound::Request {
@@ -405,8 +408,7 @@ impl VerifyPlugin for SigV4 {
             body: view.body(),
             now: view.timestamp(),
         };
-        let mut source = op;
-        let verdict = match inbound::judge(&request, &mut source) {
+        let verdict = match inbound::judge(&request, &mut |kind, id| read_secret(op, kind, id)) {
             Judgement::Pass => Verdict::Pass,
             Judgement::Reject => Verdict::Reject,
             Judgement::Identity(subject) => Verdict::Identity(VerifiedIdentity {
@@ -424,7 +426,3 @@ impl VerifyPlugin for SigV4 {
         Poll::Ready(answer)
     }
 }
-
-#[cfg(test)]
-#[path = "tests/policy_tests.rs"]
-mod policy_tests;

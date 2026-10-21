@@ -2,9 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE HANDLE BOOKKEEPING AND `fields`' BODY ([`SigV4::sign`]), both credential modes — no mint,
-//! no wire, no waiting ticket: a sigv4 binding signs synchronously. The frames around it (the
-//! fields written under the short-buffer rule, the note in the reply's envelope) are the contract
-//! kit's, driven through the real loader by the `-plugin` crate's conformance script.
+//! no wire, no waiting ticket: a sigv4 binding signs synchronously. The frames around it are the
+//! contract kit's, driven through the real loader in the `-plugin` crate's tests.
 
 use super::*;
 use crate::sigv4::sha256_hex;
@@ -57,18 +56,6 @@ fn fields_noted(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bo
         timestamp_epoch: 1_440_938_160,
     };
     answered(s.sign(handle, who(mode, caller), Some(facts)))
-}
-
-/// The `authorization` field among `signed`'s fields.
-fn authorization_of(signed: Option<Signed>) -> String {
-    match signed {
-        Some(Signed::Fields { fields, .. }) => fields
-            .iter()
-            .find(|(n, _)| n == "authorization")
-            .map(|(_, v)| v.as_str().to_owned())
-            .expect("an authorization is set"),
-        _ => panic!("the handle signs"),
-    }
 }
 
 fn open(s: &SigV4, cred: Option<&str>) -> u64 {
@@ -177,21 +164,34 @@ struct Walked {
 /// The `authorization` field `fields` sets for `walked` on the operator's binding `handle`.
 fn authorization(s: &SigV4, handle: u64, walked: &Walked) -> String {
     let hash = sha256_hex(b"");
-    let headers: Vec<(&[u8], &[u8])> = walked
+    let head: Vec<(&[u8], &[u8])> = walked
         .content_type
         .map(|ct| (&b"Content-Type"[..], ct.as_bytes()))
         .into_iter()
         .collect();
+    let content_type = crate::sent_content_type(head);
     let facts = SignFacts {
         method: walked.method,
         host: "runtime.signer.example",
         path: walked.path,
         query: walked.query.filter(|q| !q.is_empty()),
-        content_type: crate::sent_content_type(headers),
+        content_type: content_type.as_deref(),
         payload_hash: &hash,
         timestamp_epoch: 1_440_938_160,
     };
-    authorization_of(s.sign(handle, Who::Own, Some(facts)))
+    the_authorization(s.sign(handle, Who::Own, Some(facts)))
+}
+
+/// The `authorization` value among the fields a READY `fields` set.
+fn the_authorization(signed: Option<Signed>) -> String {
+    let Some(Signed::Fields { fields, .. }) = signed else {
+        panic!("fields answers READY");
+    };
+    fields
+        .into_iter()
+        .find(|(n, _)| n == "authorization")
+        .map(|(_, v)| v.as_str().to_owned())
+        .expect("an authorization is set")
 }
 
 /// The `authorization` AWS computes for a request with this canonical method, URI and query over
@@ -375,29 +375,224 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     let body: &[u8] = br#"{"messages":[]}"#;
     let hash = sha256_hex(body);
-    let line = |name: &'static str, value: &'static str| (name.as_bytes(), value.as_bytes());
-    let sign = |head: &[(&'static [u8], &'static [u8])]| {
+    let sign = |head: &[(&'static str, &'static str)]| {
+        let content_type =
+            crate::sent_content_type(head.iter().map(|(n, v)| (n.as_bytes(), v.as_bytes())));
         let facts = SignFacts {
             method: "POST",
             host: "runtime.signer.example",
             path: "/model/m/converse",
             query: None,
-            content_type: crate::sent_content_type(head.iter().copied()),
+            content_type: content_type.as_deref(),
             payload_hash: &hash,
             timestamp_epoch: 1_440_938_160,
         };
-        authorization_of(s.sign(handle, Who::Own, Some(facts)))
+        the_authorization(s.sign(handle, Who::Own, Some(facts)))
     };
-    let plane_only = [line("content-type", "application/json")];
+    let plane_only = [("content-type", "application/json")];
     let completed = [
-        line("content-type", "application/json"),
-        line("host", "runtime.signer.example"),
-        line("accept", "*/*"),
+        ("content-type", "application/json"),
+        ("host", "runtime.signer.example"),
+        ("accept", "*/*"),
     ];
     assert_eq!(sign(&plane_only), VECTOR, "1.5.5's signature");
     assert_eq!(
         sign(&completed),
         VECTOR,
         "the transport's host and accept lines leave the signature 1.5.5's"
+    );
+}
+
+/// The host lent no method, host or path: nothing is signed, and the call FAILS on a held handle
+/// (an unheld one is REFUSED first).
+#[test]
+fn a_request_with_no_facts_fails_on_a_held_handle() {
+    let s = SigV4::new(1);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    assert_eq!(
+        answered(s.sign(handle, Who::Own, None)),
+        (Outcome::Failed, false, 0)
+    );
+    assert_eq!(
+        answered(s.sign(999, Who::Own, None)),
+        (Outcome::Refused, false, 0)
+    );
+}
+
+/// PARITY WITH 1.5.5 (busbar testing/shadow-oracle/golden/1.5.5/cells: `egress.auth__sigv4__session-token`,
+/// `egress.auth__cred-identity__bedrock`): for every request 1.5.5 could send (POST,
+/// `application/json`, empty query, the writer's header set: v1.5.5 `proto/bedrock/writer.rs`), the
+/// signer signs to the signature 1.5.5's `sign_v4` computed. The expected values are literals from
+/// the reviewer's independent script `cells.py` (with its `vec.py`; both in the PR body; python `-I`,
+/// hmac and hashlib only; it also reproduces AWS's published ListUsers vector), over the secret
+/// `SECRET`, us-east-1 / svc, host `127.0.0.1:8080`, 2015-08-30T12:36:00Z; the canonical URI is the
+/// path encoded once more, as the script's `uenc(path)`.
+#[test]
+fn the_signer_signs_every_request_1_5_5_could_send_as_1_5_5_signed_it() {
+    const TS: u64 = 1_440_938_160;
+    const TOKEN: &str = "OracleSessionToken//+capture=0002";
+    const SIGNED: &str = "content-type;host;x-amz-content-sha256;x-amz-date";
+    const SIGNED_TOKEN: &str =
+        "content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token";
+    const PING: &[u8] = br#"{"messages":[{"content":[{"text":"ping"}],"role":"user"}]}"#;
+    let cases: [(bool, &str, &[u8], &str, &str); 6] = [
+        (
+            false,
+            "/model/m-cap/converse",
+            PING,
+            SIGNED,
+            "7c151b9a4add019c8129befdbd2bfa8b42a97b8f757794947e2679f057a71b19",
+        ),
+        (
+            false,
+            "/model/acme.model-1:0/converse-stream",
+            b"{}",
+            SIGNED,
+            "aca1503d162b2ef006708e1733f2a7459dd478b8d4652408295a2e52d3b94b9a",
+        ),
+        (
+            false,
+            "/model/m/converse",
+            b"",
+            SIGNED,
+            "8f9378ad1f3169a083598e90b3a9878dc1567ca50a4c88242e83a579e8c44c86",
+        ),
+        (
+            true,
+            "/model/m-cap/converse",
+            PING,
+            SIGNED_TOKEN,
+            "b66c42b8713aca944c91a14f6a716d5bed0f6027e6d4d9a9e4e5610a61efd660",
+        ),
+        (
+            true,
+            "/model/acme.model-1:0/converse-stream",
+            b"{}",
+            SIGNED_TOKEN,
+            "d773de07640e3752248952f3bffaab1c4242fe14d622dc7dcdd4f9c4b7f9956c",
+        ),
+        (
+            true,
+            "/model/m/converse",
+            b"",
+            SIGNED_TOKEN,
+            "87e16b841f783aef2e900d5051ba283c4109fa353d71449a7f5532cd855dc8d8",
+        ),
+    ];
+    for (with_token, path, body, signed_headers, signature) in cases {
+        let cred = if with_token {
+            format!("AKIDORACLECAPTURE02:SECRET:{TOKEN}")
+        } else {
+            "AKIDORACLECAPTURE02:SECRET".to_string()
+        };
+        let hash = sha256_hex(body);
+        let s = SigV4::new(1);
+        let handle = open(&s, Some(&cred));
+        let got = the_authorization(s.sign(
+            handle,
+            Who::Own,
+            Some(SignFacts {
+                method: "POST",
+                host: "127.0.0.1:8080",
+                path,
+                query: None,
+                content_type: Some("application/json"),
+                payload_hash: &hash,
+                timestamp_epoch: TS,
+            }),
+        ));
+        assert_eq!(
+            got,
+            format!(
+                "AWS4-HMAC-SHA256 Credential=AKIDORACLECAPTURE02/20150830/us-east-1/svc/aws4_request, SignedHeaders={signed_headers}, Signature={signature}"
+            ),
+            "{path} token={with_token}"
+        );
+    }
+}
+
+/// THE WALKED REQUEST IS SIGNED (owner-approved 2026-10-21; BUSBAR-1.6.0.md section 6): a GET, a
+/// query (names and values decoded once and re-encoded over the unreserved set with uppercase hex,
+/// sorted by name then value, a name repeated kept) and a non-JSON content type each sign to the
+/// vector an independent script computes (python `-I`, `hmac` and `hashlib` only; the script text is
+/// in the PR body): AKIDEXAMPLE:SECRET, us-east-1 / svc, host
+/// `runtime.signer.example`, path `/model/m/converse`, empty body, 2015-08-30T12:36:00Z.
+#[test]
+fn the_walked_methods_queries_and_content_types_sign_to_independent_vectors() {
+    let s = SigV4::new(1);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    let hash = sha256_hex(b"");
+    let sign = |method: &str, query: Option<&str>, content_type: Option<&str>| {
+        the_authorization(s.sign(
+            handle,
+            Who::Own,
+            Some(SignFacts {
+                method,
+                host: "runtime.signer.example",
+                path: "/model/m/converse",
+                query,
+                content_type,
+                payload_hash: &hash,
+                timestamp_epoch: 1_440_938_160,
+            }),
+        ))
+    };
+    let vector = |signed_headers: &str, signature: &str| {
+        format!(
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/svc/aws4_request, \
+             SignedHeaders={signed_headers}, Signature={signature}"
+        )
+    };
+    assert_eq!(
+        sign("GET", None, None),
+        vector(
+            "host;x-amz-content-sha256;x-amz-date",
+            "5240f17779f2d75547be14adf734d994702fdd2ad64208e44ab1b81f017c112c"
+        ),
+        "a GET with no query and no content type"
+    );
+    assert_eq!(
+        sign(
+            "POST",
+            Some("z=a/b&A=%7e&k=%3a&d=2&d=1&e"),
+            Some("application/json")
+        ),
+        vector(
+            "content-type;host;x-amz-content-sha256;x-amz-date",
+            "ba72d31b3825e3ff359f36d8653b4173c927c986d13b1a491d0d0bd204b7e0c5"
+        ),
+        "a query: encoding, sorting, a repeated name, a bare name"
+    );
+    assert_eq!(
+        sign("POST", None, Some("text/plain; charset=utf-8")),
+        vector(
+            "content-type;host;x-amz-content-sha256;x-amz-date",
+            "501c33d7676055ea5944e5f18c29650c00226e58ed5488a5e2b4918991690760"
+        ),
+        "a non-JSON content type"
+    );
+}
+
+/// EVERY `content-type` LINE IS SIGNED, comma-joined in order (SigV4's rule for a repeated header),
+/// names matched case-insensitively, values trimmed of spaces; none sent, none signed.
+#[test]
+fn every_content_type_line_is_comma_joined() {
+    let lines = |v: &[(&'static str, &'static str)]| {
+        crate::sent_content_type(v.iter().map(|(n, v)| (n.as_bytes(), v.as_bytes())))
+    };
+    assert_eq!(lines(&[]), None);
+    assert_eq!(lines(&[("accept", "*/*")]), None);
+    assert_eq!(
+        lines(&[("Content-Type", "application/json")]).as_deref(),
+        Some("application/json")
+    );
+    assert_eq!(
+        lines(&[
+            ("content-type", " text/plain "),
+            ("accept", "*/*"),
+            ("CONTENT-TYPE", "application/json"),
+        ])
+        .as_deref(),
+        Some("text/plain,application/json")
     );
 }

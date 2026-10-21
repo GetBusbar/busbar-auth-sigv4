@@ -39,9 +39,6 @@ fn code(text: &str) -> String {
         .join("\n")
 }
 
-/// RED (busbar row 159, the ledger's `crates/busbar-auth-sigv4/src` HIGH: "It still carries its own
-/// raw-pointer boundary where an auth plugin must forbid unsafe code"): the door is the contract
-/// SDK's safe auth kit, and the crate root forbids `unsafe` with no module allowed back in.
 #[test]
 fn the_crate_forbids_unsafe_code() {
     let lib = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs"))

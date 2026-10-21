@@ -3,8 +3,9 @@
 
 //! THE DOOR'S OWN TABLE, CALLED AS A HOST CALLS IT: the frame-level tests build each `in`/`out` a
 //! host builds (its head stating the slot and the frame's size) and call the entry the plugin's
-//! door states, over the instance its `open` answered. The logic crate forbids `unsafe`, so the
-//! host side of these tests lives here.
+//! door states, over the instance its `open` answered. Shared by the frame-level test targets.
+
+#![allow(dead_code)] // each target uses its own share of the helpers
 
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -44,12 +45,18 @@ pub fn out_head<O>() -> OutHead {
 /// Call `entry` on `instance` with `input` and `out`, as the host does.
 pub fn call<I, O>(entry: Option<Op>, instance: *mut c_void, input: &I, out: &mut O) -> Outcome {
     let entry = entry.expect("the door states the slot");
-    entry(
-        instance,
-        std::ptr::from_ref(input).cast(),
-        std::ptr::from_mut(out).cast(),
-    )
-    .outcome()
+    // SAFETY: the entry is the plugin's own slot, called with the host's live `in` and `out`; the
+    // block is needed once busbar #1469 makes the slots `unsafe extern "C" fn`, and unused
+    // (allowed) before it.
+    #[allow(unused_unsafe)]
+    let raw = unsafe {
+        entry(
+            instance,
+            std::ptr::from_ref(input).cast(),
+            std::ptr::from_mut(out).cast(),
+        )
+    };
+    raw.outcome()
 }
 
 /// `open` at generation 1 over `host` (NULL: the host hands no tables); the instance.

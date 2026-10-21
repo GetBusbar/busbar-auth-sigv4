@@ -261,40 +261,45 @@ fn test_verify_inbound_sigv4_roundtrip_accepts() {
     assert_eq!(verify_inbound_sigv4(&parsed, &req, secret, now), Ok(()));
 }
 
+/// A signed header the request carries more than once is verified over its FIRST value, as 1.5.5
+/// selected it (v1.5.5 `crates/busbar/src/sigv4.rs:452-460`: `req.headers.iter().find(..)`): a
+/// client that signed the first value verifies; one that signed the values comma-joined does not.
 #[test]
-fn test_verify_inbound_sigv4_duplicate_signed_header_values_are_combined() {
+fn test_verify_inbound_sigv4_repeated_signed_header_takes_the_first_value_as_1_5_5_did() {
     let secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
     let amzdate = "20150830T123600Z";
     let now = parse_amz_date(amzdate).unwrap();
     let payload_hash = sha256_hex(b"{\"x\":1}");
-    let signing_view = vec![
-        (
-            "host".to_string(),
-            "example-service.amazonaws.com".to_string(),
-        ),
-        ("x-amz-meta-tag".to_string(), "a,b".to_string()),
-        (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
-        (X_AMZ_DATE.to_string(), amzdate.to_string()),
-    ];
-    let (sig, signed_headers) = sign_v4(
-        secret,
-        "us-east-1",
-        "example-service",
-        "POST",
-        "/v1/example/invoke",
-        "",
-        &signing_view,
-        &payload_hash,
-        amzdate,
-        "20150830",
-    );
-    let parsed = ParsedAuthHeader {
-        access_key_id: "AKIAEXAMPLE1234567890".to_string(),
-        datestamp: "20150830".to_string(),
-        region: "us-east-1".to_string(),
-        service: "example-service".to_string(),
-        signed_headers,
-        signature: sig,
+    let signed_over = |tag: &str| {
+        let signing_view = vec![
+            (
+                "host".to_string(),
+                "example-service.amazonaws.com".to_string(),
+            ),
+            ("x-amz-meta-tag".to_string(), tag.to_string()),
+            (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
+            (X_AMZ_DATE.to_string(), amzdate.to_string()),
+        ];
+        let (sig, signed_headers) = sign_v4(
+            secret,
+            "us-east-1",
+            "example-service",
+            "POST",
+            "/v1/example/invoke",
+            "",
+            &signing_view,
+            &payload_hash,
+            amzdate,
+            "20150830",
+        );
+        ParsedAuthHeader {
+            access_key_id: "AKIAEXAMPLE1234567890".to_string(),
+            datestamp: "20150830".to_string(),
+            region: "us-east-1".to_string(),
+            service: "example-service".to_string(),
+            signed_headers,
+            signature: sig,
+        }
     };
     let wire = vec![
         (
@@ -314,21 +319,34 @@ fn test_verify_inbound_sigv4_duplicate_signed_header_values_are_combined() {
         payload_hash: &payload_hash,
         amzdate,
     };
-    assert_eq!(verify_inbound_sigv4(&parsed, &req, secret, now), Ok(()));
+    assert_eq!(
+        verify_inbound_sigv4(&signed_over("a"), &req, secret, now),
+        Ok(()),
+        "the first value is the one 1.5.5 verified"
+    );
+    assert_eq!(
+        verify_inbound_sigv4(&signed_over("a,b"), &req, secret, now),
+        Err(VerifyError::SignatureMismatch),
+        "1.5.5 never comma-joined a repeated header"
+    );
 }
 
+/// 1.5.5's canonicalisation carries NO quote state (v1.5.5 `crates/busbar/src/sigv4.rs:137-155`,
+/// `canonicalize_header_value`): every run of ASCII spaces collapses, inside double quotes too.
 #[test]
-fn test_canonicalize_header_value_preserves_spaces_inside_quotes() {
+fn test_canonicalize_header_value_collapses_spaces_inside_quotes_as_1_5_5_did() {
     assert_eq!(
         canonicalize_header_value("attachment; filename=\"my  file.txt\""),
-        "attachment; filename=\"my  file.txt\""
+        "attachment; filename=\"my file.txt\""
     );
     assert_eq!(
         canonicalize_header_value("  a   b  \"c   d\"   e  "),
-        "a b \"c   d\" e"
+        "a b \"c d\" e"
     );
-    let once = canonicalize_header_value("x  \"y  z\"  w");
-    assert_eq!(canonicalize_header_value(&once), once);
+    assert_eq!(
+        canonicalize_header_value("\"unbalanced  quote"),
+        "\"unbalanced quote"
+    );
 }
 
 #[test]
@@ -675,9 +693,7 @@ struct Fake {
     raw: Option<Vec<u8>>,
 }
 
-impl SecretSource for Fake {
-    type Secret = Zeroizing<Vec<u8>>;
-
+impl Fake {
     fn read(&mut self, kind: &str, id: &str) -> Read {
         self.reads.push((kind.to_string(), id.to_string()));
         if let Some(a) = self.answer {
@@ -765,7 +781,7 @@ fn run(
         body,
         now: NOW,
     };
-    judge(&req, fake)
+    judge(&req, &mut |k, i| fake.read(k, i))
 }
 
 #[test]
@@ -886,7 +902,10 @@ fn an_expired_signature_rejects() {
         body: Some(b""),
         now: NOW + CLOCK_SKEW_SECS + 60,
     };
-    assert_eq!(judge(&req, &mut Fake::default()), Judgement::Reject);
+    assert_eq!(
+        judge(&req, &mut |k, i| Fake::default().read(k, i)),
+        Judgement::Reject
+    );
 }
 
 #[test]
@@ -1005,13 +1024,19 @@ fn a_tampered_path_query_or_method_rejects() {
         body: Some(b""),
         now: NOW,
     };
-    assert_eq!(judge(&req, &mut Fake::default()), Judgement::Reject);
+    assert_eq!(
+        judge(&req, &mut |k, i| Fake::default().read(k, i)),
+        Judgement::Reject
+    );
     let req = Request {
         method: b"POST",
         path: b"/model/other/converse",
         ..req
     };
-    assert_eq!(judge(&req, &mut Fake::default()), Judgement::Reject);
+    assert_eq!(
+        judge(&req, &mut |k, i| Fake::default().read(k, i)),
+        Judgement::Reject
+    );
 }
 
 #[test]
@@ -1039,16 +1064,19 @@ fn a_secret_that_is_not_utf8_never_admits() {
     assert_eq!(run(&s.lines, None, Some(b""), &mut fake), Judgement::Reject);
 }
 
-#[test]
-fn a_duplicate_signed_header_is_comma_joined_in_request_order() {
+/// A client's signed POST whose signature covers `extra` (name, value as the client signed it)
+/// beside the three lines every request signs, sent with `sent` (name, value as on the wire) in
+/// place of `extra`, the `authorization` line first.
+fn client_lines(extra: &[(&str, &str)], sent: &[(&str, &str)]) -> Vec<(String, String)> {
     let (amzdate, datestamp) = format_amz_time(NOW);
     let payload_hash = sha256_hex(b"");
-    let signing_view = vec![
+    let common = [
         ("host".to_string(), "svc.example".to_string()),
-        ("x-amz-meta-tag".to_string(), "a,b".to_string()),
         (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
         (X_AMZ_DATE.to_string(), amzdate.clone()),
     ];
+    let mut signing_view = common.to_vec();
+    signing_view.extend(extra.iter().map(|(n, v)| (n.to_string(), v.to_string())));
     let (sig, signed_headers) = sign_v4(
         SECRET,
         "us-east-1",
@@ -1065,25 +1093,58 @@ fn a_duplicate_signed_header_is_comma_joined_in_request_order() {
         "AWS4-HMAC-SHA256 Credential={AKID}/{datestamp}/us-east-1/svc/aws4_request, \
          SignedHeaders={signed_headers}, Signature={sig}"
     );
-    let lines = vec![
-        ("authorization".to_string(), auth),
-        ("host".to_string(), "svc.example".to_string()),
-        ("x-amz-meta-tag".to_string(), "a".to_string()),
-        (X_AMZ_CONTENT_SHA256.to_string(), payload_hash),
-        ("x-amz-meta-tag".to_string(), "b".to_string()),
-        (X_AMZ_DATE.to_string(), amzdate),
-    ];
+    let mut lines = vec![("authorization".to_string(), auth)];
+    lines.extend(common);
+    lines.extend(sent.iter().map(|(n, v)| (n.to_string(), v.to_string())));
+    lines
+}
+
+/// A signed header sent twice is verified over its FIRST value, as 1.5.5 selected it (v1.5.5
+/// `crates/busbar/src/sigv4.rs:452-460`): the client that signed the first value is admitted, the
+/// one that signed both values comma-joined is refused, as 1.5.5 refused it.
+#[test]
+fn a_repeated_signed_header_is_verified_over_its_first_value_as_1_5_5_did() {
+    let sent = [("x-amz-meta-tag", "a"), ("x-amz-meta-tag", "b")];
     assert_eq!(
-        run(&lines, None, Some(b""), &mut Fake::default()),
+        run(
+            &client_lines(&[("x-amz-meta-tag", "a")], &sent),
+            None,
+            Some(b""),
+            &mut Fake::default()
+        ),
         Judgement::Identity(AKID.to_string())
     );
-    // Reordered values sign differently.
-    let mut swapped = lines.clone();
-    swapped[2].1 = "b".to_string();
-    swapped[4].1 = "a".to_string();
     assert_eq!(
-        run(&swapped, None, Some(b""), &mut Fake::default()),
+        run(
+            &client_lines(&[("x-amz-meta-tag", "a,b")], &sent),
+            None,
+            Some(b""),
+            &mut Fake::default()
+        ),
         Judgement::Reject
+    );
+}
+
+/// botocore signs a header's value with every whitespace run collapsed, quotes or not
+/// (`' '.join(value.split())`, botocore `auth.py` `SigV4Auth._header_value`), as 1.5.5 verified it
+/// (v1.5.5 `crates/busbar/src/sigv4.rs:137-155`, no quote state): a quoted double space it signed
+/// as one space verifies.
+#[test]
+fn a_botocore_signed_quoted_double_space_verifies() {
+    let sent = "attachment; filename=\"my  file.txt\"";
+    let botocore = sent.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(botocore, "attachment; filename=\"my file.txt\"");
+    assert_eq!(
+        run(
+            &client_lines(
+                &[("content-disposition", botocore.as_str())],
+                &[("content-disposition", sent)]
+            ),
+            None,
+            Some(b""),
+            &mut Fake::default()
+        ),
+        Judgement::Identity(AKID.to_string())
     );
 }
 

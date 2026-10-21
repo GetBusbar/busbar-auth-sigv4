@@ -3,8 +3,7 @@
 
 //! `open_outbound`'s body for `sigv4`: bind the style to its credential and settings
 //! ([`open_binding`]). Never touches the network. The per-request presentation, both credential
-//! modes, is [`crate::signing::SigV4Binding::sign`] through the door kit's `fields`
-//! (`crate::instance::SigV4::sign`).
+//! modes, is [`crate::signing::SigV4Binding::sign`] through the door kit's `fields` (`crate::instance::SigV4::sign`).
 //!
 //! THE SETTINGS SCHEMA (ARCHITECT ruling 2026-09-28): `{service, region}`. A `content_type` key is
 //! read past: the content type a signature covers is the one the request is sent with (the style

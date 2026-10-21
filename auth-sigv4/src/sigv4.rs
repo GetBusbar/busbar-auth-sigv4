@@ -9,22 +9,33 @@
 //! verified against AWS's own published worked example (GET iam ListUsers, 2015-08-30) in the
 //! tests, so correctness does not rely on trusting the move.
 //!
-//! Two changes, both at the edge of the chain and neither touching a signed byte:
+//! Departures from the moved signer, each named here:
 //!
-//! * THE DAILY KEY (BUSBAR-1.6.0.md THE DESIGN, §6.5: "SigV4 signs per request with a daily signing key derived
-//!   ahead of time"): [`sign_v4`] is split into [`signing_key`] (the HMAC chain over date, region,
-//!   service) and [`sign_v4_with_key`] (the per-request part), so a caller holding the day's key
-//!   signs without re-deriving it. [`sign_v4`] is the two composed, exactly the old function.
+//! * THE DAILY KEY (BUSBAR-1.6.0.md THE DESIGN, §6.5: "SigV4 signs per request with a daily signing
+//!   key derived ahead of time"): [`sign_v4`] is split into [`signing_key`] (the HMAC chain over
+//!   date, region, service) and [`sign_v4_with_key`] (the per-request part), so a caller holding the
+//!   day's key signs without re-deriving it. [`sign_v4`] is the two composed, exactly the old
+//!   function. No signed byte changes.
 //! * THE SECRET IS ZEROISED (TODO item 586, #53/#54; THE DESIGN §6: "auth material is zeroised"):
 //!   the `AWS4<secret>` key material, every derived key, and the HMAC's own key state (the padded
 //!   key blocks and the chaining state after each) are [`Zeroizing`] buffers, wiped on drop. A
 //!   library HMAC keeps its key's inner and outer pad states in a value it frees unwiped, so the
-//!   contract's wiped HMAC holds them.
+//!   contract's wiped HMAC holds them. No signed byte changes.
+//! * THE CANONICAL QUERY ([`canonical_query`]): each query name and value is decoded once and
+//!   re-encoded over the unreserved set with uppercase hex, then sorted, where the moved signer
+//!   sorted the query as sent. This DOES change signed bytes for a query sent with a reserved byte
+//!   raw, a lowercase escape or an escaped unreserved byte (AWS recomputes the canonical form, so
+//!   the moved signer's bytes were refused for those). For the request 1.5.5 signed, a POST of a
+//!   JSON body with no query, every signed byte is 1.5.5's.
+//!
+//! [`sign_v4_with_key`] merges a header name handed twice into one comma-separated canonical entry
+//! (the SigV4 canonicalisation rule); the one caller sets each name once, so for the requests 1.5.5
+//! signed nothing is merged and every signed byte is 1.5.5's.
 //!
 //! The signer's chain is shared with the INBOUND check ([`crate::inbound`], moved here from the
 //! kernel): it recomputes a client's signature through [`hmac`], [`signing_key`] and [`sha256_hex`],
-//! and derives the canonical URI with [`uri_encode_path`], keeping its own canonical signing (a
-//! quoted header value's interior spaces are kept verbatim there).
+//! and derives the canonical URI with [`uri_encode_path`], keeping its own canonical signing (1.5.5's
+//! verify-side header selection and canonicalisation).
 
 use ring::digest;
 use zeroize::{Zeroize, Zeroizing};
@@ -266,8 +277,7 @@ pub fn sign_v4_with_key(
 
     // The SigV4 canonicalisation rule does not sort the values of a header that appears more than
     // once; it combines them into one comma-separated list under that header's single entry. A
-    // caller CAN hand this function the same name twice (`decorate` builds its header list by
-    // pushing onto whatever the envelope already carries), so merging here rather than assuming the
+    // caller CAN hand this function the same name twice, so merging here rather than assuming the
     // caller never repeats a name is what keeps `SignedHeaders` and the canonical headers block in
     // the one-entry-per-name shape AWS's servers expect. The sort above already made same-named
     // entries adjacent, so a single pass merges them in their original relative order.

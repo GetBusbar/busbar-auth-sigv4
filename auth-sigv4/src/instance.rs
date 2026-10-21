@@ -2,12 +2,11 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! ONE INSTANCE: the handles (generation data, each with the unsendable-token line its `fields`
-//! reports). No token cache, no waker: a sigv4 binding never mints and never pends — `tick` only
-//! pre-derives day keys ahead of midnight. Nothing of `verify`'s is kept here: no secret, no
-//! verdict, no per-ticket state (the kernel never cached a SigV4 verdict, and the secret is the
-//! host's `records.secret` answer, read on every call). The answers' memory, the instance pointer
-//! and the host tables are the contract kit's (`busbar_contract::auth_door!`), so this crate holds
-//! no per-thread or process-global store (THE DESIGN §2).
+//! reports). No token cache, no waker: a sigv4 binding never mints and never pends — a bind and
+//! `tick` only pre-derive day keys ahead of midnight. Nothing of `verify`'s is kept here: no
+//! secret, no verdict, no per-ticket state (the kernel never cached a SigV4 verdict, and the
+//! secret is the host's `records.secret` answer on every call). The answers' memory, the instance
+//! pointer and the host tables are the contract kit's (`busbar_contract::auth_door!`).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -49,7 +48,7 @@ pub(crate) enum Signed {
         /// The signed fields.
         fields: Vec<Field>,
         /// The unsendable-token line, when the signer's session token is unsendable.
-        note: Option<Arc<str>>,
+        note: Option<Box<str>>,
     },
     /// The host lent no method, host or path: nothing can be signed.
     NoFacts,
@@ -84,8 +83,11 @@ impl SigV4 {
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
         let generation = self.generation.load(Ordering::Acquire);
         // The line a request signed with nothing reports names the binding's service, the one
-        // input it varies on: built here, once, so `fields` builds nothing for it.
+        // input it varies on: built here, once.
         let note = Self::note_unsendable(&binding.params().service);
+        // Today's key (and tomorrow's near midnight) is held from the bind on, not first at the
+        // next `tick` (THE DESIGN §6.5: "a daily signing key derived ahead of time").
+        binding.prederive(crate::now_epoch());
         self.handles
             .write()
             .unwrap_or_else(PoisonError::into_inner)
@@ -134,7 +136,9 @@ impl SigV4 {
             }
         };
         let fields = signer.sign(&facts);
-        let note = signer.session_token_unsendable().then_some(note);
+        let note = signer
+            .session_token_unsendable()
+            .then(|| Box::<str>::from(&*note));
         Some(Signed::Fields { fields, note })
     }
 

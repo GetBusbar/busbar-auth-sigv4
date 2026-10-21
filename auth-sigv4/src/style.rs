@@ -3,7 +3,8 @@
 
 //! `open_outbound`'s body for `sigv4`: bind the style to its credential and settings
 //! ([`open_binding`]). Never touches the network. The per-request presentation, both credential
-//! modes, is [`crate::signing::SigV4Binding::sign`] through [`crate::Fields`].
+//! modes, is [`crate::signing::SigV4Binding::sign`] through the door kit's `fields`
+//! (`crate::instance::SigV4::sign`).
 //!
 //! THE SETTINGS SCHEMA (ARCHITECT ruling 2026-09-28): `{service, region}`. A `content_type` key is
 //! read past: the content type a signature covers is the one the request is sent with (the style
@@ -104,7 +105,7 @@ pub fn open_binding(
         }
     };
     // A session token no header value may carry is not refused: the binding signs nothing, and
-    // each request it is asked for reports the signer's line (`crate::Fields`), as 1.5.5 did.
+    // each request it is asked for reports the signer's line (`crate::instance::SigV4::sign`), as 1.5.5 did.
     let cred = credential_text.and_then(SigningCredential::split);
     Ok(SigV4Binding::new(params, cred))
 }

@@ -1,23 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE `verify` SLOT, through the door's own trampolines as a host calls them: an instance opened
-//! over a host table whose `records.secret` serves one live credential, one that is not live, and
-//! the fixed dummy (not live) for any other id; the tail and Statement it states; every answer
-//! judged by the kind's own `check_identify`.
+//! THE `verify` SLOT, through the door's own table as a host calls it (moved here from the logic
+//! crate's `src/tests/verify_door_tests.rs`: that crate forbids `unsafe`, and playing the host
+//! needs it): an instance opened over a host table whose `records.secret` serves one live
+//! credential, one that is not live, and the fixed dummy (not live) for any other id; the tail and
+//! Statement it states; every answer judged by the kind's own `check_identify`.
 
-#![allow(unsafe_code)] // the fake host's `extern "C"` service reads the plugin's raw `in`
+mod frames;
 
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::Mutex;
 
+use busbar_auth_sigv4::inbound::{X_AMZ_CONTENT_SHA256, X_AMZ_DATE};
 use busbar_contract::abi::auth::{
-    check_identify, AuthTail, IdentifyOut, IdentityBuf, NamedValue, StripName, VerifyIn,
-    CAP_INBOUND, CAP_OUTBOUND, DECISION_CONTINUE, DECISION_STOP, FACT_INBOUND_ALL_HEADERS,
-    FACT_READS_CREDENTIALS, POINT_HEAD_BODY, SPAN_ABSENT, VERDICT_IDENTITY, VERDICT_PASS,
-    VERDICT_REJECT,
+    check_identify, slot as auth_slot, AuthTail, IdentifyOut, IdentityBuf, NamedValue, StripName,
+    VerifyIn, CANCEL_ABANDONED, CAP_INBOUND, CAP_OUTBOUND, DECISION_CONTINUE, DECISION_STOP,
+    FACT_INBOUND_ALL_HEADERS, FACT_READS_CREDENTIALS, POINT_HEAD_BODY, SPAN_ABSENT,
+    VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
 };
 use busbar_contract::abi::host::service::{
     op, HostSlots, ItemSpan, RecordsSecretIn, ServiceOut, SECRET_LIVE, SECRET_NOT_LIVE, SERVICES,
@@ -29,13 +31,10 @@ use busbar_contract::abi::mechanism::door::{
     DoorFn, Statement, MARK_WORD_CARRIER, MARK_WORD_ISSUED_ID_ALPHABET, MARK_WORD_ISSUED_ID_LENGTH,
     MARK_WORD_ISSUED_ID_PREFIX, MARK_WORD_ISSUED_SECRET_ALPHABET, MARK_WORD_ISSUED_SECRET_LENGTH,
 };
-use busbar_contract::abi::mechanism::lifecycle::{CancelIn, CancelOut, OpenIn, OpenOut};
+use busbar_contract::abi::mechanism::lifecycle::{slot as life, CancelIn, CancelOut};
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
-use busbar_contract::abi::sdk::door::Slot;
-
-use crate::inbound::{X_AMZ_CONTENT_SHA256, X_AMZ_DATE};
-use crate::sigv4::{format_amz_time, sha256_hex, uri_encode_path};
-use crate::{Cancel, Close, Open, Verify};
+use frames::{call, in_head, ops, out_head, z};
+use sha2::{Digest, Sha256};
 
 const AKID: &str = "BBAKLIVE0000000000001";
 const SECRET: &str = "live/secret+KEY0000000000000000000000000";
@@ -46,6 +45,9 @@ const DEAD_SECRET: &str = "dead/secret+KEY0000000000000000000000000";
 const LONG_AKID: &str = "BBAKLONG0000000000003";
 const DUMMY: &str = "AWS4-DUMMY-SECRET-FOR-CONSTANT-TIME-REJECT-PATH";
 const NOW: u64 = 1_440_938_160;
+/// [`NOW`] as SigV4 states it: the `x-amz-date` and the credential scope's date.
+const AMZDATE: &str = "20150830T123600Z";
+const DATESTAMP: &str = "20150830";
 const PATH: &str = "/model/vendor.model/converse";
 const TICKET: Ticket = Ticket {
     slot: 7,
@@ -56,13 +58,22 @@ fn long_secret() -> String {
     "L".repeat(300)
 }
 
-/// The fake host's state, behind `HostCtx` (its handle is the state's address): whether a fresh handle pends once, and every read
-/// (seq, kind, id) it served.
+/// Lowercase hex SHA-256 of `b`.
+fn sha256_hex(b: &[u8]) -> String {
+    hex::encode(Sha256::digest(b))
+}
+
+/// One completion handle, as the host keys it: the ticket's slot and generation, and the seq.
+type Handle = (u32, u32, u32);
+
+/// The fake host's state, behind `HostCtx` (its handle is the state's address): whether a fresh
+/// handle pends once (keyed as a host keys it, by ticket and seq), and every read (handle, kind, id)
+/// it served.
 #[derive(Default)]
 struct FakeHost {
     pend_first: bool,
-    pended: Mutex<HashSet<u32>>,
-    reads: Mutex<Vec<(u32, String, String)>>,
+    pended: Mutex<HashSet<Handle>>,
+    reads: Mutex<Vec<(Handle, String, String)>>,
 }
 
 fn text(s: AbiStr) -> String {
@@ -88,10 +99,12 @@ extern "C" fn fake_records_secret(
     assert_eq!(i.head.op, op::RECORDS_SECRET);
     assert_eq!(i.head.size as usize, size_of::<RecordsSecretIn>());
     let (kind, id) = (text(i.kind), text(i.id));
+    let h = i.head.handle;
+    let handle = (h.ticket.slot, h.ticket.generation, h.seq);
     host.reads
         .lock()
         .unwrap()
-        .push((i.head.handle.seq, kind.clone(), id.clone()));
+        .push((handle, kind.clone(), id.clone()));
     let mut answer = |o: Outcome| {
         out.outcome = RawOutcome::of(o);
         RawOutcome::of(o)
@@ -99,7 +112,7 @@ extern "C" fn fake_records_secret(
     if kind != "sigv4" {
         return answer(Outcome::Refused);
     }
-    if host.pend_first && host.pended.lock().unwrap().insert(i.head.handle.seq) {
+    if host.pend_first && host.pended.lock().unwrap().insert(handle) {
         return answer(Outcome::Pending);
     }
     let long = long_secret();
@@ -156,8 +169,7 @@ struct Opened {
 
 impl Drop for Opened {
     fn drop(&mut self) {
-        let mut out = crate::abi::zeroed_out();
-        Close::call(self.instance, &crate::abi::zeroed_in(), &mut out);
+        frames::close(self.instance);
     }
 }
 
@@ -178,17 +190,13 @@ fn open_with(host: FakeHost, records_secret: bool, tables: bool) -> Opened {
         // The host I/O table: this host offers none (the door reads no handle).
         io: std::ptr::null(),
     });
-    let mut i: OpenIn = crate::abi::zeroed_in();
-    i.host = if tables {
+    let instance = frames::open(if tables {
         std::ptr::from_ref(&*t)
     } else {
         std::ptr::null()
-    };
-    i.generation = 1;
-    let mut o: OpenOut = crate::abi::zeroed_out();
-    assert_eq!(Open::call(std::ptr::null_mut(), &i, &mut o), Outcome::Ready);
+    });
     Opened {
-        instance: o.instance,
+        instance,
         _tables: t,
         _slots: slots,
         host,
@@ -206,19 +214,20 @@ struct Req {
 }
 
 fn signed(secret: &str, akid: &str, body: &[u8]) -> Req {
-    let (amzdate, datestamp) = format_amz_time(NOW);
+    let (amzdate, datestamp) = (AMZDATE.to_string(), DATESTAMP.to_string());
     let payload_hash = sha256_hex(body);
     let headers = vec![
         ("host".to_string(), "busbar.example".to_string()),
         (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
         (X_AMZ_DATE.to_string(), amzdate.clone()),
     ];
-    let (sig, signed_headers) = crate::sigv4::sign_v4(
+    // The path is all unreserved bytes and `/`: its canonical URI is itself.
+    let (sig, signed_headers) = busbar_auth_sigv4::inbound::sign_v4(
         secret,
         "us-east-1",
         "bedrock",
         "POST",
-        &uri_encode_path(PATH),
+        PATH,
         "",
         &headers,
         &payload_hash,
@@ -301,7 +310,8 @@ fn verify(o: &Opened, req: &Req, ticket: Ticket, flags: u32, cap: usize) -> Answ
         })
         .collect();
     let mut bufs = Bufs::new(cap);
-    let mut i: VerifyIn = crate::abi::zeroed_in();
+    let mut i: VerifyIn = z();
+    i.head = in_head::<VerifyIn>(auth_slot::VERIFY);
     i.head.ticket = ticket;
     i.head.flags = flags;
     i.lines = lines.as_ptr();
@@ -326,8 +336,9 @@ fn verify(o: &Opened, req: &Req, ticket: Ticket, flags: u32, cap: usize) -> Answ
     };
     i.strip = bufs.strips.as_mut_ptr();
     i.strip_cap = bufs.strips.len() as u32;
-    let mut out: IdentifyOut = crate::abi::zeroed_out();
-    let outcome = Verify::call(o.instance, &i, &mut out);
+    let mut out: IdentifyOut = z();
+    out.head = out_head::<IdentifyOut>();
+    let outcome = call(ops().verify, o.instance, &i, &mut out);
     let strips = &bufs.strips[..(out.strip_len as usize).min(bufs.strips.len())];
     let groups = &bufs.groups[..(out.identity.groups_len as usize).min(bufs.groups.len())];
     check_identify(outcome, &out, &i.out_buf, groups, i.strip_cap, strips)
@@ -355,13 +366,13 @@ fn verify(o: &Opened, req: &Req, ticket: Ticket, flags: u32, cap: usize) -> Answ
     }
 }
 
-fn reads(o: &Opened) -> Vec<(u32, String, String)> {
+fn reads(o: &Opened) -> Vec<(Handle, String, String)> {
     o.host.reads.lock().unwrap().clone()
 }
 
 #[test]
 fn the_tail_states_inbound_sigv4_at_head_body_beside_the_outbound_style() {
-    let door = crate::door();
+    let door = busbar_auth_sigv4::door();
     // SAFETY: the door is this crate's `'static` plain data.
     let (st, tail): (Statement, AuthTail) = unsafe {
         let st: *const Statement = std::ptr::addr_of!((*door).statement).read_unaligned();
@@ -407,7 +418,10 @@ fn the_tail_states_inbound_sigv4_at_head_body_beside_the_outbound_style() {
         "the carrier, then the issued credential's shape: 1.5.5's AccessKeyId and secret"
     );
     // The compiled-in entry is the same door.
-    let (entry, door): (DoorFn, DoorFn) = (crate::compiled_in::door::door, crate::door);
+    let (entry, door): (DoorFn, DoorFn) = (
+        busbar_auth_sigv4::compiled_in::door::door,
+        busbar_auth_sigv4::door,
+    );
     assert!(std::ptr::fn_addr_eq(entry, door));
 }
 
@@ -429,8 +443,8 @@ fn a_signed_request_over_the_live_credential_identifies_its_access_key_id() {
     assert_eq!(id.key_id.offset, SPAN_ABSENT);
     assert_eq!(
         reads(&o),
-        [(0, "sigv4".to_string(), AKID.to_string())],
-        "one read, kind sigv4, id the AccessKeyId"
+        [((7, 3, 0), "sigv4".to_string(), AKID.to_string())],
+        "one read on the call's ticket, kind sigv4, id the AccessKeyId"
     );
 }
 
@@ -531,25 +545,31 @@ fn a_pending_read_pends_and_the_resumed_call_reissues_the_same_handle() {
     let resumed = verify(&o, &req, TICKET, FLAG_RESUME, 256);
     assert_eq!(resumed.outcome, Outcome::Ready);
     assert_eq!(resumed.subject.as_deref(), Some(AKID));
-    let seqs: Vec<u32> = reads(&o).iter().map(|r| r.0).collect();
-    assert_eq!(seqs, [0, 0], "the resumed call re-issues the SAME handle");
-    // A fresh verify on another ticket issues a new handle.
+    let handles: Vec<Handle> = reads(&o).iter().map(|r| r.0).collect();
+    assert_eq!(
+        handles,
+        [(7, 3, 0), (7, 3, 0)],
+        "the resumed call re-issues the SAME handle"
+    );
+    // A verify on another ticket issues its handles on that ticket.
     let ticket = Ticket {
         slot: 8,
         generation: 1,
     };
     assert_eq!(verify(&o, &req, ticket, 0, 256).outcome, Outcome::Pending);
-    assert_eq!(reads(&o).last().unwrap().0, 1);
-    // `cancel` forgets what the ticket held: the next call is fresh (a new handle).
-    let mut ci: CancelIn = crate::abi::zeroed_in();
+    assert_eq!(reads(&o).last().unwrap().0, (8, 1, 0));
+    // `cancel` of the waiting ticket: nothing of the plugin's waits on it (the pending read is the
+    // host's, dropped with the ticket), so the disposition is ABANDONED.
+    let mut ci: CancelIn = z();
+    ci.head = in_head::<CancelIn>(life::CANCEL);
     ci.ticket = ticket;
-    let mut co: CancelOut = crate::abi::zeroed_out();
-    assert_eq!(Cancel::call(o.instance, &ci, &mut co), Outcome::Ready);
+    let mut co: CancelOut = z();
+    co.head = out_head::<CancelOut>();
     assert_eq!(
-        verify(&o, &req, ticket, FLAG_RESUME, 256).outcome,
-        Outcome::Pending
+        call(ops().head.cancel, o.instance, &ci, &mut co),
+        Outcome::Ready
     );
-    assert_eq!(reads(&o).last().unwrap().0, 2);
+    assert_eq!(co.disposition, CANCEL_ABANDONED);
 }
 
 #[test]
@@ -560,10 +580,14 @@ fn a_long_secret_is_re_read_once_with_the_size_the_host_named() {
     let r = reads(&o);
     assert_eq!(r.len(), 2, "the call and its ONE re-call");
     assert_eq!(r[0].0, r[1].0, "the re-call is on the same handle");
+    assert_eq!(r[0].0, (7, 3, 0));
 }
 
+/// The short answer writes nothing, and the host's one re-call (a fresh call on the same ticket)
+/// judges again: the secret is read on the call's same handle, never kept by the plugin between
+/// the two (nothing of `verify`'s is cached), so a credential revoked in between is rejected.
 #[test]
-fn a_short_identity_buffer_answers_short_and_the_recall_is_served_from_it() {
+fn a_short_identity_buffer_answers_short_and_the_recall_judges_again() {
     let o = open();
     let req = signed(SECRET, AKID, b"");
     let short = verify(&o, &req, TICKET, 0, 4);
@@ -575,7 +599,12 @@ fn a_short_identity_buffer_answers_short_and_the_recall_is_served_from_it() {
     );
     let again = verify(&o, &req, TICKET, 0, 256);
     assert_eq!(again.subject.as_deref(), Some(AKID));
-    assert_eq!(reads(&o).len(), 1, "the re-call never repeats the work");
+    let handles: Vec<Handle> = reads(&o).iter().map(|r| r.0).collect();
+    assert_eq!(
+        handles,
+        [(7, 3, 0), (7, 3, 0)],
+        "the re-call reads on the same handle"
+    );
 }
 
 #[test]

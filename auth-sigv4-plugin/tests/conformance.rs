@@ -26,9 +26,9 @@
 //! identity on the spot.
 
 // THE PUBLISHED CONFORMANCE SUITE (busbar-plugin-loader's `conformance` feature, TODO ABI-b4): the
-// auth kind's OUTBOUND script over this crate's linked door and its dropped-in cdylib (built with
-// `dropped-in`), driven by `conformance.json`; the hand-written both-ways proof below stays beside
-// it. `plugin-ci.yml` runs the suite under `--release` once the crate lives in its own repo.
+// auth kind's OUTBOUND script over this crate's linked door and its dropped-in cdylib (this crate,
+// which exports the logic crate's door), driven by `conformance.json`; the hand-written both-ways
+// proof below stays beside it. `plugin-ci.yml` runs the suite under `--release` once the crate lives in its own repo.
 busbar_plugin_loader::conformance_suite! {
     door: busbar_auth_sigv4::door,
     cdylib: "busbar_auth_sigv4_plugin",

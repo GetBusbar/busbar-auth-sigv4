@@ -2,22 +2,18 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! ONE INSTANCE: the handles (generation data, each with the unsendable-token line its `fields`
-//! envelope points into), the per-op envelope storage the host copies after each control-lane call, the host services `open` was handed, and the inbound `verify`'s
-//! per-ticket state. No token cache, no waker: a sigv4 binding never mints and never pends — `tick`
-//! only pre-derives day keys ahead of midnight. Only `verify` may pend, on the host's
-//! `records.secret` read; it keeps the completion handle it issued under the ticket until the read
-//! answers, and nothing else (never a secret, never a verdict cache: the kernel never cached a SigV4
-//! verdict).
+//! reports). No token cache, no waker: a sigv4 binding never mints and never pends — `tick` only
+//! pre-derives day keys ahead of midnight. Nothing of `verify`'s is kept here: no secret, no
+//! verdict, no per-ticket state (the kernel never cached a SigV4 verdict, and the secret is the
+//! host's `records.secret` answer, read on every call). The answers' memory, the instance pointer
+//! and the host tables are the contract kit's (`busbar_contract::auth_door!`), so this crate holds
+//! no per-thread or process-global store (THE DESIGN §2).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
 
-use busbar_contract::abi::mechanism::call::{AbiStr, Diag};
-use busbar_contract::abi::mechanism::ticket::Ticket;
-
-use crate::abi::{abi, Host};
-use crate::signing::SigV4Binding;
+use crate::signing::{Field, SigV4Binding, SignFacts, SigningCredential};
 
 /// The index of each diagnostic id in the Statement (`crate::DIAG_IDS`).
 pub(crate) mod diag {
@@ -25,119 +21,57 @@ pub(crate) mod diag {
     pub const SESSION_TOKEN_INVALID_BYTES: u32 = 0;
 }
 
-const WARN: u8 = 1;
-
-/// One op's envelope storage: the diagnostics and the texts they point into, kept until the next
-/// call of the same op (the host copies them before it makes any other call on that thread).
-#[derive(Default)]
-pub(crate) struct EnvStore {
-    texts: Vec<String>,
-    diags: Vec<Diag>,
-    /// The error text of the last FAILED/REFUSED answer.
-    pub(crate) error: String,
-}
-
-impl EnvStore {
-    /// Start a call: drop what the previous call left.
-    pub(crate) fn clear(&mut self) {
-        self.diags.clear();
-        self.texts.clear();
-        self.error.clear();
-    }
-
-    /// Add one diagnostic.
-    pub(crate) fn push(&mut self, id: u32, severity: u8, text: String) {
-        self.texts.push(text);
-        let t = self.texts.last().map_or(
-            AbiStr {
-                ptr: std::ptr::null(),
-                len: 0,
-            },
-            |t| abi(t),
-        );
-        self.diags.push(Diag {
-            id_idx: id,
-            severity,
-            _reserved: [0; 3],
-            text: t,
-        });
-    }
-
-    /// The diagnostics, as the envelope carries them.
-    pub(crate) fn diags(&self) -> &[Diag] {
-        &self.diags
-    }
-}
+/// The severity of the unsendable-token line: WARN, as 1.5.5 logged it.
+pub(crate) const WARN: u8 = 1;
 
 /// How often `tick` re-checks the SigV4 day keys while a binding is open.
 const PREDERIVE_TICK_NS: u64 = 60 * 1_000_000_000;
 
-/// What `verify` keeps for a ticket between two calls on it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Held {
-    /// The `records.secret` read pends under this completion handle's `seq`: the resumed call
-    /// re-issues the SAME handle and reads the stored answer.
-    Pending(u32),
-    /// The identity this ticket reached did not fit the host's buffer: the host's one re-call is
-    /// served from it, the work never repeated. The subject is the AccessKeyId (not secret).
-    Reached(String),
+/// One handle: its generation, its binding, and its `fields` note ([`SigV4::note_unsendable`]).
+type Handle = (u64, Arc<SigV4Binding>, Arc<str>);
+
+/// Whose credential one `fields` call signs with. No `Debug`: it carries the caller's credential.
+#[derive(Clone, Copy)]
+pub(crate) enum Who<'a> {
+    /// The operator's own bound credential (`MODE_OWN`).
+    Own,
+    /// The caller's verified credential, passed per request (`MODE_PASSTHROUGH`); `None` when the
+    /// host lent none.
+    Caller(Option<&'a [u8]>),
 }
 
-/// One handle: its generation, its binding, and its `fields` note ([`SigV4::note_unsendable`]).
-type Handle = (u64, Arc<SigV4Binding>, Box<EnvStore>);
+/// What one `fields` call on a held handle answers. No `Debug`: its fields carry credential
+/// material.
+pub(crate) enum Signed {
+    /// The fields to set, in order (none: the credential signs nothing), and the line the request
+    /// reports when the signer's session token is no legal header value.
+    Fields {
+        /// The signed fields.
+        fields: Vec<Field>,
+        /// The unsendable-token line, when the signer's session token is unsendable.
+        note: Option<Arc<str>>,
+    },
+    /// The host lent no method, host or path: nothing can be signed.
+    NoFacts,
+}
 
-/// One plugin instance.
-pub(crate) struct SigV4 {
+/// One plugin instance: the `VerifyPlugin` and `OutboundPlugin` the door kit serves (`crate`).
+pub struct SigV4 {
     generation: AtomicU64,
     next_handle: AtomicU64,
-    /// Each handle: its generation, its binding, and the envelope its `fields` answers when the
-    /// signing credential's session token is unsendable (built once at open, kept until retire).
+    /// Each handle: its generation, its binding, and the line its `fields` reports when the signing
+    /// credential's session token is unsendable (built once at open, kept until retire).
     handles: RwLock<HashMap<u64, Handle>>,
-    /// `open_outbound`'s envelope and error.
-    pub(crate) open_env: Mutex<EnvStore>,
-    /// The host services `open` was handed (`records.secret`); `None` when the host offers none.
-    pub(crate) host: Option<Host>,
-    /// The next completion-handle `seq` a fresh `records.secret` read issues: unique per instance,
-    /// so two reads under one ticket never share a handle.
-    next_seq: AtomicU32,
-    /// `verify`'s per-ticket state ([`Held`]); an entry lives from a PENDING or short answer to the
-    /// call that consumes it, or the ticket's `cancel`.
-    held: Mutex<HashMap<Ticket, Held>>,
 }
 
 impl SigV4 {
-    /// An instance at `generation`, calling the host services `host`.
-    pub(crate) fn new(generation: u64, host: Option<Host>) -> Self {
+    /// An instance at `generation`.
+    pub(crate) fn new(generation: u64) -> Self {
         Self {
             generation: AtomicU64::new(generation),
             next_handle: AtomicU64::new(1),
             handles: RwLock::new(HashMap::new()),
-            open_env: Mutex::default(),
-            host,
-            next_seq: AtomicU32::new(0),
-            held: Mutex::new(HashMap::new()),
         }
-    }
-
-    /// A fresh completion-handle `seq`.
-    pub(crate) fn issue_seq(&self) -> u32 {
-        self.next_seq.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// Keep `held` for `ticket` until its next call.
-    pub(crate) fn hold(&self, ticket: Ticket, held: Held) {
-        self.held
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(ticket, held);
-    }
-
-    /// Take what `ticket` holds, if anything.
-    pub(crate) fn take(&self, ticket: Ticket) -> Option<Held> {
-        self.held
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&ticket)
     }
 
     /// `refresh`: the generation later handles belong to.
@@ -150,13 +84,12 @@ impl SigV4 {
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
         let generation = self.generation.load(Ordering::Acquire);
         // The line a request signed with nothing reports names the binding's service, the one
-        // input it varies on: built here, once, so `fields` allocates nothing for it.
-        let mut note = EnvStore::default();
-        Self::note_unsendable(&mut note, &binding.params().service);
+        // input it varies on: built here, once, so `fields` builds nothing for it.
+        let note = Self::note_unsendable(&binding.params().service);
         self.handles
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(handle, (generation, Arc::new(binding), Box::new(note)));
+            .insert(handle, (generation, Arc::new(binding), note.into()));
         handle
     }
 
@@ -169,19 +102,40 @@ impl SigV4 {
             .map(|(_, b, _)| b.clone())
     }
 
-    /// `f` over the binding behind `handle` and the note its `fields` envelope points into, under
-    /// the handles' read lock. The note is boxed and dropped only when its handle retires, so the
-    /// envelope `f` points at it stays valid after the lock is released.
-    pub(crate) fn with_bound<R>(
+    /// `fields`' body: sign one request on `handle` for `who` over `facts` (`None`: the host lent
+    /// no method, host or path). `None` when this generation holds no such handle (REFUSED).
+    pub(crate) fn sign(
         &self,
         handle: u64,
-        f: impl FnOnce(&SigV4Binding, &EnvStore) -> R,
-    ) -> Option<R> {
-        self.handles
+        who: Who<'_>,
+        facts: Option<SignFacts<'_>>,
+    ) -> Option<Signed> {
+        let (binding, note) = self
+            .handles
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&handle)
-            .map(|(_, b, n)| f(b, n))
+            .map(|(_, b, n)| (b.clone(), n.clone()))?;
+        let Some(facts) = facts else {
+            return Some(Signed::NoFacts);
+        };
+        let fresh;
+        let signer = match who {
+            Who::Own => &*binding,
+            Who::Caller(caller) => {
+                let caller = caller
+                    .and_then(|c| std::str::from_utf8(c).ok())
+                    .unwrap_or("");
+                // A FRESH binding, per request: the caller's key varies request to request, so it
+                // never enters the operator binding's day-key cache (`signing` module doc).
+                fresh =
+                    SigV4Binding::new(binding.params().clone(), SigningCredential::split(caller));
+                &fresh
+            }
+        };
+        let fields = signer.sign(&facts);
+        let note = signer.session_token_unsendable().then_some(note);
+        Some(Signed::Fields { fields, note })
     }
 
     /// `retire`: drop the handles opened at `generation`.
@@ -192,20 +146,16 @@ impl SigV4 {
             .retain(|_, (g, _, _)| *g != generation);
     }
 
-    /// Report into `env` a request signed with nothing because its credential's session token is
-    /// no legal header value, in the line 1.5.5's signer logged on each such request, naming
+    /// The line a request signed with nothing because its credential's session token is no legal
+    /// header value reports, in the words 1.5.5's signer logged on each such request, naming
     /// `service`.
-    pub(crate) fn note_unsendable(env: &mut EnvStore, service: &str) {
+    pub(crate) fn note_unsendable(service: &str) -> String {
         let (initial, rest) = service.split_at(service.len().min(1));
-        env.push(
-            diag::SESSION_TOKEN_INVALID_BYTES,
-            WARN,
-            format!(
-                "{}{rest} lane session token contains a byte rejected by HeaderValue; \
-                 skipping signing to avoid a signed-but-absent x-amz-security-token header.",
-                initial.to_uppercase()
-            ),
-        );
+        format!(
+            "{}{rest} lane session token contains a byte rejected by HeaderValue; \
+             skipping signing to avoid a signed-but-absent x-amz-security-token header.",
+            initial.to_uppercase()
+        )
     }
 
     /// `tick`: pre-derive every live binding's day keys ahead of midnight. Answers the next tick,

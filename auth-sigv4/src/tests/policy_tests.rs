@@ -5,9 +5,8 @@
 //! inbound check share, proven against RFC 4231 and against ring's.
 
 /// Every production source of the crate (the test modules are not production).
-const SOURCES: [(&str, &str); 8] = [
+const SOURCES: [(&str, &str); 7] = [
     ("lib.rs", include_str!("../lib.rs")),
-    ("abi.rs", include_str!("../abi.rs")),
     ("held.rs", include_str!("../held.rs")),
     ("inbound.rs", include_str!("../inbound.rs")),
     ("instance.rs", include_str!("../instance.rs")),

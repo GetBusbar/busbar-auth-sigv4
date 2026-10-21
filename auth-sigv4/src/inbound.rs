@@ -506,31 +506,52 @@ fn sigv4_authorization<'r>(req: &'r Request<'_>) -> Option<&'r str> {
         .filter(|v| v.trim_start().starts_with(SIGV4_ALGORITHM))
 }
 
+/// A secret's bytes, as the check reads them: the host's answer (the contract's
+/// `CredentialSecret`, wiped on drop) on the request path, a wiped buffer in the unit tests.
+pub trait SecretBytes {
+    /// The secret's bytes.
+    fn bytes(&self) -> &[u8];
+}
+
+impl SecretBytes for Zeroizing<Vec<u8>> {
+    fn bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+impl SecretBytes for busbar_contract::abi::sdk::services::CredentialSecret {
+    fn bytes(&self) -> &[u8] {
+        self.secret()
+    }
+}
+
 /// What the host's `records.secret` answered for one credential.
-pub enum Read {
-    /// The secret (span `0`'s bytes, wiped on drop), and whether the credential is live. For an id
-    /// the host does not hold, its fixed dummy secret, not live.
+pub enum Read<S: SecretBytes = Zeroizing<Vec<u8>>> {
+    /// The secret (wiped on drop), and whether the credential is live. For an id the host does not
+    /// hold, its fixed dummy secret, not live.
     Secret {
         /// The secret's bytes.
-        secret: Zeroizing<Vec<u8>>,
+        secret: S,
         /// `SECRET_LIVE`.
         live: bool,
     },
-    /// The host holds the call on the op's ticket: answer PENDING and re-issue the same handle.
+    /// The read pends: on the op's ticket (answer PENDING; the resumed call re-issues the same
+    /// handle and reads the stored answer), or on none (`records.secret` may pend, so a ticket-less
+    /// `verify` cannot make it: the door answers REFUSED, and the host submits the same `verify` on
+    /// a ticket).
     Pending,
-    /// The read cannot be made on this call (a ticket-less `verify`: `records.secret` may pend, so
-    /// the host refuses it there): answer REFUSED, and the host submits the same `verify` on a
-    /// ticket.
-    NotNow,
     /// The host serves no `records.secret`, refused or failed it, or broke its rules: fail closed.
     Unavailable,
 }
 
 /// Where the check reads a credential's secret: the host's `records.secret` on the request path, a
-/// fake in the unit tests.
+/// fake in the unit tests. Read on EVERY check: nothing is cached between two.
 pub trait SecretSource {
+    /// The secret's holder.
+    type Secret: SecretBytes;
+
     /// The secret of credential `id` of `kind`.
-    fn read(&mut self, kind: &str, id: &str) -> Read;
+    fn read(&mut self, kind: &str, id: &str) -> Read<Self::Secret>;
 }
 
 /// The check's answer for one request.
@@ -542,10 +563,8 @@ pub enum Judgement {
     Reject,
     /// Verified, and the credential is live: the identity's subject is the AccessKeyId.
     Identity(String),
-    /// The secret read pends on the op's ticket.
+    /// The secret read pends (on the op's ticket, or on none: the door answers REFUSED).
     Pending,
-    /// The secret cannot be read on this (ticket-less) call.
-    NotNow,
 }
 
 /// Judge one request: the kernel's SigV4 pre-step and `verify_sigv4_ingress_credential`, in its
@@ -646,10 +665,9 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
     let (secret, live) = match source.read(CREDENTIAL_KIND, &parsed.access_key_id) {
         Read::Secret { secret, live } => (secret, live),
         Read::Pending => return Judgement::Pending,
-        Read::NotNow => return Judgement::NotNow,
         Read::Unavailable => return Judgement::Reject,
     };
-    let (text, utf8) = match std::str::from_utf8(&secret) {
+    let (text, utf8) = match std::str::from_utf8(secret.bytes()) {
         Ok(s) => (s, true),
         Err(_) => (DUMMY_SECRET, false),
     };

@@ -20,7 +20,6 @@ use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-use busbar_auth_sigv4::inbound::{X_AMZ_CONTENT_SHA256, X_AMZ_DATE};
 use busbar_contract::abi::auth::{
     check_identify, slot, AuthTail, IdentifyOut, IdentityBuf, NamedValue, StripName, VerifyIn,
     CANCEL_ABANDONED, CAP_INBOUND, CAP_OUTBOUND, DECISION_CONTINUE, DECISION_STOP,

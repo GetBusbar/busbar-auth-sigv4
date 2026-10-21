@@ -12,7 +12,7 @@
 //! UTC day and held here, wiped on drop; `tick` derives the next day's key ahead of midnight
 //! ([`SigV4Binding::prederive`]), so a request signs with a key already in hand. A binding built for
 //! the CALLER's credential (`STYLE_CALLER_CREDENTIAL` passthrough mode, ARCHITECT ruling
-//! 2026-09-29) is instead constructed fresh per request in [`crate::Fields`] and never enters this
+//! 2026-09-29) is instead constructed fresh per request in `crate::instance::SigV4::sign` and never enters this
 //! cache — the caller's key varies request to request, so there is nothing to hold ahead of time.
 //!
 //! THE REQUEST IT SIGNS (BUSBAR-1.6.0.md THE DESIGN §6, "the per-request auth call on the route
@@ -161,7 +161,7 @@ impl SigV4Binding {
     }
 
     /// The params this binding signs under — read back to build a fresh per-request binding for
-    /// the caller's credential in passthrough mode ([`crate::Fields`]).
+    /// the caller's credential in passthrough mode (`crate::instance::SigV4::sign`).
     pub fn params(&self) -> &SigV4Params {
         &self.params
     }

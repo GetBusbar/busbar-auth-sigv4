@@ -17,7 +17,7 @@
 //!   the framer encodes it. It serves BOTH credential modes `sigv4` declares
 //!   ([`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`]): the operator's own bound
 //!   credential ([`busbar_contract::abi::auth::MODE_OWN`], the day-key-cached
-//!   [`signing::SigV4Binding`]), and the caller's verified credential passed per-request
+//!   `signing::SigV4Binding`), and the caller's verified credential passed per-request
 //!   ([`busbar_contract::abi::auth::MODE_PASSTHROUGH`]) — ARCHITECT ruling 2026-09-29: a
 //!   credential SOURCE is not a mechanism, so there is no separate `caller-credential` style; a
 //!   passthrough binding is built fresh, per request, from the caller's credential, exactly the
@@ -38,7 +38,7 @@
 //! store-read host service, keeping the dummy-secret timing equivalence for an unknown
 //! AccessKeyId". The kernel's pre-step and `verify_sigv4_ingress_credential` (and
 //! `busbar-kernel-identity`'s `ingress_sigv4`) are [`inbound`], verbatim; `verify` serves them at
-//! the `HeadBody` point ([`CAP_INBOUND`], every header line, the body):
+//! the `HeadBody` point (`CAP_INBOUND`, every header line, the body):
 //!
 //! * no `authorization` line, or one that does not open with `AWS4-HMAC-SHA256`: PASS (not this
 //!   plugin's credential: the kernel goes on to its bearer path);
@@ -55,12 +55,25 @@
 //!   line is named for the transport to strip (THE DESIGN §6). Every failure is the one REJECT,
 //!   the kernel's one opaque 401.
 //!
+//! NOTHING OF `verify`'S IS CACHED. Every `verify` reads the secret through the host's
+//! `records.secret` (the contract SDK's `VerifyOp::records_secret`): a `verify` whose read pends
+//! answers PENDING on its ticket, and the host re-enters it from the top, where the re-issued handle
+//! reads the stored answer. A ticket-less `verify` that needs the read answers REFUSED, and the host
+//! submits it on a ticket. Neither the secret nor a verdict outlives the call.
+//!
 //! The login pair is not served and answers REFUSED (the tail does not declare `CAP_LOGIN`).
+//!
+//! THE DOOR is the contract SDK's safe auth kit (`auth_door!(verify_and_outbound: ..)` over
+//! `instance::SigV4`, a `VerifyPlugin` and an `OutboundPlugin` over one instance): the kit reads the
+//! host's frames, writes the fields and the verdict under the short-buffer rule, calls the host's
+//! services and keeps every answer's memory in the answering instance. So this crate is
+//! `#![forbid(unsafe_code)]` and holds no per-thread or process-global state (THE DESIGN §2: "Plane,
+//! hook, auth (inbound and outbound) and secret plugins are `#![forbid(unsafe_code)]`"; "A plugin
+//! holds no process-global state"). The one exported symbol is the sibling `-plugin` cdylib's.
 
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-mod abi;
 mod held;
 pub mod inbound;
 mod instance;
@@ -68,61 +81,38 @@ mod signing;
 mod sigv4;
 mod style;
 
-use std::ffi::c_void;
+use std::borrow::Cow;
 use std::mem::size_of;
 use std::ptr;
+use std::task::Poll;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use busbar_contract::abi::auth::{
-    AuthTail, BeginLoginIn, BeginLoginOut, CompleteLoginIn, FieldsIn, FieldsOut, IdentifyOut,
-    OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut, StyleDecl, VerifyIn,
-    CANCEL_ABANDONED, CAP_INBOUND, CAP_OUTBOUND, FACT_INBOUND_ALL_HEADERS, FACT_READS_CREDENTIALS,
-    LOGIN_KIND_NONE, MODE_OWN, MODE_PASSTHROUGH, POINT_HEAD_BODY, STYLE_CALLER_CREDENTIAL,
-    STYLE_NEEDS_HEADERS, VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
+    AuthTail, StyleDecl, CAP_INBOUND, CAP_OUTBOUND, FACT_INBOUND_ALL_HEADERS,
+    FACT_READS_CREDENTIALS, LOGIN_KIND_NONE, POINT_HEAD_BODY, STYLE_CALLER_CREDENTIAL,
+    STYLE_NEEDS_HEADERS,
 };
-use busbar_contract::abi::mechanism::call::{
-    AbiStr, Envelope, InHead, OutHead, Outcome, FLAG_RESUME,
-};
+use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::mechanism::door::{
     KindTailHead, MarkWord, Statement, MARK_WORD_ISSUED_ID_ALPHABET, MARK_WORD_ISSUED_ID_LENGTH,
     MARK_WORD_ISSUED_ID_PREFIX, MARK_WORD_ISSUED_SECRET_ALPHABET, MARK_WORD_ISSUED_SECRET_LENGTH,
 };
-use busbar_contract::abi::mechanism::lifecycle::{
-    CancelIn, CancelOut, DriveIn, GenIn, OpenIn, OpenOut, RefreshIn, ReleaseIn, TickIn, TickOut,
-    ValidateIn,
+use busbar_contract::abi::mechanism::ticket::Ticket;
+use busbar_contract::abi::sdk::auth_door::{
+    carrier, Answer, Strip, Verdict, VerifiedIdentity, VerifyOp, VerifyPlugin, VerifyView,
 };
-use busbar_contract::abi::mechanism::ticket::{CompletionHandle, Ticket};
-use busbar_contract::abi::sdk::auth_door::carrier;
-use busbar_contract::abi::sdk::door::{abi_str, statement, Slot};
+use busbar_contract::abi::sdk::auth_outbound::{
+    Diags, Driven, FieldsAnswer, FieldsView, FieldsWriter, Mode, OpenRefusal, OutboundPlugin,
+};
+use busbar_contract::abi::sdk::conn::Host;
+use busbar_contract::abi::sdk::door::{abi_str, statement};
+use busbar_contract::abi::sdk::exchange::Op;
+use busbar_contract::abi::sdk::life::Refusal;
+use busbar_contract::abi::sdk::services::CredentialSecret;
 
-use crate::abi::{abi, blob, text};
-use crate::abi::{Crossed, Host};
 use crate::inbound::{Judgement, Read, SecretSource};
-use crate::instance::{EnvStore, Held, SigV4};
-use crate::signing::{SigV4Binding, SignFacts, SigningCredential};
-
-/// `fields` for `signer`: its signed fields, and — when its session token is no legal header
-/// value, so it signs nothing — the signer's line on this call's envelope, as 1.5.5 logged it on
-/// each such request. The line is `note`, built once when the handle was opened and kept with it
-/// until its generation retires: the envelope points into the instance's own handle, never into a
-/// per-thread or process-wide store (THE DESIGN §2).
-fn sign_into(
-    signer: &SigV4Binding,
-    note: &EnvStore,
-    input: &FieldsIn,
-    hash: &str,
-    out: &mut FieldsOut,
-    write: impl Fn(&[signing::Field], &mut FieldsOut) -> Outcome,
-) -> Outcome {
-    let Some(facts) = sign_facts(input, hash) else {
-        return Outcome::Failed;
-    };
-    let outcome = write(&signer.sign(&facts), out);
-    if signer.session_token_unsendable() {
-        envelope(&mut out.head, note);
-    }
-    outcome
-}
+use crate::instance::{diag, SigV4, Signed, Who, WARN};
+use crate::signing::SignFacts;
 
 /// The flags every field this plugin writes carries: NONE. 1.5.5 sent its credential headers
 /// indexable, and an h2 encoder that honoured `FIELD_SENSITIVE` would send them never-indexed —
@@ -195,42 +185,26 @@ const MARKS: [MarkWord; 6] = [
 /// The diagnostic ids, in [`instance::diag`] order: 1.5.5's catalog codes where the line had one.
 const DIAG_IDS: [AbiStr; 1] = [abi_str("auth.sigv4-session-token-invalid-bytes")];
 
-busbar_contract::plugin_door! {
-    ops: busbar_contract::abi::auth::Ops,
-    statement: Statement {
-        kind_tail: ptr::from_ref(TAIL).cast::<KindTailHead>(),
-        diag_ids: DIAG_IDS.as_ptr(),
-        diag_ids_len: DIAG_IDS.len(),
-        mark_words: MARKS.as_ptr(),
-        mark_words_len: MARKS.len(),
-        ..statement("busbar-auth-sigv4", env!("CARGO_PKG_VERSION"), 1024)
-    },
-    lifecycle: {
-        validate: Validate, open: Open, refresh: Refresh, retire: Retire, tick: Tick,
-        drive: Drive, cancel: Cancel, release: Release, close: Close,
-    },
-    kind_ops: {
-        verify: Verify, begin_login: BeginLogin, complete_login: CompleteLogin,
-        open_outbound: OpenOutbound, outbound_ready: OutboundReady, fields: Fields,
-    },
-}
+/// What the plugin states: its name, version, concurrency, diagnostics, marks and auth tail.
+const STATEMENT: Statement = Statement {
+    kind_tail: ptr::from_ref(TAIL).cast::<KindTailHead>(),
+    diag_ids: DIAG_IDS.as_ptr(),
+    diag_ids_len: DIAG_IDS.len(),
+    mark_words: MARKS.as_ptr(),
+    mark_words_len: MARKS.len(),
+    ..statement("busbar-auth-sigv4", env!("CARGO_PKG_VERSION"), 1024)
+};
+
+busbar_contract::auth_door!(verify_and_outbound: SigV4, STATEMENT);
 
 /// THE COMPILED-IN ENTRY a composition root's `auths` row names: the door at
-/// `compiled_in::door::door`, the same [`door`] the dropped-in build exports (compiled-in =
-/// dropped-in).
+/// `compiled_in::door::door`, the same [`door`] the dropped-in build (the sibling `-plugin`
+/// cdylib) exports (compiled-in = dropped-in).
 pub mod compiled_in {
     /// The door and its `MACRO_DOOR` (the `plugin_door!` door a linked table names).
     pub mod door {
         pub use crate::{door, MACRO_DOOR};
     }
-}
-
-// The dropped door's one symbol, under `dropped-in` only: a build linking this crate beside other
-// plugins must not carry a second `busbar_plugin_door`.
-#[cfg(feature = "dropped-in")]
-#[allow(unsafe_code)] // `export_door!` emits the one exported door symbol
-mod dropped {
-    busbar_contract::export_door!(crate::door);
 }
 
 /// Wall-clock seconds since the epoch (1970-01-01 UTC) — the clock `tick`'s day-key pre-derivation
@@ -242,396 +216,214 @@ pub(crate) fn now_epoch() -> u64 {
         .unwrap_or(0)
 }
 
-fn inst<'a>(p: *mut c_void) -> Option<&'a SigV4> {
-    abi::instance::<SigV4>(p)
-}
-
-/// Point `head` at `env`'s diagnostics and error text.
-fn envelope(head: &mut OutHead, env: &EnvStore) {
-    let d = env.diags();
-    head.envelope = Envelope {
-        metrics: ptr::null(),
-        metrics_len: 0,
-        diags: if d.is_empty() {
-            ptr::null()
-        } else {
-            d.as_ptr()
-        },
-        diags_len: d.len(),
-    };
-    if !env.error.is_empty() {
-        head.error = abi(&env.error);
-    }
-}
-
-/// The plugin's own settings: none are read; present settings must be a JSON object.
-fn settings_ok(b: Option<&[u8]>) -> bool {
-    b.is_none_or(|b| {
-        matches!(
+/// The plugin's own settings: none are read; present settings must be a JSON object (none lent
+/// reads as empty, and takes none).
+fn settings_ok(b: &[u8]) -> bool {
+    b.is_empty()
+        || matches!(
             serde_json::from_slice::<serde_json::Value>(b),
             Ok(serde_json::Value::Object(_))
         )
-    })
 }
 
 const SETTINGS_NOT_OBJECT: &str = "busbar-auth-sigv4 settings must be a JSON object";
 
-/// `validate`.
-pub struct Validate;
-impl Slot for Validate {
-    type In = ValidateIn;
-    type Out = OutHead;
-    fn call(_: *mut c_void, input: &ValidateIn, out: &mut OutHead) -> Outcome {
-        if settings_ok(blob(&input.settings)) {
-            Outcome::Ready
-        } else {
-            out.error = abi_str(SETTINGS_NOT_OBJECT);
-            Outcome::Refused
-        }
-    }
+/// The refusal `open_outbound` answers for a bind that names no style.
+const NO_STYLE: &str = "settings: no outbound auth style was named";
+
+/// A request fact as text: UTF-8 and not empty; `None` when the host lent none.
+fn fact(b: &[u8]) -> Option<&str> {
+    std::str::from_utf8(b).ok().filter(|s| !s.is_empty())
 }
 
-/// `open`.
-pub struct Open;
-impl Slot for Open {
-    type In = OpenIn;
-    type Out = OpenOut;
-    fn call(_: *mut c_void, input: &OpenIn, out: &mut OpenOut) -> Outcome {
-        if !settings_ok(blob(&input.settings)) {
-            out.head.error = abi_str(SETTINGS_NOT_OBJECT);
-            // Settings `open` refuses are FAILED with the reason (the lifecycle's rule, and the
-            // inbound conformance script's).
-            return Outcome::Failed;
-        }
-        let s = SigV4::new(input.generation, Host::of(input.host));
-        out.instance = abi::into_instance(Box::new(s));
-        Outcome::Ready
-    }
-}
-
-/// `refresh`: the new generation.
-pub struct Refresh;
-impl Slot for Refresh {
-    type In = RefreshIn;
-    type Out = OutHead;
-    fn call(instance: *mut c_void, input: &RefreshIn, out: &mut OutHead) -> Outcome {
-        let Some(s) = inst(instance) else {
-            return Outcome::Fault;
-        };
-        if !settings_ok(blob(&input.settings)) {
-            out.error = abi_str(SETTINGS_NOT_OBJECT);
-            return Outcome::Failed;
-        }
-        s.set_generation(input.generation);
-        Outcome::Ready
-    }
-}
-
-/// `retire`: the generation's handles go.
-pub struct Retire;
-impl Slot for Retire {
-    type In = GenIn;
-    type Out = OutHead;
-    fn call(instance: *mut c_void, input: &GenIn, _: &mut OutHead) -> Outcome {
-        let Some(s) = inst(instance) else {
-            return Outcome::Fault;
-        };
-        s.retire(input.generation);
-        Outcome::Ready
-    }
-}
-
-/// `tick`: pre-derive the SigV4 day keys ahead of UTC midnight.
-pub struct Tick;
-impl Slot for Tick {
-    type In = TickIn;
-    type Out = TickOut;
-    fn call(instance: *mut c_void, input: &TickIn, out: &mut TickOut) -> Outcome {
-        let Some(s) = inst(instance) else {
-            return Outcome::Fault;
-        };
-        out.next_tick_ns = s.tick(input.now_ns);
-        Outcome::Ready
-    }
-}
-
-/// `drive`: no driver ticket is held.
-pub struct Drive;
-impl Slot for Drive {
-    type In = DriveIn;
-    type Out = OutHead;
-    fn call(_: *mut c_void, _: &DriveIn, _: &mut OutHead) -> Outcome {
-        Outcome::Ready
-    }
-}
-
-/// `cancel`: a sigv4 binding never pends; a `verify` waiting on its `records.secret` read is
-/// abandoned, and what it held for the ticket goes.
-pub struct Cancel;
-impl Slot for Cancel {
-    type In = CancelIn;
-    type Out = CancelOut;
-    fn call(instance: *mut c_void, input: &CancelIn, out: &mut CancelOut) -> Outcome {
-        if let Some(s) = inst(instance) {
-            s.take(input.ticket);
-        }
-        out.disposition = CANCEL_ABANDONED;
-        Outcome::Ready
-    }
-}
-
-/// `release`: no lease is handed out.
-pub struct Release;
-impl Slot for Release {
-    type In = ReleaseIn;
-    type Out = OutHead;
-    fn call(_: *mut c_void, _: &ReleaseIn, _: &mut OutHead) -> Outcome {
-        Outcome::Ready
-    }
-}
-
-/// `close`.
-pub struct Close;
-impl Slot for Close {
-    type In = InHead;
-    type Out = OutHead;
-    fn call(instance: *mut c_void, _: &InHead, _: &mut OutHead) -> Outcome {
-        abi::drop_instance::<SigV4>(instance);
-        Outcome::Ready
-    }
-}
-
-/// The secret source `verify` reads through: the host's `records.secret`, under a completion
-/// handle on the op's ticket.
-struct HostSecret<'a> {
-    s: &'a SigV4,
-    ticket: Ticket,
-    /// The call RESUMES one that answered PENDING ([`FLAG_RESUME`]).
-    resume: bool,
-}
-
-/// The most bytes a host may name for one secret on a short answer: well above any SigV4 secret.
-const SECRET_MAX_BYTES: u64 = 64 * 1024;
-
-impl SecretSource for HostSecret<'_> {
-    fn read(&mut self, kind: &str, id: &str) -> Read {
-        // `records.secret` may pend, so the host refuses it ticket-less: a ticket-less `verify`
-        // answers REFUSED and the host submits it on a ticket (the auth ABI's "verify ON THE SPOT").
-        if self.ticket.is_none() {
-            return Read::NotNow;
-        }
-        let Some(host) = self.s.host else {
-            return Read::Unavailable;
-        };
-        // A resumed call re-issues the SAME handle and reads the stored answer; a fresh one issues
-        // a new handle.
-        let seq = match self.s.take(self.ticket) {
-            Some(Held::Pending(seq)) if self.resume => seq,
-            _ => self.s.issue_seq(),
-        };
-        let handle = CompletionHandle {
-            ticket: self.ticket,
-            seq,
-            _reserved: 0,
-        };
-        let mut sizes = (256, 1);
-        // At most two crossings: the call, and the ONE re-call a short answer asks for.
-        for _ in 0..2 {
-            match host.records_secret(handle, kind, id, sizes) {
-                Crossed::Secret(secret, live) => return Read::Secret { secret, live },
-                Crossed::Pending => {
-                    self.s.hold(self.ticket, Held::Pending(seq));
-                    return Read::Pending;
-                }
-                Crossed::Short { bytes, items } if bytes <= SECRET_MAX_BYTES && items <= 16 => {
-                    sizes = ((bytes as usize).max(sizes.0), (items as usize).max(sizes.1));
-                }
-                Crossed::Short { .. } | Crossed::Unavailable => return Read::Unavailable,
-            }
-        }
-        Read::Unavailable
-    }
-}
-
-/// `verify` at the `HeadBody` point: the inbound SigV4 check ([`inbound::judge`]), its secret read
-/// through the host's `records.secret`.
-pub struct Verify;
-impl Slot for Verify {
-    type In = VerifyIn;
-    type Out = IdentifyOut;
-    fn call(instance: *mut c_void, input: &VerifyIn, out: &mut IdentifyOut) -> Outcome {
-        let Some(s) = inst(instance) else {
-            return Outcome::Fault;
-        };
-        let ticket = input.head.ticket;
-        let resume = input.head.flags & FLAG_RESUME != 0;
-        // THE SHORT-BUFFER RE-CALL: a fresh call on a ticket whose identity did not fit is served
-        // from the identity reached, never by repeating the work.
-        // (A fresh call finding a stale PENDING handle drops it: it issues its own.)
-        let request = abi::request(input);
-        // THE CREDENTIAL LINE, named whatever the verdict (THE DESIGN §6, "Auth points and guest
-        // lists"): a SigV4 `authorization` line is this plugin's, and the plane never sees it.
-        let strip = inbound::carries_sigv4(&request);
-        if !ticket.is_none() && !resume {
-            if let Some(Held::Reached(subject)) = s.take(ticket) {
-                return abi::write_verdict(input, out, VERDICT_IDENTITY, Some(&subject), strip);
-            }
-        }
-        let mut source = HostSecret { s, ticket, resume };
-        match inbound::judge(&request, &mut source) {
-            Judgement::Pass => abi::write_verdict(input, out, VERDICT_PASS, None, strip),
-            Judgement::Reject => abi::write_verdict(input, out, VERDICT_REJECT, None, strip),
-            Judgement::Identity(subject) => {
-                let outcome =
-                    abi::write_verdict(input, out, VERDICT_IDENTITY, Some(&subject), strip);
-                if outcome == Outcome::Failed && !ticket.is_none() {
-                    s.hold(ticket, Held::Reached(subject));
-                }
-                outcome
-            }
-            Judgement::Pending => Outcome::Pending,
-            Judgement::NotNow => Outcome::Refused,
-        }
-    }
-}
-
-/// `begin_login`: not served.
-pub struct BeginLogin;
-impl Slot for BeginLogin {
-    type In = BeginLoginIn;
-    type Out = BeginLoginOut;
-    fn call(_: *mut c_void, _: &BeginLoginIn, _: &mut BeginLoginOut) -> Outcome {
-        Outcome::Refused
-    }
-}
-
-/// `complete_login`: not served.
-pub struct CompleteLogin;
-impl Slot for CompleteLogin {
-    type In = CompleteLoginIn;
-    type Out = IdentifyOut;
-    fn call(_: *mut c_void, _: &CompleteLoginIn, _: &mut IdentifyOut) -> Outcome {
-        Outcome::Refused
-    }
-}
-
-/// `open_outbound`: bind `sigv4`; FAILED carries one `credential: …` / `settings: …` line per
-/// finding (ARCHITECT ruling 2026-09-28).
-pub struct OpenOutbound;
-impl Slot for OpenOutbound {
-    type In = OpenOutboundIn;
-    type Out = OpenOutboundOut;
-    fn call(instance: *mut c_void, input: &OpenOutboundIn, out: &mut OpenOutboundOut) -> Outcome {
-        let Some(s) = inst(instance) else {
-            return Outcome::Fault;
-        };
-        let mut env = s
-            .open_env
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        env.clear();
-        let Some(style) = text(&input.style) else {
-            env.error = "settings: no outbound auth style was named".to_string();
-            envelope(&mut out.head, &env);
-            return Outcome::Refused;
-        };
-        let opened = style::open_binding(style, blob(&input.credential), blob(&input.settings));
-        let outcome = match opened {
-            Ok(binding) => {
-                out.handle = s.keep(binding);
-                Outcome::Ready
-            }
-            Err(refusals) => {
-                env.error = refusals
-                    .iter()
-                    .map(style::Refusal::line)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                Outcome::Failed
-            }
-        };
-        envelope(&mut out.head, &env);
-        outcome
-    }
-}
-
-/// `outbound_ready`: always ready — a sigv4 binding never mints.
-pub struct OutboundReady;
-impl Slot for OutboundReady {
-    type In = OutboundReadyIn;
-    type Out = OutboundReadyOut;
-    fn call(instance: *mut c_void, input: &OutboundReadyIn, out: &mut OutboundReadyOut) -> Outcome {
-        let Some(s) = inst(instance) else {
-            return Outcome::Fault;
-        };
-        if s.binding(input.handle).is_none() {
-            return Outcome::Refused;
-        }
-        out.ready = 1;
-        Outcome::Ready
-    }
+/// The value of the first `content-type` line (ASCII case-insensitive) in the header envelope the
+/// host lent `fields` (the style declares `STYLE_NEEDS_HEADERS`); `None` when none is sent, or its
+/// value is not text.
+pub(crate) fn sent_content_type<'a>(
+    headers: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
+) -> Option<&'a str> {
+    headers
+        .into_iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(b"content-type"))
+        .and_then(|(_, v)| std::str::from_utf8(v).ok())
 }
 
 /// The SigV4 facts of a `fields` call: the walked request's method, host, path, query and sent
 /// content type (BUSBAR-1.6.0.md THE DESIGN §6: "SigV4 signs the real method and query of the
 /// walked request"); `None` when the host sent no method, host or path.
-fn sign_facts<'a>(input: &'a FieldsIn, hash: &'a str) -> Option<SignFacts<'a>> {
+fn sign_facts<'a>(view: &FieldsView<'a>, hash: &'a str) -> Option<SignFacts<'a>> {
     Some(SignFacts {
-        method: text(&input.request.method)?,
-        host: text(&input.request.authority)?,
-        path: text(&input.request.canonical_path)?,
-        query: text(&input.request.query).filter(|q| !q.is_empty()),
-        content_type: abi::sent_header(input, "content-type"),
+        method: fact(view.method())?,
+        host: fact(view.authority())?,
+        path: fact(view.path())?,
+        query: view.query().and_then(fact),
+        content_type: sent_content_type(view.headers()),
         payload_hash: hash,
-        timestamp_epoch: input.request.timestamp,
+        timestamp_epoch: view.timestamp(),
     })
 }
 
-/// `fields`: THE ONE PER-REQUEST CALL, both credential modes.
-pub struct Fields;
-impl Slot for Fields {
-    type In = FieldsIn;
-    type Out = FieldsOut;
-    fn call(instance: *mut c_void, input: &FieldsIn, out: &mut FieldsOut) -> Outcome {
-        let Some(s) = inst(instance) else {
-            return Outcome::Fault;
-        };
-        let write = |fields: &[signing::Field], out: &mut FieldsOut| {
-            let f: Vec<(&str, &str)> = fields
-                .iter()
-                .map(|(n, v)| (n.as_str(), v.as_str()))
-                .collect();
-            abi::write_fields(input, out, &f, FIELD_FLAGS)
-        };
+impl OutboundPlugin for SigV4 {
+    /// `validate`: present settings must be a JSON object (REFUSED with the reason).
+    fn validate(settings: &[u8]) -> Result<(), Refusal> {
+        if settings_ok(settings) {
+            Ok(())
+        } else {
+            Err(Refusal::refused(SETTINGS_NOT_OBJECT))
+        }
+    }
+
+    fn open(settings: &[u8], _: &[&[u8]], generation: u64) -> Result<Self, Refusal> {
+        if !settings_ok(settings) {
+            // Settings `open` refuses are FAILED with the reason (the lifecycle's rule, and the
+            // inbound conformance script's).
+            return Err(Refusal::failed(SETTINGS_NOT_OBJECT));
+        }
+        Ok(SigV4::new(generation))
+    }
+
+    /// Bind `sigv4`; FAILED carries one `credential: …` / `settings: …` line per finding
+    /// (ARCHITECT ruling 2026-09-28).
+    fn open_outbound(
+        &self,
+        style: &str,
+        credential: Option<&[u8]>,
+        settings: Option<&[u8]>,
+        _: Option<&Host>,
+        _: &mut Diags,
+    ) -> Result<u64, OpenRefusal> {
+        if style.is_empty() {
+            return Err(OpenRefusal::new(NO_STYLE));
+        }
+        match style::open_binding(style, credential, settings) {
+            Ok(binding) => Ok(self.keep(binding)),
+            Err(refusals) => {
+                let mut lines = refusals.iter().map(style::Refusal::line);
+                let first = OpenRefusal::new(lines.next().unwrap_or_default());
+                Err(lines.fold(first, |r, line| r.and(line)))
+            }
+        }
+    }
+
+    /// THE ONE PER-REQUEST CALL, both credential modes.
+    fn fields(
+        &self,
+        view: &FieldsView<'_>,
+        out: &mut FieldsWriter<'_>,
+        _: &Op<'_>,
+    ) -> Poll<FieldsAnswer> {
         // The payload hash over the body the host lent at `HeadBody`; none lent is the empty body.
-        let hash = crate::sigv4::sha256_hex(blob(&input.body).unwrap_or_default());
-        match input.mode {
-            MODE_OWN => s
-                .with_bound(input.handle, |b, note| {
-                    sign_into(b, note, input, &hash, out, write)
-                })
-                .unwrap_or(Outcome::Refused),
-            MODE_PASSTHROUGH => s
-                .with_bound(input.handle, |b, note| {
-                    let caller = blob(&input.caller_credential)
-                        .and_then(|c| std::str::from_utf8(c).ok())
-                        .unwrap_or("");
-                    // A FRESH binding, per request: the caller's key varies request to request,
-                    // so it never enters the operator binding's day-key cache (`signing` module
-                    // doc).
-                    let signer =
-                        SigV4Binding::new(b.params().clone(), SigningCredential::split(caller));
-                    sign_into(&signer, note, input, &hash, out, write)
-                })
-                .unwrap_or(Outcome::Refused),
-            _ => Outcome::Refused,
+        let hash = crate::sigv4::sha256_hex(view.body().unwrap_or_default());
+        let who = match view.mode() {
+            Mode::Own => Who::Own,
+            Mode::Passthrough => Who::Caller(view.caller_credential()),
+        };
+        Poll::Ready(
+            match self.sign(view.handle(), who, sign_facts(view, &hash)) {
+                None => FieldsAnswer::Refused,
+                Some(Signed::NoFacts) => FieldsAnswer::Failed(Cow::Borrowed("")),
+                Some(Signed::Fields { fields, note }) => {
+                    for (name, value) in &fields {
+                        out.push(name.as_bytes(), value.as_bytes(), FIELD_FLAGS);
+                    }
+                    // The signer's line, as 1.5.5 logged it on each such request.
+                    if let Some(note) = note {
+                        out.diag(diag::SESSION_TOKEN_INVALID_BYTES, WARN, &*note);
+                    }
+                    FieldsAnswer::Ready
+                }
+            },
+        )
+    }
+
+    /// Always ready — a sigv4 binding never mints — for a handle this generation holds.
+    fn outbound_ready(&self, handle: u64) -> bool {
+        self.binding(handle).is_some()
+    }
+
+    /// The new generation.
+    fn refresh(&self, settings: &[u8], _: &[&[u8]], generation: u64) -> Result<(), Refusal> {
+        if !settings_ok(settings) {
+            return Err(Refusal::failed(SETTINGS_NOT_OBJECT));
+        }
+        self.set_generation(generation);
+        Ok(())
+    }
+
+    /// The generation's handles go.
+    fn retire(&self, generation: u64) {
+        SigV4::retire(self, generation);
+    }
+
+    /// Pre-derive the SigV4 day keys ahead of UTC midnight.
+    fn tick(&self, now_ns: u64, _: Option<&Host>, _: Ticket, _: &mut Diags) -> u64 {
+        SigV4::tick(self, now_ns)
+    }
+
+    /// No driver ticket is held, and nothing waits on one: READY.
+    fn drive(&self, _: Option<&Host>, _: Ticket, _: &mut Diags) -> Driven {
+        Driven::Ready
+    }
+}
+
+/// The secret source `verify` reads through: the host's `records.secret`, on the op's ticket, on
+/// every call.
+impl SecretSource for &VerifyOp {
+    type Secret = CredentialSecret;
+
+    fn read(&mut self, kind: &str, id: &str) -> Read<CredentialSecret> {
+        match self.records_secret(kind, id) {
+            // On no ticket too, with no crossing: the kit answers that `verify` REFUSED and the
+            // host submits it on a ticket.
+            Poll::Pending => Read::Pending,
+            Poll::Ready(Ok(secret)) => {
+                let live = secret.live();
+                Read::Secret { secret, live }
+            }
+            Poll::Ready(Err(_)) => Read::Unavailable,
         }
     }
 }
 
-#[cfg(test)]
-#[path = "tests/verify_door_tests.rs"]
-mod verify_door_tests;
+impl VerifyPlugin for SigV4 {
+    /// The kit opens the one instance through [`OutboundPlugin::open`]; this builds the same.
+    fn open(settings: &[u8], _: &[&[u8]]) -> Result<Self, &'static str> {
+        if !settings_ok(settings) {
+            return Err(SETTINGS_NOT_OBJECT);
+        }
+        Ok(SigV4::new(0))
+    }
+
+    /// `verify` at the `HeadBody` point: the inbound SigV4 check ([`inbound::judge`]), its secret
+    /// read through the host's `records.secret` on every call.
+    fn verify_ticketed(&self, view: &VerifyView<'_>, op: &VerifyOp) -> Poll<Answer> {
+        let request = inbound::Request {
+            method: view.method(),
+            path: view.path(),
+            query: view.query(),
+            lines: view.lines().collect(),
+            body: view.body(),
+            now: view.timestamp(),
+        };
+        let mut source = op;
+        let verdict = match inbound::judge(&request, &mut source) {
+            Judgement::Pass => Verdict::Pass,
+            Judgement::Reject => Verdict::Reject,
+            Judgement::Identity(subject) => Verdict::Identity(VerifiedIdentity {
+                subject,
+                ..VerifiedIdentity::default()
+            }),
+            Judgement::Pending => return Poll::Pending,
+        };
+        let mut answer = Answer::from(verdict);
+        // THE CREDENTIAL LINE, named whatever the verdict (THE DESIGN §6, "Auth points and guest
+        // lists"): a SigV4 `authorization` line is this plugin's, and the plane never sees it.
+        if inbound::carries_sigv4(&request) {
+            answer.strips = vec![Strip::field(inbound::AUTHORIZATION)];
+        }
+        Poll::Ready(answer)
+    }
+}
 
 #[cfg(test)]
 #[path = "tests/policy_tests.rs"]

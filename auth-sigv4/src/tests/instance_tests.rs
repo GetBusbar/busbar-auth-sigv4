@@ -1,76 +1,74 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE HANDLE BOOKKEEPING AND `fields` SLOT, both credential modes, over the trampoline the door
-//! macro builds — no mint, no wire, no waiting ticket: a sigv4 binding signs synchronously.
+//! THE HANDLE BOOKKEEPING AND `fields`' BODY ([`SigV4::sign`]), both credential modes — no mint,
+//! no wire, no waiting ticket: a sigv4 binding signs synchronously. The frames around it (the
+//! fields written under the short-buffer rule, the note in the reply's envelope) are the contract
+//! kit's, driven through the real loader by the `-plugin` crate's conformance script.
 
 use super::*;
+use crate::sigv4::sha256_hex;
 use crate::style;
-use crate::Fields;
-use busbar_contract::abi::auth::{FieldSpan, FieldsIn, FieldsOut, MODE_OWN, MODE_PASSTHROUGH};
-use busbar_contract::abi::mechanism::call::{Blob, Outcome, BLOB_OCTETS};
-use busbar_contract::abi::sdk::door::Slot;
-use std::ffi::c_void;
-
-fn auth_span() -> busbar_contract::abi::mechanism::call::Span {
-    busbar_contract::abi::mechanism::call::Span { offset: 0, len: 0 }
-}
+use busbar_contract::abi::auth::{MODE_OWN, MODE_PASSTHROUGH};
+use busbar_contract::abi::mechanism::call::Outcome;
 
 const SETTINGS: &str =
     r#"{"service":"svc","region":"us-east-1","content_type":"application/json"}"#;
+
+/// Whose credential `mode` signs with: the caller's (`caller`, none when empty) in passthrough.
+fn who(mode: u32, caller: &str) -> Who<'_> {
+    if mode == MODE_PASSTHROUGH {
+        Who::Caller((!caller.is_empty()).then_some(caller.as_bytes()))
+    } else {
+        Who::Own
+    }
+}
+
+/// What a `fields` call answers for `signed`: its outcome, whether it set any field, and how many
+/// diagnostics it reported.
+fn answered(signed: Option<Signed>) -> (Outcome, bool, usize) {
+    match signed {
+        None => (Outcome::Refused, false, 0),
+        Some(Signed::NoFacts) => (Outcome::Failed, false, 0),
+        Some(Signed::Fields { fields, note }) => (
+            Outcome::Ready,
+            !fields.is_empty(),
+            usize::from(note.is_some()),
+        ),
+    }
+}
 
 fn fields(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bool) {
     let (outcome, signed, _) = fields_noted(s, handle, mode, caller);
     (outcome, signed)
 }
 
-/// [`fields`], with how many diagnostics the call's envelope carried.
+/// [`fields`], with how many diagnostics the call reported.
 fn fields_noted(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bool, usize) {
-    let mut buf = [0_u8; 1024];
-    let mut spans = [FieldSpan {
-        name: auth_span(),
-        value: auth_span(),
-        flags: 0,
-        _reserved: 0,
-    }; 8];
-    let mut i: FieldsIn = crate::abi::zeroed_in();
-    i.handle = handle;
-    i.mode = mode;
-    i.request.authority = busbar_contract::abi::mechanism::call::AbiStr {
-        ptr: "runtime.signer.example".as_ptr(),
-        len: "runtime.signer.example".len(),
-    };
-    i.request.canonical_path = busbar_contract::abi::mechanism::call::AbiStr {
-        ptr: "/model/m/converse".as_ptr(),
-        len: "/model/m/converse".len(),
-    };
+    let hash = sha256_hex(b"");
     // The host lends the walked request's method on every call.
-    i.request.method = busbar_contract::abi::mechanism::call::AbiStr {
-        ptr: "POST".as_ptr(),
-        len: "POST".len(),
+    let facts = SignFacts {
+        method: "POST",
+        host: "runtime.signer.example",
+        path: "/model/m/converse",
+        query: None,
+        content_type: None,
+        payload_hash: &hash,
+        timestamp_epoch: 1_440_938_160,
     };
-    i.request.timestamp = 1_440_938_160;
-    i.caller_credential = if caller.is_empty() {
-        Blob {
-            ptr: std::ptr::null(),
-            len: 0,
-            fmt: 0,
-            flags: 0,
-        }
-    } else {
-        Blob {
-            ptr: caller.as_ptr(),
-            len: caller.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
-        }
-    };
-    (i.field_buf, i.field_buf_cap) = (buf.as_mut_ptr(), buf.len());
-    (i.fields, i.fields_cap) = (spans.as_mut_ptr(), 8);
-    let mut out: FieldsOut = crate::abi::zeroed_out();
-    let inst = std::ptr::from_ref(s).cast_mut().cast::<c_void>();
-    let outcome = Fields::call(inst, &i, &mut out);
-    (outcome, out.fields_len > 0, out.head.envelope.diags_len)
+    answered(s.sign(handle, who(mode, caller), Some(facts)))
+}
+
+/// The `authorization` field among `signed`'s fields.
+fn authorization_of(signed: Option<Signed>) -> String {
+    match signed {
+        Some(Signed::Fields { fields, .. }) => fields
+            .iter()
+            .find(|(n, _)| n == "authorization")
+            .map(|(_, v)| v.as_str().to_owned())
+            .expect("an authorization is set"),
+        _ => panic!("the handle signs"),
+    }
 }
 
 fn open(s: &SigV4, cred: Option<&str>) -> u64 {
@@ -85,7 +83,7 @@ fn open(s: &SigV4, cred: Option<&str>) -> u64 {
 
 #[test]
 fn own_mode_signs_with_the_operator_credential_and_passthrough_with_the_callers() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     assert_eq!(fields(&s, handle, MODE_OWN, ""), (Outcome::Ready, true));
     assert_eq!(
@@ -102,7 +100,7 @@ fn own_mode_signs_with_the_operator_credential_and_passthrough_with_the_callers(
 
 #[test]
 fn a_keyless_binding_signs_nothing_in_own_mode_but_still_serves_passthrough() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, None);
     assert_eq!(
         fields(&s, handle, MODE_OWN, ""),
@@ -120,7 +118,7 @@ fn a_keyless_binding_signs_nothing_in_own_mode_but_still_serves_passthrough() {
 /// reports nothing, as 1.5.5's boot did not), in either mode; a merely malformed one reports none.
 #[test]
 fn an_unsendable_session_token_is_noted_on_each_fields_call() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKID:SECRET:TOK\r\nEN"));
     for _ in 0..2 {
         assert_eq!(
@@ -146,7 +144,7 @@ fn an_unsendable_session_token_is_noted_on_each_fields_call() {
 
 #[test]
 fn retire_drops_the_generations_handles() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     s.retire(1);
     assert_eq!(fields(&s, handle, MODE_OWN, ""), (Outcome::Refused, false));
@@ -158,7 +156,7 @@ fn retire_drops_the_generations_handles() {
 /// next tick whether or not a binding is open, and pre-derives every live binding's key.
 #[test]
 fn tick_answers_its_next_tick_with_or_without_an_open_binding() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     assert!(
         s.tick(1_000) > 1_000,
         "no binding open yet: the schedule goes on"
@@ -178,57 +176,22 @@ struct Walked {
 
 /// The `authorization` field `fields` sets for `walked` on the operator's binding `handle`.
 fn authorization(s: &SigV4, handle: u64, walked: &Walked) -> String {
-    use busbar_contract::abi::auth::NamedValue;
-    use busbar_contract::abi::mechanism::call::AbiStr;
-    let at = |t: &'static str| AbiStr {
-        ptr: t.as_ptr(),
-        len: t.len(),
-    };
-    let mut buf = [0_u8; 1024];
-    let mut spans = [FieldSpan {
-        name: auth_span(),
-        value: auth_span(),
-        flags: 0,
-        _reserved: 0,
-    }; 8];
-    let headers: Vec<NamedValue> = walked
+    let hash = sha256_hex(b"");
+    let headers: Vec<(&[u8], &[u8])> = walked
         .content_type
-        .map(|ct| NamedValue {
-            name: at("Content-Type"),
-            value: Blob {
-                ptr: ct.as_ptr(),
-                len: ct.len(),
-                fmt: BLOB_OCTETS,
-                flags: 0,
-            },
-        })
+        .map(|ct| (&b"Content-Type"[..], ct.as_bytes()))
         .into_iter()
         .collect();
-    let mut i: FieldsIn = crate::abi::zeroed_in();
-    i.handle = handle;
-    i.mode = MODE_OWN;
-    i.request.method = at(walked.method);
-    i.request.authority = at("runtime.signer.example");
-    i.request.canonical_path = at(walked.path);
-    if let Some(q) = walked.query {
-        i.request.query = at(q);
-    }
-    i.request.timestamp = 1_440_938_160;
-    (i.headers, i.headers_len) = (headers.as_ptr(), headers.len());
-    (i.field_buf, i.field_buf_cap) = (buf.as_mut_ptr(), buf.len());
-    (i.fields, i.fields_cap) = (spans.as_mut_ptr(), 8);
-    let mut out: FieldsOut = crate::abi::zeroed_out();
-    let inst = std::ptr::from_ref(s).cast_mut().cast::<c_void>();
-    assert_eq!(Fields::call(inst, &i, &mut out), Outcome::Ready);
-    let text = |sp: busbar_contract::abi::mechanism::call::Span| {
-        String::from_utf8_lossy(&buf[sp.offset as usize..(sp.offset + sp.len) as usize])
-            .into_owned()
+    let facts = SignFacts {
+        method: walked.method,
+        host: "runtime.signer.example",
+        path: walked.path,
+        query: walked.query.filter(|q| !q.is_empty()),
+        content_type: crate::sent_content_type(headers),
+        payload_hash: &hash,
+        timestamp_epoch: 1_440_938_160,
     };
-    (0..out.fields_len as usize)
-        .map(|k| spans[k])
-        .find(|f| text(f.name) == "authorization")
-        .map(|f| text(f.value))
-        .expect("an authorization is set")
+    authorization_of(s.sign(handle, Who::Own, Some(facts)))
 }
 
 /// The `authorization` AWS computes for a request with this canonical method, URI and query over
@@ -270,7 +233,7 @@ fn expected(
 /// its sorted query, not as a POST with none.
 #[test]
 fn fields_signs_the_walked_requests_method_and_query() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     let walked = Walked {
         method: "GET",
@@ -294,7 +257,7 @@ fn fields_signs_the_walked_requests_method_and_query() {
 /// `%253A`, as 1.5.5 signed it and as AWS recomputes it.
 #[test]
 fn fields_signs_the_double_encoded_canonical_uri() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     let walked = Walked {
         method: "POST",
@@ -317,7 +280,7 @@ fn fields_signs_the_double_encoded_canonical_uri() {
 /// request is sent with, and a request sent with none signs none — never the binding's setting.
 #[test]
 fn fields_signs_the_content_type_only_as_sent() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     let mut walked = Walked {
         method: "POST",
@@ -351,7 +314,7 @@ fn fields_signs_the_content_type_only_as_sent() {
 /// never computed by the code under test.
 #[test]
 fn fields_signs_the_query_in_its_canonical_encoding() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     let walked = Walked {
         method: "GET",
@@ -373,7 +336,7 @@ fn fields_signs_the_query_in_its_canonical_encoding() {
 /// An already canonical query is signed unchanged: encoding is idempotent over the canonical form.
 #[test]
 fn fields_signs_an_already_canonical_query_unchanged() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     let walked = Walked {
         method: "GET",
@@ -404,64 +367,26 @@ fn fields_signs_an_already_canonical_query_unchanged() {
 /// content-type;host;x-amz-content-sha256;x-amz-date\n5e4c…e30a`.
 #[test]
 fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
-    use busbar_contract::abi::auth::NamedValue;
-    use busbar_contract::abi::mechanism::call::AbiStr;
     const VECTOR: &str = "AWS4-HMAC-SHA256 \
         Credential=AKIDEXAMPLE/20150830/us-east-1/svc/aws4_request, \
         SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, \
         Signature=758de1b14d97b1d58b6307ff4c2924f7bdb3cbe3773ed02f7329925faee62472";
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     let body: &[u8] = br#"{"messages":[]}"#;
-    let at = |t: &'static str| AbiStr {
-        ptr: t.as_ptr(),
-        len: t.len(),
-    };
-    let line = |name: &'static str, value: &'static str| NamedValue {
-        name: at(name),
-        value: Blob {
-            ptr: value.as_ptr(),
-            len: value.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
-        },
-    };
-    let sign = |head: &[NamedValue]| {
-        let mut buf = [0_u8; 1024];
-        let mut spans = [FieldSpan {
-            name: auth_span(),
-            value: auth_span(),
-            flags: 0,
-            _reserved: 0,
-        }; 8];
-        let mut i: FieldsIn = crate::abi::zeroed_in();
-        i.handle = handle;
-        i.mode = MODE_OWN;
-        i.request.method = at("POST");
-        i.request.authority = at("runtime.signer.example");
-        i.request.canonical_path = at("/model/m/converse");
-        i.request.timestamp = 1_440_938_160;
-        i.body = Blob {
-            ptr: body.as_ptr(),
-            len: body.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
+    let hash = sha256_hex(body);
+    let line = |name: &'static str, value: &'static str| (name.as_bytes(), value.as_bytes());
+    let sign = |head: &[(&'static [u8], &'static [u8])]| {
+        let facts = SignFacts {
+            method: "POST",
+            host: "runtime.signer.example",
+            path: "/model/m/converse",
+            query: None,
+            content_type: crate::sent_content_type(head.iter().copied()),
+            payload_hash: &hash,
+            timestamp_epoch: 1_440_938_160,
         };
-        (i.headers, i.headers_len) = (head.as_ptr(), head.len());
-        (i.field_buf, i.field_buf_cap) = (buf.as_mut_ptr(), buf.len());
-        (i.fields, i.fields_cap) = (spans.as_mut_ptr(), 8);
-        let mut out: FieldsOut = crate::abi::zeroed_out();
-        let inst = std::ptr::from_ref(&s).cast_mut().cast::<c_void>();
-        assert_eq!(Fields::call(inst, &i, &mut out), Outcome::Ready);
-        let text = |sp: busbar_contract::abi::mechanism::call::Span| {
-            String::from_utf8_lossy(&buf[sp.offset as usize..(sp.offset + sp.len) as usize])
-                .into_owned()
-        };
-        (0..out.fields_len as usize)
-            .map(|k| spans[k])
-            .find(|f| text(f.name) == "authorization")
-            .map(|f| text(f.value))
-            .expect("an authorization is set")
+        authorization_of(s.sign(handle, Who::Own, Some(facts)))
     };
     let plane_only = [line("content-type", "application/json")];
     let completed = [

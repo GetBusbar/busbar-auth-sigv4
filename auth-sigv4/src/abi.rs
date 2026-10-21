@@ -3,11 +3,16 @@
 
 //! THE BOUNDARY: every raw pointer this plugin reads or writes, in one module.
 //!
-//! The auth kind has no typed SDK wrapper yet (KERNEL<>PLUGINS ABI-b3, `busbar-contract/src/abi/sdk/`),
-//! so the reads of the host's `in` structs, the writes into the host's field buffer, the instance
-//! pointer and the host tables are done here, each `unsafe` block stating the contract it relies
-//! on. Everything outside this module is safe code. When ABI-b3 lands the auth wrappers, this module
-//! is what moves into `abi/sdk/` and the crate becomes `#![forbid(unsafe_code)]` (BUSBAR-1.6.0.md THE DESIGN, §2).
+//! The contract ships safe auth kits (`busbar_contract::abi::sdk::auth_door` and `auth_outbound`,
+//! `auth_door!(verify_and_outbound: ..)`), but they do not yet serve THIS plugin's `verify`: the
+//! kit's `VerifyPlugin::verify` answers READY on the spot with no host services and no ticket, and
+//! the SDK's `Services` has no `records.secret` call, while this `verify` reads the AccessKeyId's
+//! secret through the host's `records.secret`, which may pend on the op's ticket. Until the
+//! contract carries both, the reads of the host's `in` structs, the writes into the host's field
+//! buffer, the instance pointer and the host tables are done here, each `unsafe` block stating the
+//! contract it relies on. Everything outside this module is safe code. Once the contract serves a
+//! ticketed `verify` over `records.secret`, this module is deleted and the crate root states
+//! `#![forbid(unsafe_code)]` (BUSBAR-1.6.0.md THE DESIGN, §2).
 
 #![allow(unsafe_code)]
 

@@ -17,7 +17,7 @@
 //!   the framer encodes it. It serves BOTH credential modes `sigv4` declares
 //!   ([`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`]): the operator's own bound
 //!   credential ([`busbar_contract::abi::auth::MODE_OWN`], the day-key-cached
-//!   [`signing::SigV4Binding`]), and the caller's verified credential passed per-request
+//!   `signing::SigV4Binding`), and the caller's verified credential passed per-request
 //!   ([`busbar_contract::abi::auth::MODE_PASSTHROUGH`]) — ARCHITECT ruling 2026-09-29: a
 //!   credential SOURCE is not a mechanism, so there is no separate `caller-credential` style; a
 //!   passthrough binding is built fresh, per request, from the caller's credential, exactly the
@@ -37,7 +37,7 @@
 //! host store service"; Appendix A, B.3: "Inbound SigV4 moves into an auth plugin's verify over a
 //! store-read host service, keeping the dummy-secret timing equivalence for an unknown
 //! AccessKeyId". The kernel's pre-step and `verify_sigv4_ingress_credential` (and
-//! `busbar-kernel-identity`'s `ingress_sigv4`) are [`inbound`], verbatim; `verify` serves them at
+//! `busbar-kernel-identity`'s `ingress_sigv4`) are `inbound`, verbatim; `verify` serves them at
 //! the `HeadBody` point ([`CAP_INBOUND`], every header line, the body):
 //!
 //! * no `authorization` line, or one that does not open with `AWS4-HMAC-SHA256`: PASS (not this
@@ -62,7 +62,7 @@
 
 mod abi;
 mod held;
-pub mod inbound;
+mod inbound;
 mod instance;
 mod signing;
 mod sigv4;
@@ -195,6 +195,14 @@ const MARKS: [MarkWord; 6] = [
 /// The diagnostic ids, in [`instance::diag`] order: 1.5.5's catalog codes where the line had one.
 const DIAG_IDS: [AbiStr; 1] = [abi_str("auth.sigv4-session-token-invalid-bytes")];
 
+busbar_contract::statement_extensions!(
+    /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246).
+    EXTENSIONS: [(
+        busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
+        include_bytes!("../declares.json"),
+    )]
+);
+
 busbar_contract::plugin_door! {
     ops: busbar_contract::abi::auth::Ops,
     statement: Statement {
@@ -203,6 +211,7 @@ busbar_contract::plugin_door! {
         diag_ids_len: DIAG_IDS.len(),
         mark_words: MARKS.as_ptr(),
         mark_words_len: MARKS.len(),
+        extensions: EXTENSIONS,
         ..statement("busbar-auth-sigv4", env!("CARGO_PKG_VERSION"), 1024)
     },
     lifecycle: {
@@ -213,16 +222,6 @@ busbar_contract::plugin_door! {
         verify: Verify, begin_login: BeginLogin, complete_login: CompleteLogin,
         open_outbound: OpenOutbound, outbound_ready: OutboundReady, fields: Fields,
     },
-}
-
-/// THE COMPILED-IN ENTRY a composition root's `auths` row names: the door at
-/// `compiled_in::door::door`, the same [`door`] the dropped-in build exports (compiled-in =
-/// dropped-in).
-pub mod compiled_in {
-    /// The door.
-    pub mod door {
-        pub use crate::door;
-    }
 }
 
 // The dropped door's one symbol, under `dropped-in` only: a build linking this crate beside other
@@ -277,7 +276,7 @@ fn settings_ok(b: Option<&[u8]>) -> bool {
 const SETTINGS_NOT_OBJECT: &str = "busbar-auth-sigv4 settings must be a JSON object";
 
 /// `validate`.
-pub struct Validate;
+struct Validate;
 impl Slot for Validate {
     type In = ValidateIn;
     type Out = OutHead;
@@ -292,7 +291,7 @@ impl Slot for Validate {
 }
 
 /// `open`.
-pub struct Open;
+struct Open;
 impl Slot for Open {
     type In = OpenIn;
     type Out = OpenOut;
@@ -310,7 +309,7 @@ impl Slot for Open {
 }
 
 /// `refresh`: the new generation.
-pub struct Refresh;
+struct Refresh;
 impl Slot for Refresh {
     type In = RefreshIn;
     type Out = OutHead;
@@ -328,7 +327,7 @@ impl Slot for Refresh {
 }
 
 /// `retire`: the generation's handles go.
-pub struct Retire;
+struct Retire;
 impl Slot for Retire {
     type In = GenIn;
     type Out = OutHead;
@@ -342,7 +341,7 @@ impl Slot for Retire {
 }
 
 /// `tick`: pre-derive the SigV4 day keys ahead of UTC midnight.
-pub struct Tick;
+struct Tick;
 impl Slot for Tick {
     type In = TickIn;
     type Out = TickOut;
@@ -356,7 +355,7 @@ impl Slot for Tick {
 }
 
 /// `drive`: no driver ticket is held.
-pub struct Drive;
+struct Drive;
 impl Slot for Drive {
     type In = DriveIn;
     type Out = OutHead;
@@ -367,7 +366,7 @@ impl Slot for Drive {
 
 /// `cancel`: a sigv4 binding never pends; a `verify` waiting on its `records.secret` read is
 /// abandoned, and what it held for the ticket goes.
-pub struct Cancel;
+struct Cancel;
 impl Slot for Cancel {
     type In = CancelIn;
     type Out = CancelOut;
@@ -381,7 +380,7 @@ impl Slot for Cancel {
 }
 
 /// `release`: no lease is handed out.
-pub struct Release;
+struct Release;
 impl Slot for Release {
     type In = ReleaseIn;
     type Out = OutHead;
@@ -391,7 +390,7 @@ impl Slot for Release {
 }
 
 /// `close`.
-pub struct Close;
+struct Close;
 impl Slot for Close {
     type In = InHead;
     type Out = OutHead;
@@ -455,7 +454,7 @@ impl SecretSource for HostSecret<'_> {
 
 /// `verify` at the `HeadBody` point: the inbound SigV4 check ([`inbound::judge`]), its secret read
 /// through the host's `records.secret`.
-pub struct Verify;
+struct Verify;
 impl Slot for Verify {
     type In = VerifyIn;
     type Out = IdentifyOut;
@@ -496,7 +495,7 @@ impl Slot for Verify {
 }
 
 /// `begin_login`: not served.
-pub struct BeginLogin;
+struct BeginLogin;
 impl Slot for BeginLogin {
     type In = BeginLoginIn;
     type Out = BeginLoginOut;
@@ -506,7 +505,7 @@ impl Slot for BeginLogin {
 }
 
 /// `complete_login`: not served.
-pub struct CompleteLogin;
+struct CompleteLogin;
 impl Slot for CompleteLogin {
     type In = CompleteLoginIn;
     type Out = IdentifyOut;
@@ -517,7 +516,7 @@ impl Slot for CompleteLogin {
 
 /// `open_outbound`: bind `sigv4`; FAILED carries one `credential: …` / `settings: …` line per
 /// finding (ARCHITECT ruling 2026-09-28).
-pub struct OpenOutbound;
+struct OpenOutbound;
 impl Slot for OpenOutbound {
     type In = OpenOutboundIn;
     type Out = OpenOutboundOut;
@@ -556,7 +555,7 @@ impl Slot for OpenOutbound {
 }
 
 /// `outbound_ready`: always ready — a sigv4 binding never mints.
-pub struct OutboundReady;
+struct OutboundReady;
 impl Slot for OutboundReady {
     type In = OutboundReadyIn;
     type Out = OutboundReadyOut;
@@ -588,7 +587,7 @@ fn sign_facts<'a>(input: &'a FieldsIn, hash: &'a str) -> Option<SignFacts<'a>> {
 }
 
 /// `fields`: THE ONE PER-REQUEST CALL, both credential modes.
-pub struct Fields;
+struct Fields;
 impl Slot for Fields {
     type In = FieldsIn;
     type Out = FieldsOut;

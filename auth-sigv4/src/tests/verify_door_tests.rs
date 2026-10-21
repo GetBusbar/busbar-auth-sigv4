@@ -26,7 +26,7 @@ use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, Outcome, RawOutcome, Span, BLOB_OCTETS, FLAG_RESUME,
 };
 use busbar_contract::abi::mechanism::door::{
-    DoorFn, Statement, MARK_WORD_CARRIER, MARK_WORD_ISSUED_ID_ALPHABET, MARK_WORD_ISSUED_ID_LENGTH,
+    Statement, MARK_WORD_CARRIER, MARK_WORD_ISSUED_ID_ALPHABET, MARK_WORD_ISSUED_ID_LENGTH,
     MARK_WORD_ISSUED_ID_PREFIX, MARK_WORD_ISSUED_SECRET_ALPHABET, MARK_WORD_ISSUED_SECRET_LENGTH,
 };
 use busbar_contract::abi::mechanism::lifecycle::{CancelIn, CancelOut, OpenIn, OpenOut};
@@ -406,9 +406,6 @@ fn the_tail_states_inbound_sigv4_at_head_body_beside_the_outbound_style() {
         ],
         "the carrier, then the issued credential's shape: 1.5.5's AccessKeyId and secret"
     );
-    // The compiled-in entry is the same door.
-    let (entry, door): (DoorFn, DoorFn) = (crate::compiled_in::door::door, crate::door);
-    assert!(std::ptr::fn_addr_eq(entry, door));
 }
 
 #[test]

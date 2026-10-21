@@ -384,18 +384,7 @@ impl Inbound {
             ("x-amz-content-sha256".to_string(), payload_hash.clone()),
             ("x-amz-date".to_string(), AMZDATE.to_string()),
         ];
-        let (sig, signed_headers) = busbar_auth_sigv4::inbound::sign_v4(
-            secret,
-            "us-east-1",
-            "bedrock",
-            "POST",
-            PATH,
-            "",
-            &headers,
-            &payload_hash,
-            AMZDATE,
-            &AMZDATE[..8],
-        );
+        let (sig, signed_headers) = sign_v4(secret, &headers, &payload_hash);
         let mut lines = vec![(
             "authorization".to_string(),
             format!(
@@ -876,4 +865,58 @@ fn red_a_writer_that_ignores_the_host_capacity_faults() {
     assert_eq!(red.call(life::OPEN, &mut o).outcome, Outcome::Ready);
     let (_, h) = open_outbound(&red, "sigv4", Some("AKIDEXAMPLE:SECRET"), SIGV4_SETTINGS);
     assert!(fields(&red, h, MODE_OWN, z(), (1024, 4)).starts_with("fields Fault"));
+}
+
+/// The client-side SigV4 signature of a Converse POST (region `us-east-1`, service `bedrock`, no
+/// query) over `headers`, as the AWS SDKs compute it: `(signature hex, SignedHeaders)`. The test
+/// signs on its own because the logic crate's only public item is its door.
+fn sign_v4(secret: &str, headers: &[(String, String)], payload_hash: &str) -> (String, String) {
+    use sha2::{Digest, Sha256};
+    fn hmac(key: &[u8], msg: &[u8]) -> Vec<u8> {
+        let mut k = if key.len() > 64 {
+            Sha256::digest(key).to_vec()
+        } else {
+            key.to_vec()
+        };
+        k.resize(64, 0);
+        let inner = Sha256::new()
+            .chain_update(k.iter().map(|b| b ^ 0x36).collect::<Vec<u8>>())
+            .chain_update(msg)
+            .finalize();
+        Sha256::new()
+            .chain_update(k.iter().map(|b| b ^ 0x5c).collect::<Vec<u8>>())
+            .chain_update(inner)
+            .finalize()
+            .to_vec()
+    }
+    let mut h: Vec<(String, String)> = headers
+        .iter()
+        .map(|(k, v)| (k.to_lowercase(), v.trim().to_string()))
+        .collect();
+    h.sort();
+    let canonical_headers: String = h.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
+    let signed_headers = h.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(";");
+    let canonical_request =
+        format!("POST\n{PATH}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
+    let datestamp = &AMZDATE[..8];
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{AMZDATE}\n{datestamp}/us-east-1/bedrock/aws4_request\n{}",
+        sha256_hex(canonical_request.as_bytes())
+    );
+    let k_date = hmac(format!("AWS4{secret}").as_bytes(), datestamp.as_bytes());
+    let k_region = hmac(&k_date, b"us-east-1");
+    let k_service = hmac(&k_region, b"bedrock");
+    let k_signing = hmac(&k_service, b"aws4_request");
+    (hex::encode(hmac(&k_signing, string_to_sign.as_bytes())), signed_headers)
+}
+
+/// The door's Statement carries the whole `declares` document under `EXT_DECLARES`.
+#[test]
+fn the_statement_carries_the_declares_document() {
+    let row = LinkedRow::of(busbar_auth_sigv4::door).unwrap();
+    let read = busbar_contract::abi::mechanism::rendering::read(&row.statement).unwrap();
+    assert_eq!(
+        busbar_contract::abi::mechanism::extensions::declares(&read.extensions.bytes),
+        Some(&include_bytes!("../../auth-sigv4/declares.json")[..]),
+    );
 }

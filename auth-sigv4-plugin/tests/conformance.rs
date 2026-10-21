@@ -895,7 +895,11 @@ fn sign_v4(secret: &str, headers: &[(String, String)], payload_hash: &str) -> (S
         .collect();
     h.sort();
     let canonical_headers: String = h.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
-    let signed_headers = h.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(";");
+    let signed_headers = h
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .collect::<Vec<_>>()
+        .join(";");
     let canonical_request =
         format!("POST\n{PATH}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
     let datestamp = &AMZDATE[..8];
@@ -907,7 +911,10 @@ fn sign_v4(secret: &str, headers: &[(String, String)], payload_hash: &str) -> (S
     let k_region = hmac(&k_date, b"us-east-1");
     let k_service = hmac(&k_region, b"bedrock");
     let k_signing = hmac(&k_service, b"aws4_request");
-    (hex::encode(hmac(&k_signing, string_to_sign.as_bytes())), signed_headers)
+    (
+        hex::encode(hmac(&k_signing, string_to_sign.as_bytes())),
+        signed_headers,
+    )
 }
 
 /// The door's Statement carries the whole `declares` document under `EXT_DECLARES`.

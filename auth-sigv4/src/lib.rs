@@ -88,7 +88,7 @@ use busbar_contract::abi::auth::{
     AuthPoints, AuthTail, StyleDecl, FACT_INBOUND_ALL_HEADERS, STYLE_CALLER_CREDENTIAL,
     STYLE_NEEDS_HEADERS,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, BLOB_OCTETS};
+use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::mechanism::door::{
     MarkWord, Statement, MARK_WORD_ISSUED_ID_ALPHABET, MARK_WORD_ISSUED_ID_LENGTH,
     MARK_WORD_ISSUED_ID_PREFIX, MARK_WORD_ISSUED_SECRET_ALPHABET, MARK_WORD_ISSUED_SECRET_LENGTH,
@@ -176,24 +176,13 @@ const MARKS: [MarkWord; 6] = [
 /// The diagnostic ids, in [`instance::diag`] order: 1.5.5's catalog codes where the line had one.
 const DIAG_IDS: [AbiStr; 1] = [abi_str("auth.sigv4-session-token-invalid-bytes")];
 
-/// The key the `declares` document rides under in the Statement's extensions (busbar #1399's
-/// `EXT_DECLARES`, the same word).
-const EXT_DECLARES: &str = "declares";
-
 /// This plugin's whole `declares` document (BUSBAR-1.6.0.md l.246).
 const DECLARES: &[u8] = include_bytes!("../declares.json");
 
-/// The Statement's extensions: the `declares` document, one entry, encoded as the contract's
-/// `extensions::entry` writes it. The SAME BYTES `statement_extensions!` wrote for this one entry
-/// (busbar #1399, not at this pin: the macro and `EXT_DECLARES` ride a busbar PR of their own);
-/// back onto the macro when it reaches a pin.
-const EXTENSIONS: Blob = {
-    const BYTES: &[u8] = &extensions::entry::<{ extensions::entry_len(EXT_DECLARES, DECLARES) }>(
-        EXT_DECLARES,
-        DECLARES,
-    );
-    Blob::of(BYTES).with_fmt(BLOB_OCTETS)
-};
+busbar_contract::statement_extensions!(
+    /// The Statement's extensions: the `declares` document under `EXT_DECLARES`.
+    EXTENSIONS: [(extensions::EXT_DECLARES, DECLARES)]
+);
 
 /// What the plugin states: its name, version, concurrency, diagnostics, marks, extensions and auth
 /// tail.

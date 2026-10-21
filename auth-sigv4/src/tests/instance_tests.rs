@@ -419,74 +419,94 @@ fn a_request_with_no_facts_fails_on_a_held_handle() {
 }
 
 /// PARITY WITH 1.5.5 (busbar testing/shadow-oracle/golden/1.5.5/cells: `egress.auth__sigv4__session-token`,
-/// `egress.auth__cred-identity__bedrock`): for every request 1.5.5 could send (POST, `application/json`, empty query), the signer signs
-/// to the signature 1.5.5's `sign_v4` computed over the writer's header set (v1.5.5
-/// `proto/bedrock/writer.rs`: content-type, host, x-amz-content-sha256, x-amz-date and, with a
-/// session token, x-amz-security-token; method `POST`, empty query), whatever method, query or
-/// content type the walked request carried.
+/// `egress.auth__cred-identity__bedrock`): for every request 1.5.5 could send (POST,
+/// `application/json`, empty query, the writer's header set: v1.5.5 `proto/bedrock/writer.rs`), the
+/// signer signs to the signature 1.5.5's `sign_v4` computed. The expected values are literals from
+/// the reviewer's independent script `/tmp/r194x/rev-opus/auth8-scripts/cells.py` (python `-I`,
+/// hmac and hashlib only; it also reproduces AWS's published ListUsers vector), over the secret
+/// `SECRET`, us-east-1 / svc, host `127.0.0.1:8080`, 2015-08-30T12:36:00Z; the canonical URI is the
+/// path encoded once more, as the script's `uenc(path)`.
 #[test]
 fn the_door_signs_every_request_1_5_5_could_send_as_1_5_5_signed_it() {
     const TS: u64 = 1_440_938_160;
-    for (cred, token) in [
-        ("AKIDORACLECAPTURE02:SECRET", None),
+    const TOKEN: &str = "OracleSessionToken//+capture=0002";
+    const SIGNED: &str = "content-type;host;x-amz-content-sha256;x-amz-date";
+    const SIGNED_TOKEN: &str =
+        "content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token";
+    const PING: &[u8] = br#"{"messages":[{"content":[{"text":"ping"}],"role":"user"}]}"#;
+    let cases: [(bool, &str, &[u8], &str, &str); 6] = [
         (
-            "AKIDORACLECAPTURE02:SECRET:OracleSessionToken//+capture=0002",
-            Some("OracleSessionToken//+capture=0002"),
+            false,
+            "/model/m-cap/converse",
+            PING,
+            SIGNED,
+            "7c151b9a4add019c8129befdbd2bfa8b42a97b8f757794947e2679f057a71b19",
         ),
-    ] {
-        for (path, body) in [
-            (
-                "/model/m-cap/converse",
-                &br#"{"messages":[{"content":[{"text":"ping"}],"role":"user"}]}"#[..],
+        (
+            false,
+            "/model/acme.model-1:0/converse-stream",
+            b"{}",
+            SIGNED,
+            "aca1503d162b2ef006708e1733f2a7459dd478b8d4652408295a2e52d3b94b9a",
+        ),
+        (
+            false,
+            "/model/m/converse",
+            b"",
+            SIGNED,
+            "8f9378ad1f3169a083598e90b3a9878dc1567ca50a4c88242e83a579e8c44c86",
+        ),
+        (
+            true,
+            "/model/m-cap/converse",
+            PING,
+            SIGNED_TOKEN,
+            "b66c42b8713aca944c91a14f6a716d5bed0f6027e6d4d9a9e4e5610a61efd660",
+        ),
+        (
+            true,
+            "/model/acme.model-1:0/converse-stream",
+            b"{}",
+            SIGNED_TOKEN,
+            "d773de07640e3752248952f3bffaab1c4242fe14d622dc7dcdd4f9c4b7f9956c",
+        ),
+        (
+            true,
+            "/model/m/converse",
+            b"",
+            SIGNED_TOKEN,
+            "87e16b841f783aef2e900d5051ba283c4109fa353d71449a7f5532cd855dc8d8",
+        ),
+    ];
+    for (with_token, path, body, signed_headers, signature) in cases {
+        let cred = if with_token {
+            format!("AKIDORACLECAPTURE02:SECRET:{TOKEN}")
+        } else {
+            "AKIDORACLECAPTURE02:SECRET".to_string()
+        };
+        let hash = sha256_hex(body);
+        let s = SigV4::new(1);
+        let handle = open(&s, Some(&cred));
+        let got = the_authorization(s.sign(
+            handle,
+            Who::Own,
+            Some(SignFacts {
+                method: "POST",
+                host: "127.0.0.1:8080",
+                path,
+                query: None,
+                content_type: Some("application/json"),
+                payload_hash: &hash,
+                timestamp_epoch: TS,
+            }),
+        ));
+        assert_eq!(
+            got,
+            format!(
+                "AWS4-HMAC-SHA256 Credential=AKIDORACLECAPTURE02/20150830/us-east-1/svc/aws4_request, SignedHeaders={signed_headers}, Signature={signature}"
             ),
-            ("/model/acme.model-1:0/converse-stream", &b"{}"[..]),
-            ("/model/m/converse", &b""[..]),
-        ] {
-            let hash = sha256_hex(body);
-            let host = "127.0.0.1:8080";
-            let s = SigV4::new(1);
-            let handle = open(&s, Some(cred));
-            let got = the_authorization(s.sign(
-                handle,
-                Who::Own,
-                Some(SignFacts {
-                    method: "POST",
-                    host,
-                    path,
-                    query: None,
-                    content_type: Some("application/json"),
-                    payload_hash: &hash,
-                    timestamp_epoch: TS,
-                }),
-            ));
-
-            let (amzdate, datestamp) = crate::sigv4::format_amz_time(TS);
-            let mut signed = vec![
-                ("content-type".to_string(), "application/json".to_string()),
-                ("host".to_string(), host.to_string()),
-                ("x-amz-content-sha256".to_string(), hash.clone()),
-                ("x-amz-date".to_string(), amzdate.clone()),
-            ];
-            if let Some(t) = token {
-                signed.push(("x-amz-security-token".to_string(), t.to_string()));
-            }
-            let (signature, signed_headers) = crate::sigv4::sign_v4(
-                "SECRET",
-                "us-east-1",
-                "svc",
-                "POST",
-                &crate::sigv4::uri_encode_path(path),
-                "",
-                &signed,
-                &hash,
-                &amzdate,
-                &datestamp,
-            );
-            let want = format!(
-                "AWS4-HMAC-SHA256 Credential=AKIDORACLECAPTURE02/{datestamp}/us-east-1/svc/aws4_request, SignedHeaders={signed_headers}, Signature={signature}"
-            );
-            assert_eq!(got, want, "{path} {token:?}");
-        }
+            "{path} token={with_token}"
+        );
     }
 }
 

@@ -244,10 +244,9 @@ fn fact(b: &[u8]) -> Option<&str> {
     std::str::from_utf8(b).ok().filter(|s| !s.is_empty())
 }
 
-/// The value of the first `content-type` line (ASCII case-insensitive) in a header envelope; `None`
-/// when none is sent, or its value is not text. The signer's own tests drive it with the
-/// generalised facts (`proposed-sigv4-outbound-generalised`); the door does not read it.
-#[cfg(test)]
+/// The value of the first `content-type` line (ASCII case-insensitive) in the header envelope the
+/// host lent `fields` (the style declares `STYLE_NEEDS_HEADERS`); `None` when none is sent, or its
+/// value is not text.
 pub(crate) fn sent_content_type<'a>(
     headers: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
 ) -> Option<&'a str> {
@@ -257,36 +256,19 @@ pub(crate) fn sent_content_type<'a>(
         .and_then(|(_, v)| std::str::from_utf8(v).ok())
 }
 
-/// The request the signature covers, EXACTLY as 1.5.5 signed it (v1.5.5
-/// `proto/bedrock/writer.rs:36-54`): a `POST` of an `application/json` body with the EMPTY query,
-/// to the host and path the request is sent to. The walked request's own method, query and content
-/// type are not read (that generalisation rides `proposed-sigv4-outbound-generalised`).
-fn legacy_facts<'a>(
-    host: &'a str,
-    path: &'a str,
-    hash: &'a str,
-    timestamp_epoch: u64,
-) -> SignFacts<'a> {
-    SignFacts {
-        method: "POST",
-        host,
-        path,
-        query: None,
-        content_type: Some("application/json"),
-        payload_hash: hash,
-        timestamp_epoch,
-    }
-}
-
-/// The SigV4 facts of a `fields` call ([`legacy_facts`]); `None` when the host sent no host or
-/// path.
+/// The SigV4 facts of a `fields` call: the walked request's method, host, path, query and sent
+/// content type (BUSBAR-1.6.0.md THE DESIGN §6: "SigV4 signs the real method and query of the
+/// walked request"); `None` when the host sent no method, host or path.
 fn sign_facts<'v: 'h, 'h>(view: &FieldsView<'v>, hash: &'h str) -> Option<SignFacts<'h>> {
-    Some(legacy_facts(
-        fact(view.authority())?,
-        fact(view.path())?,
-        hash,
-        view.timestamp(),
-    ))
+    Some(SignFacts {
+        method: fact(view.method())?,
+        host: fact(view.authority())?,
+        path: fact(view.path())?,
+        query: view.query().and_then(fact),
+        content_type: sent_content_type(view.headers()),
+        payload_hash: hash,
+        timestamp_epoch: view.timestamp(),
+    })
 }
 
 impl OutboundPlugin for SigV4 {

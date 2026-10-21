@@ -419,7 +419,7 @@ fn a_request_with_no_facts_fails_on_a_held_handle() {
 }
 
 /// PARITY WITH 1.5.5 (busbar testing/shadow-oracle/golden/1.5.5/cells: `egress.auth__sigv4__session-token`,
-/// `egress.auth__cred-identity__bedrock`): for every request 1.5.5 could send, the door's facts sign
+/// `egress.auth__cred-identity__bedrock`): for every request 1.5.5 could send (POST, `application/json`, empty query), the signer signs
 /// to the signature 1.5.5's `sign_v4` computed over the writer's header set (v1.5.5
 /// `proto/bedrock/writer.rs`: content-type, host, x-amz-content-sha256, x-amz-date and, with a
 /// session token, x-amz-security-token; method `POST`, empty query), whatever method, query or
@@ -449,7 +449,15 @@ fn the_door_signs_every_request_1_5_5_could_send_as_1_5_5_signed_it() {
             let got = the_authorization(s.sign(
                 handle,
                 Who::Own,
-                Some(crate::legacy_facts(host, path, &hash, TS)),
+                Some(SignFacts {
+                    method: "POST",
+                    host,
+                    path,
+                    query: None,
+                    content_type: Some("application/json"),
+                    payload_hash: &hash,
+                    timestamp_epoch: TS,
+                }),
             ));
 
             let (amzdate, datestamp) = crate::sigv4::format_amz_time(TS);
@@ -480,4 +488,66 @@ fn the_door_signs_every_request_1_5_5_could_send_as_1_5_5_signed_it() {
             assert_eq!(got, want, "{path} {token:?}");
         }
     }
+}
+
+/// THE WALKED REQUEST IS SIGNED (owner-approved 2026-10-21; BUSBAR-1.6.0.md section 6): a GET, a
+/// query (names and values decoded once and re-encoded over the unreserved set with uppercase hex,
+/// sorted by name then value, a name repeated kept) and a non-JSON content type each sign to the
+/// vector `/tmp/r194x/mytools/sigv4_vectors.py` computes independently (python `-I`, `hmac` and
+/// `hashlib` only; script text in the PR body): AKIDEXAMPLE:SECRET, us-east-1 / svc, host
+/// `runtime.signer.example`, path `/model/m/converse`, empty body, 2015-08-30T12:36:00Z.
+#[test]
+fn the_walked_methods_queries_and_content_types_sign_to_independent_vectors() {
+    let s = SigV4::new(1);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    let hash = sha256_hex(b"");
+    let sign = |method: &str, query: Option<&str>, content_type: Option<&str>| {
+        the_authorization(s.sign(
+            handle,
+            Who::Own,
+            Some(SignFacts {
+                method,
+                host: "runtime.signer.example",
+                path: "/model/m/converse",
+                query,
+                content_type,
+                payload_hash: &hash,
+                timestamp_epoch: 1_440_938_160,
+            }),
+        ))
+    };
+    let vector = |signed_headers: &str, signature: &str| {
+        format!(
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/svc/aws4_request, \
+             SignedHeaders={signed_headers}, Signature={signature}"
+        )
+    };
+    assert_eq!(
+        sign("GET", None, None),
+        vector(
+            "host;x-amz-content-sha256;x-amz-date",
+            "5240f17779f2d75547be14adf734d994702fdd2ad64208e44ab1b81f017c112c"
+        ),
+        "a GET with no query and no content type"
+    );
+    assert_eq!(
+        sign(
+            "POST",
+            Some("z=a/b&A=%7e&k=%3a&d=2&d=1&e"),
+            Some("application/json")
+        ),
+        vector(
+            "content-type;host;x-amz-content-sha256;x-amz-date",
+            "ba72d31b3825e3ff359f36d8653b4173c927c986d13b1a491d0d0bd204b7e0c5"
+        ),
+        "a query: encoding, sorting, a repeated name, a bare name"
+    );
+    assert_eq!(
+        sign("POST", None, Some("text/plain; charset=utf-8")),
+        vector(
+            "content-type;host;x-amz-content-sha256;x-amz-date",
+            "501c33d7676055ea5944e5f18c29650c00226e58ed5488a5e2b4918991690760"
+        ),
+        "a non-JSON content type"
+    );
 }

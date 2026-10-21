@@ -165,6 +165,35 @@ fn tick_prederives_tomorrows_key_ahead_of_midnight() {
     );
 }
 
+/// The day keys held are `tick`'s, relative to the instance's clock, never a request's date: a
+/// request dated days ahead of today, or days behind it, signs with a key derived for that request
+/// alone, exactly as a fresh derivation signs it, and today's and tomorrow's keys stay held
+/// (THE DESIGN §6.5: "a daily signing key derived ahead of time").
+#[test]
+fn a_request_dated_off_the_held_days_never_evicts_a_day_key() {
+    let cred = || SigningCredential::split(&format!("AKIDEXAMPLE:{SECRET}"));
+    let b = SigV4Binding::new(params(), cred());
+    let midnight = 1_440_979_200; // 2015-08-31T00:00:00Z
+    b.prederive(midnight - 600);
+    assert_eq!(b.held(), ["20150830", "20150831"]);
+    let hash = sigv4::sha256_hex(b"{}");
+    for skew in [5 * 86_400, 86_400 * 2] {
+        for at in [midnight + skew, midnight - skew] {
+            let off = SignFacts {
+                timestamp_epoch: at,
+                ..facts(&hash)
+            };
+            let signed = b.sign(&off);
+            assert_eq!(
+                b.held(),
+                ["20150830", "20150831"],
+                "a request dated {at} leaves today's and tomorrow's keys held"
+            );
+            assert_eq!(signed, SigV4Binding::new(params(), cred()).sign(&off));
+        }
+    }
+}
+
 /// A logged credential shows that a secret and a token are present, never either.
 #[test]
 fn a_logged_credential_redacts_its_secret_and_token() {

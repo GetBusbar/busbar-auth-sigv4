@@ -219,9 +219,9 @@ busbar_contract::plugin_door! {
 /// `compiled_in::door::door`, the same [`door`] the dropped-in build exports (compiled-in =
 /// dropped-in).
 pub mod compiled_in {
-    /// The door.
+    /// The door and its `MACRO_DOOR` (the `plugin_door!` door a linked table names).
     pub mod door {
-        pub use crate::door;
+        pub use crate::{door, MACRO_DOOR};
     }
 }
 

@@ -59,6 +59,7 @@ dependencies = [
  "busbar-auth-sigv4",
  "busbar-contract",
  "busbar-plugin-loader",
+ "hex",
  "serde_json",
  "sha2",
 ]

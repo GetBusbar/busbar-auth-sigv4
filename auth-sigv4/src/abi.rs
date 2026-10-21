@@ -378,8 +378,7 @@ impl Host {
         let mut out = ServiceOut {
             size: size_of::<ServiceOut>() as u32,
             outcome: RawOutcome::of(Outcome::Fault),
-            exited: 0,
-            _reserved: [0; 2],
+            _reserved: [0; 3],
             value: 0,
             len: 0,
             items: 0,

@@ -80,12 +80,13 @@ fn sign_v4_does_not_fold_nbsp_or_tab_in_header_value() {
     );
 }
 
-/// The signer merges nothing: a list that names a header twice signs one canonical line per entry,
-/// as 1.5.5's `sign_v4` did (v1.5.5 `crates/busbar/src/sigv4.rs:173-189`, one `{k}:{v}` line and one
-/// `SignedHeaders` name per entry). Its one caller (`signing::SigV4Binding::sign`) sets each name
-/// once, so no request it signs repeats a name.
+/// Per the SigV4 canonicalisation rule, a header name that appears twice is not two lines in the
+/// canonical headers block and not two entries in `SignedHeaders` — it is ONE entry whose value is
+/// the comma-joined, individually-trimmed values, in their original order. Proven by comparing
+/// against the header handed over pre-merged: if the signer folds them the same way itself, the two
+/// signatures and `SignedHeaders` strings must match exactly.
 #[test]
-fn sign_v4_signs_a_repeated_header_name_once_per_entry_as_1_5_5_did() {
+fn sign_v4_merges_a_duplicate_header_name_by_comma_joining_its_values() {
     let payload_hash = sha256_hex(b"");
     let common = [
         ("host".to_string(), "iam.amazonaws.com".to_string()),
@@ -106,23 +107,23 @@ fn sign_v4_signs_a_repeated_header_name_once_per_entry_as_1_5_5_did() {
         )
     };
 
-    let mut repeated = common.to_vec();
-    repeated.push(("x-custom".to_string(), "  foo  ".to_string()));
-    repeated.push(("x-custom".to_string(), "bar".to_string()));
-    let (sig_repeated, signed_repeated) = sign(&repeated);
+    let mut duplicated = common.to_vec();
+    duplicated.push(("x-custom".to_string(), "  foo  ".to_string()));
+    duplicated.push(("x-custom".to_string(), "bar".to_string()));
+    let (sig_duplicated, signed_duplicated) = sign(&duplicated);
 
-    let mut joined = common.to_vec();
-    joined.push(("x-custom".to_string(), "foo,bar".to_string()));
-    let (sig_joined, signed_joined) = sign(&joined);
+    let mut premerged = common.to_vec();
+    premerged.push(("x-custom".to_string(), "foo,bar".to_string()));
+    let (sig_premerged, signed_premerged) = sign(&premerged);
 
     assert_eq!(
-        signed_repeated, "host;x-amz-date;x-custom;x-custom",
-        "each entry is its own SignedHeaders name, as 1.5.5 signed it"
+        signed_duplicated, "host;x-amz-date;x-custom",
+        "the duplicate name appears once in SignedHeaders, not twice"
     );
-    assert_eq!(signed_joined, "host;x-amz-date;x-custom");
-    assert_ne!(
-        sig_repeated, sig_joined,
-        "a repeated header is never folded into one comma-joined value"
+    assert_eq!(signed_duplicated, signed_premerged);
+    assert_eq!(
+        sig_duplicated, sig_premerged,
+        "a duplicated header must sign identically to its comma-joined, pre-trimmed equivalent"
     );
 }
 

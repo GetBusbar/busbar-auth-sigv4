@@ -9,7 +9,7 @@
 //! verified against AWS's own published worked example (GET iam ListUsers, 2015-08-30) in the
 //! tests, so correctness does not rely on trusting the move.
 //!
-//! Three departures from the moved signer, each named here:
+//! Departures from the moved signer, each named here:
 //!
 //! * THE DAILY KEY (BUSBAR-1.6.0.md THE DESIGN, §6.5: "SigV4 signs per request with a daily signing
 //!   key derived ahead of time"): [`sign_v4`] is split into [`signing_key`] (the HMAC chain over
@@ -28,8 +28,9 @@
 //!   the moved signer's bytes were refused for those). For the request 1.5.5 signed, a POST of a
 //!   JSON body with no query, every signed byte is 1.5.5's.
 //!
-//! [`sign_v4_with_key`] canonicalises the header list it is handed exactly as 1.5.5's `sign_v4`
-//! did: one canonical line and one `SignedHeaders` name per entry, nothing merged.
+//! [`sign_v4_with_key`] merges a header name handed twice into one comma-separated canonical entry
+//! (the SigV4 canonicalisation rule); the one caller sets each name once, so for the requests 1.5.5
+//! signed nothing is merged and every signed byte is 1.5.5's.
 //!
 //! The signer's chain is shared with the INBOUND check ([`crate::inbound`], moved here from the
 //! kernel): it recomputes a client's signature through [`hmac`], [`signing_key`] and [`sha256_hex`],
@@ -273,8 +274,25 @@ pub fn sign_v4_with_key(
         .map(|(k, v)| (k.to_lowercase(), canonicalize_header_value(v)))
         .collect();
     h.sort_by(|a, b| a.0.cmp(&b.0));
-    // One canonical line per entry, as 1.5.5's `sign_v4` wrote them: its one caller
-    // (`signing::SigV4Binding::sign`) sets each name once.
+
+    // The SigV4 canonicalisation rule does not sort the values of a header that appears more than
+    // once; it combines them into one comma-separated list under that header's single entry. A
+    // caller CAN hand this function the same name twice, so merging here rather than assuming the
+    // caller never repeats a name is what keeps `SignedHeaders` and the canonical headers block in
+    // the one-entry-per-name shape AWS's servers expect. The sort above already made same-named
+    // entries adjacent, so a single pass merges them in their original relative order.
+    let mut merged: Vec<(String, String)> = Vec::with_capacity(h.len());
+    for (k, mut v) in h {
+        match merged.last_mut() {
+            Some((last_k, last_v)) if *last_k == k => {
+                last_v.push(',');
+                last_v.push_str(&v);
+                v.zeroize();
+            }
+            _ => merged.push((k, v)),
+        }
+    }
+    let mut h = merged;
 
     // The canonical headers carry a session token's value: they and the canonical request built
     // from them are sized once (no growth leaves a copy behind) and wiped on drop, as is every

@@ -397,7 +397,7 @@ fn the_tail_states_inbound_sigv4_at_head_body_beside_the_outbound_style() {
     let door = busbar_auth_sigv4::door();
     // SAFETY: the door is this crate's `'static` plain data.
     let (st, tail): (Statement, AuthTail) = unsafe {
-        let st: *const Statement = std::ptr::addr_of!((*door).statement).read_unaligned();
+        let st: *const Statement = door.statement();
         let st = st.read_unaligned();
         (st, st.kind_tail.cast::<AuthTail>().read_unaligned())
     };

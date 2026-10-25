@@ -413,7 +413,8 @@ fn the_unsendable_line_capitalises_a_multibyte_initial() {
     );
     let s = SigV4::new(1);
     let settings = r#"{"service":"ébedrock","region":"us-east-1"}"#;
-    let binding = crate::style::open_binding("sigv4", Some(b"AKID:SECRET"), Some(settings.as_bytes()))
-        .expect("the binding opens");
+    let binding =
+        crate::style::open_binding("sigv4", Some(b"AKID:SECRET"), Some(settings.as_bytes()))
+            .expect("the binding opens");
     assert!(s.binding(s.keep(binding)).is_some(), "the handle is kept");
 }

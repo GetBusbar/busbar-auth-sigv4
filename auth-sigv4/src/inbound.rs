@@ -98,7 +98,7 @@ pub fn sign_v4(
 ) -> (String, String) {
     let mut h: Vec<(String, String)> = headers
         .iter()
-        // AWS SigV4 canonicalization of a (non-quoted) header value: trim leading/trailing ASCII
+        // AWS SigV4 canonicalization of a header value, quoted or not: trim leading/trailing ASCII
         // spaces (0x20) AND collapse runs of sequential ASCII spaces to a single space. AWS operates
         // on ASCII space ONLY — NBSP (U+00A0), tabs, and other Unicode whitespace are NOT treated as
         // whitespace and must pass through verbatim, byte-for-byte, into the signed value.

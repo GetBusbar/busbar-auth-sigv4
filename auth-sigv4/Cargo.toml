@@ -20,7 +20,8 @@ crate-type = ["rlib"]
 # DEPENDENCY POLICY. A plugin's closure is `busbar-contract` plus the third-party crates it needs to
 # do its job (owner ruling 2026-09-28, PLUGIN LIBRARIES): the SigV4 HMAC chain (`hex`; SHA-256 is
 # `ring`'s digest, the keyed HMAC the contract SDK's wiped one), the settings and credential JSON
-# (`serde`, `serde_json`), and zeroisation of derived key material (`zeroize`). No kernel crate,
+# (`serde`, `serde_json`), zeroisation of derived key material (`zeroize`), and the reject log
+# (`tracing`, into the plugin's own log file). No kernel crate,
 # no plane, no sibling auth-kind plugin.
 # Every version is the workspace table's (busbar's at the pin).
 [dependencies]
@@ -29,4 +30,11 @@ hex = { workspace = true }
 ring = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The inbound check logs each reject (its reason, never the credential) into the plugin's own log.
+tracing = { workspace = true }
 zeroize = { workspace = true }
+
+[dev-dependencies]
+# The contract's test kit (`busbar_contract::testkit::WarnCapture`) for the reject-log test: it is
+# compiled only under the dev-only `test-seal` feature, which no non-dev edge enables.
+busbar-contract = { workspace = true, features = ["test-seal"] }

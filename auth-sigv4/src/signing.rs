@@ -68,6 +68,31 @@ pub struct SignFacts<'a> {
     pub timestamp_epoch: u64,
 }
 
+/// The credential is not `ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]` (no `:` at all).
+pub(crate) const CREDENTIAL_SHAPE: &str =
+    "expected ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]";
+/// The access key id is empty.
+pub(crate) const ACCESS_KEY_ID_EMPTY: &str = "the access key id is empty";
+/// The access key id cannot ride in the `Authorization` value.
+pub(crate) const ACCESS_KEY_ID_UNSENDABLE: &str =
+    "the access key id holds a byte no header value may carry";
+/// The secret access key is empty.
+pub(crate) const SECRET_EMPTY: &str = "the secret access key is empty";
+/// A session token is present but empty.
+pub(crate) const SESSION_TOKEN_EMPTY: &str = "the session token is empty";
+/// The session token cannot ride in `x-amz-security-token`.
+pub(crate) const SESSION_TOKEN_UNSENDABLE: &str =
+    "the session token holds a byte no header value may carry";
+
+/// What `fields` answers in own mode on a binding opened with no credential of its own.
+pub(crate) const NO_OWN_CREDENTIAL: &str = "sigv4: this binding holds no credential of its own \
+     (passthrough-only); the request is not sent unsigned";
+/// What `fields` answers when the signed `Authorization` value is no legal header value: the one
+/// input the credential checks do not cover is the service and region the scope names.
+const AUTHORIZATION_UNSENDABLE: &str = "sigv4: the signed Authorization value holds a byte no \
+     header value may carry (check the service and region settings); the request is not sent \
+     unsigned";
+
 /// One field the signer sets: its name and its value, the value wiped on drop (a session token
 /// rides in one).
 pub type Field = (String, Zeroizing<String>);
@@ -94,23 +119,46 @@ impl std::fmt::Debug for SigningCredential {
 }
 
 impl SigningCredential {
-    /// Split `raw` ([`sigv4::split_credential`]); `None` when either of the first two parts is
-    /// missing or empty — the credential then signs nothing.
-    pub fn split(raw: &str) -> Option<Self> {
-        let (access, secret, token) = sigv4::split_credential(raw)?;
-        Some(Self {
+    /// Parse `raw`, `ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]`, into a credential that can
+    /// sign (OWNER RULING: a credential that cannot is refused, never bound to sign nothing).
+    ///
+    /// # Errors
+    ///
+    /// Every finding, in order ([`CREDENTIAL_SHAPE`] alone when there is no `:` at all), each
+    /// naming what is wrong and never the credential's bytes.
+    pub fn parse(raw: &str) -> Result<Self, Vec<&'static str>> {
+        let mut parts = raw.splitn(3, ':');
+        let (Some(access), Some(secret), token) = (parts.next(), parts.next(), parts.next()) else {
+            return Err(vec![CREDENTIAL_SHAPE]);
+        };
+        let mut findings = Vec::new();
+        if access.is_empty() {
+            findings.push(ACCESS_KEY_ID_EMPTY);
+        } else if !is_legal_header_value(access) {
+            // The access key id rides verbatim in the `Authorization` value.
+            findings.push(ACCESS_KEY_ID_UNSENDABLE);
+        }
+        if secret.is_empty() {
+            findings.push(SECRET_EMPTY);
+        }
+        match token {
+            Some("") => findings.push(SESSION_TOKEN_EMPTY),
+            // Signing over a token the wire cannot carry is a guaranteed mismatch.
+            Some(t) if !is_legal_header_value(t) => findings.push(SESSION_TOKEN_UNSENDABLE),
+            _ => {}
+        }
+        if !findings.is_empty() {
+            return Err(findings);
+        }
+        // The split the signer always took: every finding it folds into `None` is checked above.
+        let Some((access, secret, token)) = sigv4::split_credential(raw) else {
+            return Err(vec![CREDENTIAL_SHAPE]);
+        };
+        Ok(Self {
             access_key_id: access.to_string(),
             secret: Held::new(Zeroizing::new(secret.to_string())),
             session_token: token.map(|t| Held::new(Zeroizing::new(t.to_string()))),
         })
-    }
-
-    /// Whether the session token is present and not a legal header value: the credential then
-    /// signs nothing (signing over a token the wire cannot carry is a guaranteed mismatch).
-    pub fn session_token_unsendable(&self) -> bool {
-        self.session_token
-            .as_ref()
-            .is_some_and(|t| !is_legal_header_value(t.reveal()))
     }
 }
 
@@ -151,7 +199,8 @@ impl std::fmt::Debug for SigV4Binding {
 }
 
 impl SigV4Binding {
-    /// A binding of `params` to `credential` (`None`: a credential that signs nothing).
+    /// A binding of `params` to `credential` (`None`: a passthrough-only binding, which signs only
+    /// with a caller's credential).
     pub fn new(params: SigV4Params, credential: Option<SigningCredential>) -> Self {
         Self {
             params,
@@ -164,14 +213,6 @@ impl SigV4Binding {
     /// the caller's credential in passthrough mode (`crate::instance::SigV4::sign`).
     pub fn params(&self) -> &SigV4Params {
         &self.params
-    }
-
-    /// Whether the bound credential's session token is no legal header value: [`Self::sign`]
-    /// presents nothing for it, and the request reports the signer's line.
-    pub fn session_token_unsendable(&self) -> bool {
-        self.credential
-            .as_ref()
-            .is_some_and(SigningCredential::session_token_unsendable)
     }
 
     /// Derive (and keep) the key for `datestamp` unless held; at most two days are kept.
@@ -232,22 +273,20 @@ impl SigV4Binding {
         }
     }
 
-    /// Sign one request: the fields to set, in order, or NONE when the credential cannot sign
-    /// (missing, an empty access key id or secret, an unsendable session token, or an access key id
-    /// that makes the `Authorization` value illegal). Every per-request copy of the session token
-    /// is wiped on drop.
-    pub fn sign(&self, facts: &SignFacts<'_>) -> Vec<Field> {
+    /// Sign one request: the fields to set, in order. Every per-request copy of the session token
+    /// is wiped on drop. The credential was checked when it was parsed
+    /// ([`SigningCredential::parse`]): an empty part or a token the wire cannot carry never gets
+    /// here.
+    ///
+    /// # Errors
+    ///
+    /// The reason nothing is signed — the binding holds no credential of its own, or the
+    /// `Authorization` value would be no legal header value — so the request is FAILED, never sent
+    /// unsigned.
+    pub fn sign(&self, facts: &SignFacts<'_>) -> Result<Vec<Field>, &'static str> {
         let Some(cred) = &self.credential else {
-            return Vec::new();
+            return Err(NO_OWN_CREDENTIAL);
         };
-        // Validated BEFORE signing, so the signed set and the sent set are gated by the same
-        // check: a token the wire cannot carry must not be signed over and then dropped.
-        if cred.access_key_id.is_empty()
-            || cred.secret.reveal().is_empty()
-            || cred.session_token_unsendable()
-        {
-            return Vec::new();
-        }
         let region = self.params.region.as_str();
         let service = self.params.service.as_str();
         let (amzdate, datestamp) = sigv4::format_amz_time(facts.timestamp_epoch);
@@ -315,10 +354,10 @@ impl SigV4Binding {
             sigv4::SIGV4_ALGORITHM,
             cred.access_key_id,
         );
-        // The access key id rides in this value verbatim, so it is the one input that can make
-        // it unsendable; the date and the hash are always legal.
+        // The access key id was checked at parse; the service and region (settings) ride in this
+        // value verbatim too, and the date and the hash are always legal.
         if !is_legal_header_value(&authorization) {
-            return Vec::new();
+            return Err(AUTHORIZATION_UNSENDABLE);
         }
         let mut fields: Vec<Field> = vec![
             ("authorization".to_string(), Zeroizing::new(authorization)),
@@ -331,7 +370,7 @@ impl SigV4Binding {
         if let Some(t) = &cred.session_token {
             fields.push(("x-amz-security-token".to_string(), t.reveal().clone()));
         }
-        fields
+        Ok(fields)
     }
 }
 

@@ -7,13 +7,21 @@
 //! (`crate::instance::SigV4::sign`).
 //!
 //! THE SETTINGS SCHEMA (ARCHITECT ruling 2026-09-28): `{service, region}`. A `content_type` key is
-//! read past: the content type a signature covers is the one the request is sent with (the style
-//! declares `STYLE_NEEDS_HEADERS` and signs the sent value), never a setting.
+//! read past (1.5.5 configs carry it): the content type a signature covers is the one the request
+//! is sent with (the style declares `STYLE_NEEDS_HEADERS` and signs the sent value), never a
+//! setting. Any other key is refused by name (``settings: unknown key `<k>` ``), never ignored.
+//!
+//! THE CREDENTIAL (OWNER RULING): `ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]`, checked here,
+//! at open (`SigningCredential::parse`): one that is not UTF-8, has no `:`, has an empty access
+//! key id or secret, an access key id or session token no header value may carry, or an empty
+//! session token, is refused — never bound to sign nothing. No credential at all opens: the
+//! contract defines that as a passthrough-only binding, which signs only with a caller's
+//! credential (own-mode `fields` on it FAILS, never sends the request unsigned).
 //!
 //! THE REFUSALS (ARCHITECT ruling 2026-09-28): a binding that cannot open answers FAILED with one
 //! line per finding, each `credential: <text>` or `settings: <text>`. The kernel composes the 1.5.5
 //! sentence — `provider '<p>' <style> credential (from <src>) is invalid: <text>`, or
-//! `provider '<p>' <text>` — so every `<text>` below is 1.5.5's own words.
+//! `provider '<p>' <text>`. No line ever carries the credential's bytes.
 
 use serde_json::{Map, Value};
 
@@ -70,6 +78,17 @@ fn text(m: &Map<String, Value>, key: &str) -> Result<Option<String>, Refusal> {
     }
 }
 
+/// The style settings this plugin reads, and `content_type`, read past (1.5.5 configs carry it).
+const KNOWN_KEYS: [&str; 3] = ["service", "region", "content_type"];
+
+/// One refusal per key the style settings name that this plugin does not read.
+fn unknown_keys(m: &Map<String, Value>) -> Vec<Refusal> {
+    m.keys()
+        .filter(|k| !KNOWN_KEYS.contains(&k.as_str()))
+        .map(|k| Refusal::Settings(format!("unknown key `{k}`")))
+        .collect()
+}
+
 fn sigv4_params(m: &Map<String, Value>) -> Result<SigV4Params, Refusal> {
     let missing = |k: &str| Refusal::Settings(format!("uses auth: sigv4 but has no `{k}`"));
     Ok(SigV4Params {
@@ -82,7 +101,8 @@ fn sigv4_params(m: &Map<String, Value>) -> Result<SigV4Params, Refusal> {
 ///
 /// # Errors
 ///
-/// Every finding that refuses the binding, in 1.5.5's check order.
+/// Every finding that refuses the binding: the settings first (an unknown key, then a missing or
+/// invalid param), then each finding of the credential.
 pub fn open_binding(
     style: &str,
     credential: Option<&[u8]>,
@@ -94,20 +114,27 @@ pub fn open_binding(
         ))]);
     }
     let m = object(settings).map_err(|r| vec![r])?;
+    let unknown = unknown_keys(&m);
+    if !unknown.is_empty() {
+        return Err(unknown);
+    }
     let params = sigv4_params(&m).map_err(|r| vec![r])?;
-    let credential_text = match credential.map(std::str::from_utf8) {
-        None => None,
-        Some(Ok(s)) => Some(s),
-        Some(Err(_)) => {
-            return Err(vec![Refusal::Credential(
-                "the credential is not UTF-8".to_string(),
-            )])
-        }
+    let Some(credential) = credential else {
+        // A passthrough-only binding (the contract's `None`): it signs only a caller's credential.
+        return Ok(SigV4Binding::new(params, None));
     };
-    // A session token no header value may carry is not refused: the binding signs nothing, and
-    // each request it is asked for reports the signer's line (`crate::instance::SigV4::sign`), as 1.5.5 did.
-    let cred = credential_text.and_then(SigningCredential::split);
-    Ok(SigV4Binding::new(params, cred))
+    let Ok(text) = std::str::from_utf8(credential) else {
+        return Err(vec![Refusal::Credential(
+            "the credential is not UTF-8".to_string(),
+        )]);
+    };
+    let cred = SigningCredential::parse(text).map_err(|findings| {
+        findings
+            .into_iter()
+            .map(|f| Refusal::Credential(f.to_string()))
+            .collect::<Vec<_>>()
+    })?;
+    Ok(SigV4Binding::new(params, Some(cred)))
 }
 
 #[cfg(test)]

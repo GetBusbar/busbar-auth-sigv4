@@ -1092,12 +1092,79 @@ fn a_pending_read_pends_and_an_unavailable_one_rejects() {
 
 #[test]
 fn a_secret_that_is_not_utf8_never_admits() {
-    let s = sign(SECRET, AKID, None, b"", None);
+    // Signed with the dummy secret a non-UTF-8 read verifies against, over a LIVE answer: the
+    // signature verifies and the credential is live, so only the UTF-8 conjunct rejects.
+    let s = sign(DUMMY_SECRET, AKID, None, b"", None);
     let mut fake = Fake {
         raw: Some(vec![0xff, 0xfe]),
         ..Fake::default()
     };
     assert_eq!(run(&s.lines, None, Some(b""), &mut fake), Judgement::Reject);
+    // Control: the same signed request over a UTF-8 secret that is the dummy is admitted.
+    let mut utf8 = Fake {
+        raw: Some(DUMMY_SECRET.as_bytes().to_vec()),
+        ..Fake::default()
+    };
+    assert_eq!(
+        run(&s.lines, None, Some(b""), &mut utf8),
+        Judgement::Identity(AKID.to_string())
+    );
+}
+
+/// The wire path holds a reserved byte (`%3A`); a client signs its canonical URI, the wire path
+/// encoded again (`%253A`), and the judge admits it.
+#[test]
+fn a_path_with_a_reserved_byte_is_judged_over_its_double_encoded_canonical_uri() {
+    let wire = "/model/acme.model-1%3A0/converse";
+    assert_eq!(uri_encode_path(wire), "/model/acme.model-1%253A0/converse");
+    let (amzdate, datestamp) = format_amz_time(NOW);
+    let payload_hash = sha256_hex(b"");
+    let headers = vec![
+        (
+            "host".to_string(),
+            "svc.us-east-1.amazonaws.com".to_string(),
+        ),
+        (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
+        (X_AMZ_DATE.to_string(), amzdate.clone()),
+    ];
+    let (sig, signed_headers) = crate::sigv4::sign_v4(
+        SECRET,
+        "us-east-1",
+        "svc",
+        "POST",
+        "/model/acme.model-1%253A0/converse",
+        "",
+        &headers,
+        &payload_hash,
+        &amzdate,
+        &datestamp,
+    );
+    let auth = format!(
+        "AWS4-HMAC-SHA256 Credential={AKID}/{datestamp}/us-east-1/svc/aws4_request, \
+         SignedHeaders={signed_headers}, Signature={sig}"
+    );
+    let mut lines = vec![("authorization".to_string(), auth)];
+    lines.extend(headers);
+    let req = |path: &'static str| Request {
+        method: b"POST",
+        path: path.as_bytes(),
+        query: None,
+        lines: lines
+            .iter()
+            .map(|(n, v)| (n.as_bytes(), v.as_bytes()))
+            .collect(),
+        body: Some(b""),
+        now: NOW,
+    };
+    assert_eq!(
+        judge(&req(wire), &mut Fake::default()),
+        Judgement::Identity(AKID.to_string())
+    );
+    // The path signed once-encoded (`:` raw on the wire) is a different canonical URI.
+    assert_eq!(
+        judge(&req("/model/acme.model-1:0/converse"), &mut Fake::default()),
+        Judgement::Reject
+    );
 }
 
 #[test]

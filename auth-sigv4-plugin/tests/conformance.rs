@@ -201,13 +201,26 @@ fn fields_over(
     cap: (usize, usize),
     body: Option<&'static str>,
 ) -> String {
+    fields_for(p, handle, mode, caller, cap, body, facts())
+}
+
+/// [`fields_over`] for the walked request `request`.
+fn fields_for(
+    p: &Plugin<Auth>,
+    handle: u64,
+    mode: u32,
+    caller: Blob,
+    cap: (usize, usize),
+    body: Option<&'static str>,
+    request: RequestFacts,
+) -> String {
     let mut b = Buffers::new(cap.0, cap.1);
     let mut f: Frame<FieldsIn, FieldsOut> = Frame::new(z(), z());
     f.input.head = in_head();
     f.out.head = out_head();
     f.input.handle = handle;
     f.input.mode = mode;
-    f.input.request = facts();
+    f.input.request = request;
     // The header envelope the framer sends (the style declares STYLE_NEEDS_HEADERS): the JSON
     // content type the signature covers, as 1.5.5's signing writer signed it.
     let sent = [NamedValue {
@@ -836,10 +849,12 @@ extern "C" fn sensitive_door() -> *const Door {
 
 #[test]
 fn red_a_sensitive_field_flag_is_not_the_1_5_5_bytes() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    // The same host as the green test, so the flag is the transcript's only difference.
+    let creds = Arc::new(Creds::default());
+    let d = Dispatcher::with_services(DispatchConfig::default(), creds.clone());
     let folds = Arc::new(Folds::default());
     let red = load_linked::<Auth>(&row(sensitive_door), bind(&folds, &d)).expect("the door loads");
-    let t = mask_signature(script(&red, None));
+    let t = mask_signature(script(&red, Some((&d, &creds))));
     assert_ne!(
         t, EXPECTED,
         "a sensitive flag must not pass as the 1.5.5 bytes"
@@ -876,6 +891,76 @@ fn red_a_writer_that_ignores_the_host_capacity_faults() {
     assert_eq!(red.call(life::OPEN, &mut o).outcome, Outcome::Ready);
     let (_, h) = open_outbound(&red, "sigv4", Some("AKIDEXAMPLE:SECRET"), SIGV4_SETTINGS);
     assert!(fields(&red, h, MODE_OWN, z(), (1024, 4)).starts_with("fields Fault"));
+}
+
+// ── THE FIELDS CALL'S FACTS AND DIAGS, THROUGH THE DOOR ─────────────────────────────────────────
+
+/// An opened linked instance over the inbound cell's host, with one sigv4 handle on `credential`.
+fn open_signing(credential: &'static str) -> (Arc<Folds>, Plugin<Auth>, u64) {
+    let creds = Arc::new(Creds::default());
+    let d = Dispatcher::with_services(DispatchConfig::default(), creds);
+    let folds = Arc::new(Folds::default());
+    let p = linked(&folds, &d);
+    let mut o: Frame<OpenIn, OpenOut> = Frame::new(z(), z());
+    o.input.head = in_head();
+    o.out.head = out_head();
+    o.input.generation = 1;
+    assert_eq!(p.call(life::OPEN, &mut o).outcome, Outcome::Ready);
+    let (line, handle) = open_outbound(&p, "sigv4", Some(credential), SIGV4_SETTINGS);
+    assert_eq!(line, "open_outbound sigv4 Ready ");
+    (folds, p, handle)
+}
+
+/// The walked request's method and query reach the signer: a GET with a query is signed over that
+/// query, so its signature is not the one of the same GET without it, nor of the POST.
+#[test]
+fn fields_signs_the_walked_requests_query_and_method_through_the_door() {
+    let (_, p, handle) = open_signing("AKIDEXAMPLE:SECRET");
+    let sign = |method: &'static str, query: Option<&'static str>| {
+        let mut request = facts();
+        request.method = s(method);
+        if let Some(q) = query {
+            request.query = s(q);
+        }
+        fields_for(&p, handle, MODE_OWN, z(), (1024, 4), None, request)
+    };
+    let get_with_query = sign("GET", Some("a=1&b=2"));
+    assert!(
+        get_with_query.starts_with("fields Ready  authorization: AWS4-HMAC-SHA256"),
+        "{get_with_query}"
+    );
+    assert_ne!(get_with_query, sign("GET", None), "the query is signed");
+    assert_ne!(
+        get_with_query,
+        sign("GET", Some("a=1&b=3")),
+        "its value too"
+    );
+    assert_ne!(
+        get_with_query,
+        sign("POST", Some("a=1&b=2")),
+        "the method too"
+    );
+    assert_eq!(
+        get_with_query,
+        sign("GET", Some("b=2&a=1")),
+        "sorted, as signed"
+    );
+}
+
+/// A credential whose session token holds a byte no header value may carry signs nothing, and the
+/// fields call reports the signer's WARN line (diag id index 0, `auth.sigv4-session-token-invalid-bytes`)
+/// on its envelope.
+#[test]
+fn an_unsendable_session_token_reports_its_diag_through_the_door() {
+    let (folds, p, handle) = open_signing("AKID:SECRET:bad\x01tok");
+    let line = fields(&p, handle, MODE_OWN, z(), (1024, 4));
+    assert_eq!(line, "fields Ready  ", "nothing is signed");
+    assert_eq!(
+        std::mem::take(&mut *folds.0.lock().unwrap()),
+        ["diag 0 sev=1 Svc lane session token contains a \
+             byte rejected by HeaderValue; skipping signing to avoid a signed-but-absent \
+             x-amz-security-token header."]
+    );
 }
 
 /// A `fields` call the host lends no authority cannot be signed: FAILED, and the failure says why

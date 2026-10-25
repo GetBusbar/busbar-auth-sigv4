@@ -93,3 +93,56 @@ fn an_unknown_style_or_malformed_settings_is_refused() {
         "bearer is a different mechanism, busbar-auth-header"
     );
 }
+
+/// A blank (empty or whitespace) `service` or `region` is no value: the same refusal as one absent.
+#[test]
+fn a_blank_service_or_region_is_refused_as_missing() {
+    assert_eq!(
+        lines(open(
+            SIGV4,
+            Some("A:S"),
+            r#"{"service":"","region":"us-east-1"}"#
+        )),
+        ["settings: uses auth: sigv4 but has no `service`"]
+    );
+    assert_eq!(
+        lines(open(
+            SIGV4,
+            Some("A:S"),
+            r#"{"service":"svc","region":"  \t"}"#
+        )),
+        ["settings: uses auth: sigv4 but has no `region`"]
+    );
+}
+
+/// A `service` or `region` that is not a string is refused as invalid, not coerced.
+#[test]
+fn a_non_string_service_or_region_is_refused_as_invalid() {
+    assert_eq!(
+        lines(open(
+            SIGV4,
+            Some("A:S"),
+            r#"{"service":5,"region":"us-east-1"}"#
+        )),
+        ["settings: outbound auth setting `service` is invalid: expected a string"]
+    );
+    assert_eq!(
+        lines(open(
+            SIGV4,
+            Some("A:S"),
+            r#"{"service":"svc","region":["x"]}"#
+        )),
+        ["settings: outbound auth setting `region` is invalid: expected a string"]
+    );
+}
+
+/// A credential that is not UTF-8 is refused, not read as keyless.
+#[test]
+fn a_credential_that_is_not_utf8_is_refused() {
+    let r = open_binding(
+        SIGV4,
+        Some(&[0xff]),
+        Some(br#"{"service":"svc","region":"us-east-1"}"#),
+    );
+    assert_eq!(lines(r), ["credential: the credential is not UTF-8"]);
+}

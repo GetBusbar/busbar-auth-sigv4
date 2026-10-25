@@ -877,3 +877,34 @@ fn red_a_writer_that_ignores_the_host_capacity_faults() {
     let (_, h) = open_outbound(&red, "sigv4", Some("AKIDEXAMPLE:SECRET"), SIGV4_SETTINGS);
     assert!(fields(&red, h, MODE_OWN, z(), (1024, 4)).starts_with("fields Fault"));
 }
+
+/// A `fields` call the host lends no authority cannot be signed: FAILED, and the failure says why
+/// (a refusal with an empty reason leaves the operator nothing to act on).
+#[test]
+fn a_fields_call_without_an_authority_fails_with_its_reason() {
+    let d = Dispatcher::new(DispatchConfig::default());
+    let folds = Arc::new(Folds::default());
+    let p = linked(&folds, &d);
+    let mut o: Frame<OpenIn, OpenOut> = Frame::new(z(), z());
+    o.input.head = in_head();
+    o.out.head = out_head();
+    assert_eq!(p.call(life::OPEN, &mut o).outcome, Outcome::Ready);
+    let (_, h) = open_outbound(&p, "sigv4", Some("AKIDEXAMPLE:SECRET"), SIGV4_SETTINGS);
+    let mut b = Buffers::new(1024, 4);
+    let mut f: Frame<FieldsIn, FieldsOut> = Frame::new(z(), z());
+    f.input.head = in_head();
+    f.out.head = out_head();
+    f.input.handle = h;
+    f.input.mode = MODE_OWN;
+    f.input.request = facts();
+    f.input.request.authority = s("");
+    f.input.point = POINT_HEAD_BODY;
+    (f.input.field_buf, f.input.field_buf_cap) = (b.buf.as_mut_ptr(), b.buf.len());
+    (f.input.fields, f.input.fields_cap) = (b.spans.as_mut_ptr(), b.spans.len() as u32);
+    let c = p.call(slot::FIELDS, &mut f);
+    assert_eq!(c.outcome, Outcome::Failed);
+    assert!(
+        !err(&c.error).is_empty(),
+        "a FAILED fields call names its reason"
+    );
+}

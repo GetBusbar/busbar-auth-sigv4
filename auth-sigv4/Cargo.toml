@@ -20,7 +20,8 @@ crate-type = ["rlib"]
 # DEPENDENCY POLICY. A plugin's closure is `busbar-contract` plus the third-party crates it needs to
 # do its job (owner ruling 2026-09-28, PLUGIN LIBRARIES): the SigV4 HMAC chain (`hex`; SHA-256 is
 # `ring`'s digest, the keyed HMAC the contract SDK's wiped one), the settings and credential JSON
-# (`serde`, `serde_json`), and zeroisation of derived key material (`zeroize`). No kernel crate, no plane, no sibling auth-kind plugin.
+# (`serde`, `serde_json`), and zeroisation of derived key material (`zeroize`). No kernel crate,
+# no plane, no sibling auth-kind plugin.
 # Every version is the workspace table's (busbar's at the pin).
 [dependencies]
 busbar-contract = { workspace = true }

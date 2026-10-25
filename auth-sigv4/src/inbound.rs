@@ -361,6 +361,17 @@ pub fn verify_inbound_sigv4(
     if !signed.iter().any(|h| h.eq_ignore_ascii_case("host")) {
         return Err(VerifyError::SignedHeadersMismatch);
     }
+    // The claimed list must equal the computed one (lowercased, sorted) to verify, so this refuses
+    // nothing that could verify except a list that repeats a name, which no compliant SigV4 client
+    // sends. Without it a list repeating one name N times copies that header's value N times
+    // before any secret is involved (pre-auth amplification).
+    let mut prev: Option<&str> = None;
+    for name in &signed {
+        if name.bytes().any(|b| b.is_ascii_uppercase()) || prev.is_some_and(|p| p >= *name) {
+            return Err(VerifyError::SignedHeadersMismatch);
+        }
+        prev = Some(name);
+    }
     // Each signed name takes the FIRST matching request header's value (case-insensitive), as
     // busbar 1.5.5 does (`crates/busbar/src/sigv4.rs:446-460`); a signed name the request does not
     // carry cannot be reconstructed. `sign_v4` canonicalizes the value.

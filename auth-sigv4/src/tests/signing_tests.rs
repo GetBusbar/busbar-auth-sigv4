@@ -27,7 +27,7 @@ fn facts<'a>(hash: &'a str) -> SignFacts<'a> {
     }
 }
 
-fn field(fields: &[Field], name: &str) -> String {
+fn field(fields: &[(String, Zeroizing<String>)], name: &str) -> String {
     fields
         .iter()
         .find(|(k, _)| k == name)
@@ -46,7 +46,7 @@ fn session_token_is_sent_and_signed_over_the_writer_header_set() {
         params(),
         SigningCredential::parse(&format!("AKIDEXAMPLE:{SECRET}:SESSIONTOKEN")).ok(),
     );
-    let sent = b.sign(&facts(&hash)).expect("signs");
+    let sent = b.sign_flat(&facts(&hash)).expect("signs");
     assert_eq!(
         sent.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
         [
@@ -121,7 +121,7 @@ fn unsendable_or_incomplete_signing_credentials_are_refused_not_signed_with_noth
         );
     }
     assert_eq!(
-        SigV4Binding::new(params(), None).sign(&facts(&hash)),
+        SigV4Binding::new(params(), None).sign_flat(&facts(&hash)),
         Err(NO_OWN_CREDENTIAL)
     );
 }
@@ -138,7 +138,7 @@ fn an_authorization_the_wire_cannot_carry_fails_with_its_reason() {
         },
         SigningCredential::parse(&format!("AKIDEXAMPLE:{SECRET}")).ok(),
     );
-    assert_eq!(b.sign(&facts(&hash)), Err(AUTHORIZATION_UNSENDABLE));
+    assert_eq!(b.sign_flat(&facts(&hash)), Err(AUTHORIZATION_UNSENDABLE));
 }
 
 /// Re-signing the same request is idempotent: the day key held after the first signature signs the
@@ -148,10 +148,10 @@ fn the_held_day_key_signs_exactly_as_a_fresh_derivation() {
     let hash = sigv4::sha256_hex(b"{}");
     let cred = || SigningCredential::parse(&format!("AKIDEXAMPLE:{SECRET}")).ok();
     let warm = SigV4Binding::new(params(), cred());
-    let first = warm.sign(&facts(&hash)).expect("signs");
-    let second = warm.sign(&facts(&hash)).expect("signs");
+    let first = warm.sign_flat(&facts(&hash)).expect("signs");
+    let second = warm.sign_flat(&facts(&hash)).expect("signs");
     let cold = SigV4Binding::new(params(), cred())
-        .sign(&facts(&hash))
+        .sign_flat(&facts(&hash))
         .expect("signs");
     assert_eq!(first, second);
     assert_eq!(first, cold);
@@ -204,12 +204,15 @@ fn a_request_older_than_both_held_keys_signs_as_a_fresh_binding_does() {
     assert_eq!(held.held(), ["20150830", "20150831"]);
     let mut old = facts(&hash);
     old.timestamp_epoch = 1_440_938_160 - 2 * 86_400; // 2015-08-28
-    let skewed = held.sign(&old).expect("signs");
+    let skewed = held.sign_flat(&old).expect("signs");
     assert_eq!(
         field(&skewed, "x-amz-date"),
         "20150828T123600Z",
         "dated by the request"
     );
-    assert_eq!(Ok(skewed), SigV4Binding::new(params(), cred()).sign(&old));
+    assert_eq!(
+        Ok(skewed),
+        SigV4Binding::new(params(), cred()).sign_flat(&old)
+    );
     assert_eq!(held.held(), ["20150830", "20150831"], "no key evicted");
 }

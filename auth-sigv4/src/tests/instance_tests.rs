@@ -60,6 +60,7 @@ fn authorization_of(signed: Option<Signed>) -> String {
     match signed {
         Some(Signed::Fields(fields)) => fields
             .iter()
+            .map(crate::signing::Field::flat)
             .find(|(n, _)| n == "authorization")
             .map(|(_, v)| v.as_str().to_owned())
             .expect("an authorization is set"),

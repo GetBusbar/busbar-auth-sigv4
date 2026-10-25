@@ -12,20 +12,6 @@ fn format_amz_time_known_epoch() {
 }
 
 #[test]
-fn canonicalize_header_value_ascii_space_only() {
-    assert_eq!(canonicalize_header_value("a   b    c"), "a b c");
-    assert_eq!(canonicalize_header_value("  a b c  "), "a b c");
-    assert_eq!(canonicalize_header_value(""), "");
-    assert_eq!(canonicalize_header_value("   "), "");
-    assert_eq!(canonicalize_header_value("single"), "single");
-    assert_eq!(canonicalize_header_value("a\tb"), "a\tb");
-    assert_eq!(canonicalize_header_value("a\u{00a0}b"), "a\u{00a0}b");
-    assert_eq!(canonicalize_header_value("a\nb"), "a\nb");
-    assert_eq!(canonicalize_header_value("a  \t  b"), "a \t b");
-    assert_eq!(canonicalize_header_value("\u{00a0}a"), "\u{00a0}a");
-}
-
-#[test]
 fn sign_v4_collapses_ascii_space_in_header_value() {
     let payload_hash = sha256_hex(b"");
     let mk = |v: &str| {
@@ -191,8 +177,9 @@ fn split_credential_takes_the_first_two_colons_and_refuses_a_missing_half() {
 #[test]
 fn the_day_key_path_matches_the_aws_published_session_token_vector() {
     const TOKEN: &str = "AQoDYXdzEPT//////////wEXAMPLEtc764bNrC9SAPBSM22wDOk4x4HIZ8j4FZTwdQWLWsKWHGBuFqwAeMicRXmxfpSPfIeoIYRqTflfKD8YUuwthAx7mSEI/qkPpKPi/kMcGdQrmGdeehM4IC1NtBmUpp2wUE8phUZampKsburEDy0KPkyQDYwT7WZ0wq5VSXDvp75YU9HFvlRd8Tx6q6fE8YQcHNVXAkiY9q6d+xo0rKwT38xVqr7ZD0u0iPPkUL64lIZbqBAz+scqKmlzm8FDrypNC9Yjc8fPOLn9FX9KSYvKTr4rvx3iSIlTJabIQwj2ICCR/oLxBA==";
-    let key = signing_key(
-        "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+    use busbar_contract::abi::sdk::chip::aws4::Aws4Request;
+    use busbar_contract::abi::sdk::test_support::chip::{cred, sealed_bytes};
+    let key = cred("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY").aws4_day_key(
         "20150830",
         "us-east-1",
         "service",
@@ -200,20 +187,22 @@ fn the_day_key_path_matches_the_aws_published_session_token_vector() {
     let headers = vec![
         ("host".to_string(), "example.amazonaws.com".to_string()),
         ("x-amz-date".to_string(), "20150830T123600Z".to_string()),
-        ("x-amz-security-token".to_string(), TOKEN.to_string()),
     ];
-    let (sig, signed) = sign_v4_with_key(
-        &key,
-        "us-east-1",
-        "service",
-        "POST",
-        "/",
-        "",
-        &headers,
-        &sha256_hex(b""),
-        "20150830T123600Z",
-        "20150830",
-    );
+    let payload = sha256_hex(b"");
+    let r = Aws4Request {
+        region: "us-east-1",
+        service: "service",
+        method: "POST",
+        canonical_uri: "/",
+        canonical_query: "",
+        headers: &headers,
+        payload_hash: &payload,
+        amzdate: "20150830T123600Z",
+        datestamp: "20150830",
+    };
+    let signed = key.aws4_sign(&r, Some(&cred(TOKEN))).expect("signs");
+    let sig = String::from_utf8(sealed_bytes(&signed.signature)).expect("hex");
+    let signed = signed.signed_headers;
     assert_eq!(signed, "host;x-amz-date;x-amz-security-token");
     assert_eq!(
         sig,

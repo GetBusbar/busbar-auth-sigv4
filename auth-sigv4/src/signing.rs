@@ -28,8 +28,9 @@ use busbar_contract::header::is_legal_header_value;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
-use crate::held::Held;
 use crate::sigv4;
+use busbar_contract::abi::sdk::chip::aws4::Aws4Request;
+use busbar_contract::abi::sdk::cred::{Cred, Parts};
 
 /// The seconds in a day.
 const DAY_SECS: u64 = 86_400;
@@ -93,16 +94,53 @@ const AUTHORIZATION_UNSENDABLE: &str = "sigv4: the signed Authorization value ho
      header value may carry (check the service and region settings); the request is not sent \
      unsigned";
 
-/// One field the signer sets: its name and its value, the value wiped on drop (a session token
-/// rides in one).
-pub type Field = (String, Zeroizing<String>);
+/// One field the signer sets: a public value (wiped on drop), or one whose value holds the chip's
+/// sealed pieces (the signature, the session token), which the plugin never reads.
+#[allow(missing_debug_implementations)]
+pub enum Field {
+    /// A public value.
+    Plain(String, Zeroizing<String>),
+    /// A value with sealed pieces.
+    Sealed(String, Parts),
+}
 
-/// A credential split for signing: the secret and the session token are each held redacted
-/// (`Held`) and wiped on drop ([`Zeroizing`]).
+impl Field {
+    /// The field as the wire carries it, its sealed pieces read back through the dev-only test
+    /// support (the plugin never reads them).
+    #[cfg(test)]
+    pub(crate) fn flat(&self) -> (String, Zeroizing<String>) {
+        match self {
+            Self::Plain(n, v) => (n.clone(), v.clone()),
+            Self::Sealed(n, p) => (
+                n.clone(),
+                Zeroizing::new(
+                    String::from_utf8(busbar_contract::abi::sdk::test_support::chip::parts_bytes(
+                        p,
+                    ))
+                    .expect("a header value is text"),
+                ),
+            ),
+        }
+    }
+}
+
+impl SigV4Binding {
+    /// [`SigV4Binding::sign`] with every field as the wire carries it.
+    #[cfg(test)]
+    pub(crate) fn sign_flat(
+        &self,
+        facts: &SignFacts<'_>,
+    ) -> Result<Vec<(String, Zeroizing<String>)>, &'static str> {
+        self.sign(facts)
+            .map(|fields| fields.iter().map(Field::flat).collect())
+    }
+}
+
+/// A credential split for signing: the secret and the session token are each the chip's [`Cred`].
 pub struct SigningCredential {
     access_key_id: String,
-    secret: Held<Zeroizing<String>>,
-    session_token: Option<Held<Zeroizing<String>>>,
+    secret: Cred,
+    session_token: Option<Cred>,
 }
 
 impl std::fmt::Debug for SigningCredential {
@@ -156,8 +194,8 @@ impl SigningCredential {
         };
         Ok(Self {
             access_key_id: access.to_string(),
-            secret: Held::new(Zeroizing::new(secret.to_string())),
-            session_token: token.map(|t| Held::new(Zeroizing::new(t.to_string()))),
+            secret: Cred::captured(Zeroizing::new(secret.as_bytes().to_vec())),
+            session_token: token.map(|t| Cred::captured(Zeroizing::new(t.as_bytes().to_vec()))),
         })
     }
 }
@@ -178,7 +216,7 @@ fn set_header(envelope: &mut Vec<(String, String)>, name: &str, value: String) {
 /// One day's derived key.
 struct DayKey {
     datestamp: String,
-    key: Zeroizing<Vec<u8>>,
+    key: Cred,
 }
 
 /// A `sigv4` binding: the params, the credential, and the day keys derived for it.
@@ -229,12 +267,9 @@ impl SigV4Binding {
         if held {
             return;
         }
-        let key = sigv4::signing_key(
-            cred.secret.reveal(),
-            datestamp,
-            &self.params.region,
-            &self.params.service,
-        );
+        let key = cred
+            .secret
+            .aws4_day_key(datestamp, &self.params.region, &self.params.service);
         let mut keys = self
             .keys
             .write()
@@ -301,30 +336,21 @@ impl SigV4Binding {
         headers.push(("host".to_string(), facts.host.to_string()));
         set_header(&mut headers, "x-amz-date", amzdate.clone());
         set_header(&mut headers, "x-amz-content-sha256", payload_hash.clone());
-        if let Some(t) = &cred.session_token {
-            set_header(
-                &mut headers,
-                "x-amz-security-token",
-                t.reveal().as_str().to_owned(),
-            );
-        }
         let canonical_uri = sigv4::uri_encode_path(facts.path);
         let canonical_query = sigv4::canonical_query(facts.query);
         self.derive(&datestamp);
-        let sign_with = |key: &[u8]| {
-            sigv4::sign_v4_with_key(
-                key,
-                region,
-                service,
-                facts.method,
-                &canonical_uri,
-                &canonical_query,
-                &headers,
-                &payload_hash,
-                &amzdate,
-                &datestamp,
-            )
+        let request = Aws4Request {
+            region,
+            service,
+            method: facts.method,
+            canonical_uri: &canonical_uri,
+            canonical_query: &canonical_query,
+            headers: &headers,
+            payload_hash: &payload_hash,
+            amzdate: &amzdate,
+            datestamp: &datestamp,
         };
+        let token = cred.session_token.as_ref();
         let held = {
             let keys = self
                 .keys
@@ -332,43 +358,51 @@ impl SigV4Binding {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             keys.iter()
                 .find(|k| k.datestamp == datestamp)
-                .map(|k| sign_with(&k.key))
+                .map(|k| k.key.aws4_sign(&request, token))
         };
         // A date older than both held keys (a skewed request clock) is derived for this request
         // alone rather than evicting a day key.
-        let (signature, signed_headers) = held.unwrap_or_else(|| {
-            sign_with(&sigv4::signing_key(
-                cred.secret.reveal(),
-                &datestamp,
-                region,
-                service,
-            ))
-        });
+        let signed = held
+            .unwrap_or_else(|| {
+                cred.secret
+                    .aws4_day_key(&datestamp, region, service)
+                    .aws4_sign(&request, token)
+            })
+            .map_err(|_| AUTHORIZATION_UNSENDABLE)?;
         sigv4::wipe(&mut headers);
         let credential_scope = format!(
             "{datestamp}/{region}/{service}/{}",
             sigv4::SIGNATURE_TERMINATION
         );
-        let authorization = format!(
-            "{} Credential={}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}",
+        let prefix = format!(
+            "{} Credential={}/{credential_scope}, SignedHeaders={}, Signature=",
             sigv4::SIGV4_ALGORITHM,
             cred.access_key_id,
+            signed.signed_headers,
         );
         // The access key id was checked at parse; the service and region (settings) ride in this
-        // value verbatim too, and the date and the hash are always legal.
-        if !is_legal_header_value(&authorization) {
+        // value verbatim too, and the date, the hash and the signature's hex are always legal.
+        if !is_legal_header_value(&prefix) {
             return Err(AUTHORIZATION_UNSENDABLE);
         }
         let mut fields: Vec<Field> = vec![
-            ("authorization".to_string(), Zeroizing::new(authorization)),
-            ("x-amz-date".to_string(), Zeroizing::new(amzdate)),
-            (
+            Field::Sealed(
+                "authorization".to_string(),
+                Parts::new()
+                    .public(prefix.as_bytes())
+                    .sealed(signed.signature),
+            ),
+            Field::Plain("x-amz-date".to_string(), Zeroizing::new(amzdate)),
+            Field::Plain(
                 "x-amz-content-sha256".to_string(),
                 Zeroizing::new(payload_hash),
             ),
         ];
-        if let Some(t) = &cred.session_token {
-            fields.push(("x-amz-security-token".to_string(), t.reveal().clone()));
+        if let Some(t) = token {
+            fields.push(Field::Sealed(
+                "x-amz-security-token".to_string(),
+                Parts::new().sealed(t.field()),
+            ));
         }
         Ok(fields)
     }

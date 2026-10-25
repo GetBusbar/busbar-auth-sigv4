@@ -80,7 +80,6 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-mod held;
 pub mod inbound;
 mod instance;
 mod signing;
@@ -335,8 +334,15 @@ impl OutboundPlugin for SigV4 {
                 Some(Signed::NoFacts) => FieldsAnswer::Failed(Cow::Borrowed(NO_FACTS)),
                 Some(Signed::Failed(reason)) => FieldsAnswer::Failed(reason),
                 Some(Signed::Fields(fields)) => {
-                    for (name, value) in &fields {
-                        out.push(name.as_bytes(), value.as_bytes(), FIELD_FLAGS);
+                    for field in fields {
+                        match field {
+                            crate::signing::Field::Plain(name, value) => {
+                                out.push(name.as_bytes(), value.as_bytes(), FIELD_FLAGS);
+                            }
+                            crate::signing::Field::Sealed(name, value) => {
+                                out.push_sealed(name.as_bytes(), value, FIELD_FLAGS);
+                            }
+                        }
                     }
                     FieldsAnswer::Ready
                 }

@@ -1,4 +1,5 @@
 {
+  "credentials": ["conformance-sigv4-live-secret", "conformance-sigv4-revoked-secret", "conformance-sigv4-rotated-live-secret", "conformance-sigv4-rotated-revoked-secret"],
   "auth": {
     "bad_settings": [
       "[1]",

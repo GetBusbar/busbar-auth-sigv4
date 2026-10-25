@@ -185,32 +185,24 @@ pub fn format_amz_time(epoch_secs: u64) -> (String, String) {
     )
 }
 
-/// Canonicalize a (non-quoted) signed-header value per AWS SigV4: trim leading/trailing ASCII
-/// spaces (0x20) and collapse each run of sequential ASCII spaces to a single space. Only the ASCII
-/// space character is treated as whitespace — tabs, NBSP, newlines and every other Unicode
-/// whitespace codepoint pass through verbatim, because AWS does the same.
-fn canonicalize_header_value(v: &str) -> String {
-    let mut out = String::with_capacity(v.len());
-    let mut prev_space = false;
-    for ch in v.chars() {
-        if ch == ' ' {
-            prev_space = true;
-        } else {
-            if prev_space && !out.is_empty() {
-                out.push(' ');
-            }
-            prev_space = false;
-            out.push(ch);
+/// Split a signing lane's configured credential, `ACCESS_KEY_ID:SECRET[:SESSION_TOKEN]`, into its
+/// three parts: the non-secret access key id, the signing secret, and the optional session token
+/// (everything after the second `:`, colons included). `None` — sign nothing — when either of the
+/// first two is missing or empty, the same misconfiguration rule the dialect writer applied when it
+/// parsed this string itself.
+pub fn split_credential(raw: &str) -> Option<(&str, &str, Option<&str>)> {
+    let mut parts = raw.splitn(3, ':');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(access), Some(secret), token) if !access.is_empty() && !secret.is_empty() => {
+            Some((access, secret, token))
         }
+        _ => None,
     }
-    out
 }
 
-/// Compute the SigV4 signature hex + the `SignedHeaders` string for a request. `headers` is the
-/// full set of headers to sign (names case-insensitive); they are lowercased + sorted internally.
-/// `canonical_uri` must already be URI-encoded; `canonical_querystring` sorted + encoded (or
-/// empty). The day's key derived here, then [`sign_v4_with_key`]: the composition the published
-/// vector pins (the request path holds the day's key and calls [`sign_v4_with_key`] itself).
+/// The signature a client computes for a request (the published vectors, and a client signing
+/// requests the inbound check verifies): the chip's, its hex read back through the dev-only test
+/// support.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn sign_v4(
@@ -225,123 +217,27 @@ pub fn sign_v4(
     amzdate: &str,
     datestamp: &str,
 ) -> (String, String) {
-    let key = signing_key(secret, datestamp, region, service);
-    sign_v4_with_key(
-        &key,
+    use busbar_contract::abi::sdk::chip::aws4::Aws4Request;
+    use busbar_contract::abi::sdk::test_support::chip::{cred, sealed_bytes};
+    let r = Aws4Request {
         region,
         service,
         method,
         canonical_uri,
-        canonical_querystring,
+        canonical_query: canonical_querystring,
         headers,
         payload_hash,
         amzdate,
         datestamp,
+    };
+    let sig = cred(secret)
+        .aws4_day_key(datestamp, region, service)
+        .aws4_sign(&r, None)
+        .expect("signs");
+    (
+        String::from_utf8(sealed_bytes(&sig.signature)).expect("hex"),
+        sig.signed_headers,
     )
-}
-
-/// [`sign_v4`] under an already-derived [`signing_key`] for the request's date, region and service:
-/// the signature hex + the `SignedHeaders` string for a request. `headers` is the
-/// full set of headers to sign (names case-insensitive); they are lowercased + sorted internally.
-/// `canonical_uri` must already be URI-encoded; `canonical_querystring` sorted + encoded (or
-/// empty).
-#[allow(clippy::too_many_arguments)]
-pub fn sign_v4_with_key(
-    key: &[u8],
-    region: &str,
-    service: &str,
-    method: &str,
-    canonical_uri: &str,
-    canonical_querystring: &str,
-    headers: &[(String, String)],
-    payload_hash: &str,
-    amzdate: &str,
-    datestamp: &str,
-) -> (String, String) {
-    let mut h: Vec<(String, String)> = headers
-        .iter()
-        .map(|(k, v)| (k.to_lowercase(), canonicalize_header_value(v)))
-        .collect();
-    h.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // The SigV4 canonicalisation rule does not sort the values of a header that appears more than
-    // once; it combines them into one comma-separated list under that header's single entry. A
-    // caller CAN hand this function the same name twice (`decorate` builds its header list by
-    // pushing onto whatever the envelope already carries), so merging here rather than assuming the
-    // caller never repeats a name is what keeps `SignedHeaders` and the canonical headers block in
-    // the one-entry-per-name shape AWS's servers expect. The sort above already made same-named
-    // entries adjacent, so a single pass merges them in their original relative order.
-    let mut merged: Vec<(String, String)> = Vec::with_capacity(h.len());
-    for (k, mut v) in h {
-        match merged.last_mut() {
-            Some((last_k, last_v)) if *last_k == k => {
-                last_v.push(',');
-                last_v.push_str(&v);
-                v.zeroize();
-            }
-            _ => merged.push((k, v)),
-        }
-    }
-    let mut h = merged;
-
-    // The canonical headers carry a session token's value: they and the canonical request built
-    // from them are sized once (no growth leaves a copy behind) and wiped on drop, as is every
-    // per-header copy.
-    let mut canonical_headers = Zeroizing::new(String::with_capacity(
-        h.iter().map(|(k, v)| k.len() + v.len() + 2).sum(),
-    ));
-    for (k, v) in &h {
-        canonical_headers.push_str(k);
-        canonical_headers.push(':');
-        canonical_headers.push_str(v);
-        canonical_headers.push('\n');
-    }
-    let signed_headers = h
-        .iter()
-        .map(|(k, _)| k.as_str())
-        .collect::<Vec<_>>()
-        .join(";");
-    wipe(&mut h);
-
-    let parts = [
-        method,
-        canonical_uri,
-        canonical_querystring,
-        canonical_headers.as_str(),
-        signed_headers.as_str(),
-        payload_hash,
-    ];
-    let mut canonical_request = Zeroizing::new(String::with_capacity(
-        parts.iter().map(|p| p.len() + 1).sum(),
-    ));
-    for (i, part) in parts.iter().enumerate() {
-        if i > 0 {
-            canonical_request.push('\n');
-        }
-        canonical_request.push_str(part);
-    }
-    let scope = format!("{datestamp}/{region}/{service}/{SIGNATURE_TERMINATION}");
-    let string_to_sign = format!(
-        "{SIGV4_ALGORITHM}\n{amzdate}\n{scope}\n{}",
-        sha256_hex(canonical_request.as_bytes())
-    );
-    let signature = hex::encode(&hmac(key, string_to_sign.as_bytes())[..]);
-    (signature, signed_headers)
-}
-
-/// Split a signing lane's configured credential, `ACCESS_KEY_ID:SECRET[:SESSION_TOKEN]`, into its
-/// three parts: the non-secret access key id, the signing secret, and the optional session token
-/// (everything after the second `:`, colons included). `None` — sign nothing — when either of the
-/// first two is missing or empty, the same misconfiguration rule the dialect writer applied when it
-/// parsed this string itself.
-pub fn split_credential(raw: &str) -> Option<(&str, &str, Option<&str>)> {
-    let mut parts = raw.splitn(3, ':');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(access), Some(secret), token) if !access.is_empty() && !secret.is_empty() => {
-            Some((access, secret, token))
-        }
-        _ => None,
-    }
 }
 
 #[cfg(test)]

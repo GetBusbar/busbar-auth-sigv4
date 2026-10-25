@@ -78,7 +78,10 @@ fn a_keyless_binding_opens_but_refuses_to_sign_in_own_mode() {
         payload_hash: &hash,
         timestamp_epoch: 1,
     };
-    assert_eq!(binding.sign(&facts), Err(crate::signing::NO_OWN_CREDENTIAL));
+    assert_eq!(
+        binding.sign_flat(&facts),
+        Err(crate::signing::NO_OWN_CREDENTIAL)
+    );
 }
 
 #[test]

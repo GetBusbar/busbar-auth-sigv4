@@ -174,3 +174,25 @@ fn a_logged_credential_redacts_its_secret_and_token() {
     assert!(!printed.contains("wJalr"), "{printed}");
     assert!(printed.contains("<redacted>"), "{printed}");
 }
+
+/// A request dated before both held day keys (a skewed clock) signs as a fresh binding signs it,
+/// from a key derived for that request alone, and the held keys stay as they were.
+#[test]
+fn a_request_older_than_both_held_keys_signs_as_a_fresh_binding_does() {
+    let hash = sigv4::sha256_hex(b"{}");
+    let cred = || SigningCredential::split(&format!("AKIDEXAMPLE:{SECRET}"));
+    let held = SigV4Binding::new(params(), cred());
+    let midnight = 1_440_979_200; // 2015-08-31T00:00:00Z
+    held.prederive(midnight - 600);
+    assert_eq!(held.held(), ["20150830", "20150831"]);
+    let mut old = facts(&hash);
+    old.timestamp_epoch = 1_440_938_160 - 2 * 86_400; // 2015-08-28
+    let skewed = held.sign(&old);
+    assert_eq!(
+        field(&skewed, "x-amz-date"),
+        "20150828T123600Z",
+        "dated by the request"
+    );
+    assert_eq!(skewed, SigV4Binding::new(params(), cred()).sign(&old));
+    assert_eq!(held.held(), ["20150830", "20150831"], "no key evicted");
+}

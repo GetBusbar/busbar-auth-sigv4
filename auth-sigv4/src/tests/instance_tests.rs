@@ -401,3 +401,35 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
         "the transport's host and accept lines leave the signature 1.5.5's"
     );
 }
+
+/// `outbound_ready` is true for a handle this generation holds and for no other: not for one never
+/// opened, not for one whose generation was retired.
+#[test]
+fn outbound_ready_is_false_for_an_unknown_or_retired_handle() {
+    use busbar_contract::abi::sdk::auth_outbound::OutboundPlugin;
+    let s = SigV4::new(1);
+    assert!(!s.outbound_ready(7), "never opened");
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    assert!(s.outbound_ready(handle));
+    assert!(!s.outbound_ready(handle + 1), "a handle never handed out");
+    s.retire(1);
+    assert!(!s.outbound_ready(handle), "its generation was retired");
+}
+
+/// `tick` pre-derives each live binding's key for today, so the first request of the day finds it
+/// held rather than deriving it on the request path.
+#[test]
+fn tick_holds_todays_day_key_on_each_open_binding() {
+    let s = SigV4::new(1);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    let binding = s.binding(handle).expect("the binding is held");
+    assert!(binding.held().is_empty(), "nothing derived before a tick");
+    s.tick(1_000);
+    let (_, today) = crate::sigv4::format_amz_time(crate::now_epoch());
+    // Tomorrow's key rides too when the clock is within the hour of midnight.
+    assert!(
+        binding.held().contains(&today),
+        "tick held {:?}, not {today}",
+        binding.held()
+    );
+}

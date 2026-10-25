@@ -262,73 +262,133 @@ fn test_verify_inbound_sigv4_roundtrip_accepts() {
 }
 
 #[test]
-fn test_verify_inbound_sigv4_duplicate_signed_header_values_are_combined() {
+fn test_verify_inbound_sigv4_duplicate_signed_header_is_read_at_its_first_value() {
+    // busbar 1.5.5 (crates/busbar/src/sigv4.rs:446-460) takes the FIRST matching header's value.
     let secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
     let amzdate = "20150830T123600Z";
     let now = parse_amz_date(amzdate).unwrap();
     let payload_hash = sha256_hex(b"{\"x\":1}");
-    let signing_view = vec![
-        (
-            "host".to_string(),
-            "example-service.amazonaws.com".to_string(),
-        ),
-        ("x-amz-meta-tag".to_string(), "a,b".to_string()),
-        (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
-        (X_AMZ_DATE.to_string(), amzdate.to_string()),
-    ];
-    let (sig, signed_headers) = sign_v4(
-        secret,
-        "us-east-1",
-        "example-service",
-        "POST",
-        "/v1/example/invoke",
-        "",
-        &signing_view,
-        &payload_hash,
-        amzdate,
-        "20150830",
-    );
-    let parsed = ParsedAuthHeader {
-        access_key_id: "AKIAEXAMPLE1234567890".to_string(),
-        datestamp: "20150830".to_string(),
-        region: "us-east-1".to_string(),
-        service: "example-service".to_string(),
-        signed_headers,
-        signature: sig,
+    let check = |signed_value: &str| {
+        let signing_view = vec![
+            (
+                "host".to_string(),
+                "example-service.amazonaws.com".to_string(),
+            ),
+            ("x-amz-meta-tag".to_string(), signed_value.to_string()),
+            (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
+            (X_AMZ_DATE.to_string(), amzdate.to_string()),
+        ];
+        let (sig, signed_headers) = sign_v4(
+            secret,
+            "us-east-1",
+            "example-service",
+            "POST",
+            "/v1/example/invoke",
+            "",
+            &signing_view,
+            &payload_hash,
+            amzdate,
+            "20150830",
+        );
+        let parsed = ParsedAuthHeader {
+            access_key_id: "AKIAEXAMPLE1234567890".to_string(),
+            datestamp: "20150830".to_string(),
+            region: "us-east-1".to_string(),
+            service: "example-service".to_string(),
+            signed_headers,
+            signature: sig,
+        };
+        let wire = vec![
+            (
+                "host".to_string(),
+                "example-service.amazonaws.com".to_string(),
+            ),
+            ("x-amz-meta-tag".to_string(), "a".to_string()),
+            ("x-amz-meta-tag".to_string(), "b".to_string()),
+            (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
+            (X_AMZ_DATE.to_string(), amzdate.to_string()),
+        ];
+        let req = InboundRequest {
+            method: "POST",
+            canonical_uri: "/v1/example/invoke",
+            canonical_querystring: "",
+            headers: &wire,
+            payload_hash: &payload_hash,
+            amzdate,
+        };
+        verify_inbound_sigv4(&parsed, &req, secret, now)
     };
-    let wire = vec![
-        (
-            "host".to_string(),
-            "example-service.amazonaws.com".to_string(),
-        ),
-        ("x-amz-meta-tag".to_string(), "a".to_string()),
-        ("x-amz-meta-tag".to_string(), "b".to_string()),
-        (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
-        (X_AMZ_DATE.to_string(), amzdate.to_string()),
-    ];
-    let req = InboundRequest {
-        method: "POST",
-        canonical_uri: "/v1/example/invoke",
-        canonical_querystring: "",
-        headers: &wire,
-        payload_hash: &payload_hash,
-        amzdate,
-    };
-    assert_eq!(verify_inbound_sigv4(&parsed, &req, secret, now), Ok(()));
+    // The client signed the first value: verifies.
+    assert_eq!(check("a"), Ok(()));
+    // The client signed the comma-joined `a,b`: rejected.
+    assert_eq!(check("a,b"), Err(VerifyError::SignatureMismatch));
 }
 
 #[test]
-fn test_canonicalize_header_value_preserves_spaces_inside_quotes() {
+fn test_canonicalize_header_value_collapses_spaces_inside_quotes_too() {
+    // No quote exception (1.5.5 sigv4.rs:137-155; AWS and botocore collapse every space run).
     assert_eq!(
         canonicalize_header_value("attachment; filename=\"my  file.txt\""),
-        "attachment; filename=\"my  file.txt\""
+        "attachment; filename=\"my file.txt\""
     );
     assert_eq!(
         canonicalize_header_value("  a   b  \"c   d\"   e  "),
-        "a b \"c   d\" e"
+        "a b \"c d\" e"
     );
+    // An unbalanced quote does not change anything: trailing spaces still trim.
+    assert_eq!(canonicalize_header_value("abc\"  "), "abc\"");
     let once = canonicalize_header_value("x  \"y  z\"  w");
     assert_eq!(canonicalize_header_value(&once), once);
+}
+
+#[test]
+fn test_verify_inbound_sigv4_quoted_spaces_are_signed_collapsed() {
+    let secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+    let amzdate = "20150830T123600Z";
+    let now = parse_amz_date(amzdate).unwrap();
+    let payload_hash = sha256_hex(b"{\"x\":1}");
+    let check = |signed_value: &str, sent_value: &str| {
+        let mut signing_view = vec![
+            ("host".to_string(), "svc.example".to_string()),
+            ("x-amz-meta-tag".to_string(), signed_value.to_string()),
+            (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
+            (X_AMZ_DATE.to_string(), amzdate.to_string()),
+        ];
+        let (sig, signed_headers) = sign_v4(
+            secret,
+            "us-east-1",
+            "svc",
+            "POST",
+            "/v1/x",
+            "",
+            &signing_view,
+            &payload_hash,
+            amzdate,
+            "20150830",
+        );
+        let parsed = ParsedAuthHeader {
+            access_key_id: "AKIAEXAMPLE1234567890".to_string(),
+            datestamp: "20150830".to_string(),
+            region: "us-east-1".to_string(),
+            service: "svc".to_string(),
+            signed_headers,
+            signature: sig,
+        };
+        signing_view[1].1 = sent_value.to_string();
+        let req = InboundRequest {
+            method: "POST",
+            canonical_uri: "/v1/x",
+            canonical_querystring: "",
+            headers: &signing_view,
+            payload_hash: &payload_hash,
+            amzdate,
+        };
+        verify_inbound_sigv4(&parsed, &req, secret, now)
+    };
+    // Signed collapsed, sent with the doubled interior space: verifies.
+    assert_eq!(check("x \"a b\"", "x \"a  b\""), Ok(()));
+    // Unbalanced quote with trailing spaces signs as `abc"`.
+    assert_eq!(check("abc\"", "abc\"  "), Ok(()));
 }
 
 #[test]
@@ -579,6 +639,7 @@ fn test_verify_inbound_sigv4_signed_headers_claim_stripped_rejected() {
 
 #[test]
 fn test_verify_inbound_sigv4_signed_headers_wrong_sort_rejected() {
+    // An unsorted list is refused up front, before any signature compare.
     let secret = "the-real-secret";
     let amzdate = "20150830T123600Z";
     let now = parse_amz_date(amzdate).unwrap();
@@ -588,7 +649,7 @@ fn test_verify_inbound_sigv4_signed_headers_wrong_sort_rejected() {
     let req = inbound(&headers, &ph, amzdate);
     assert_eq!(
         verify_inbound_sigv4(&parsed, &req, secret, now),
-        Err(VerifyError::SignatureMismatch)
+        Err(VerifyError::SignedHeadersMismatch)
     );
 }
 
@@ -1040,49 +1101,49 @@ fn a_secret_that_is_not_utf8_never_admits() {
 }
 
 #[test]
-fn a_duplicate_signed_header_is_comma_joined_in_request_order() {
+fn a_duplicate_signed_header_is_read_at_its_first_value() {
     let (amzdate, datestamp) = format_amz_time(NOW);
     let payload_hash = sha256_hex(b"");
-    let signing_view = vec![
-        ("host".to_string(), "svc.example".to_string()),
-        ("x-amz-meta-tag".to_string(), "a,b".to_string()),
-        (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
-        (X_AMZ_DATE.to_string(), amzdate.clone()),
-    ];
-    let (sig, signed_headers) = sign_v4(
-        SECRET,
-        "us-east-1",
-        "svc",
-        "POST",
-        &uri_encode_path(PATH),
-        "",
-        &signing_view,
-        &payload_hash,
-        &amzdate,
-        &datestamp,
-    );
-    let auth = format!(
-        "AWS4-HMAC-SHA256 Credential={AKID}/{datestamp}/us-east-1/svc/aws4_request, \
-         SignedHeaders={signed_headers}, Signature={sig}"
-    );
-    let lines = vec![
-        ("authorization".to_string(), auth),
-        ("host".to_string(), "svc.example".to_string()),
-        ("x-amz-meta-tag".to_string(), "a".to_string()),
-        (X_AMZ_CONTENT_SHA256.to_string(), payload_hash),
-        ("x-amz-meta-tag".to_string(), "b".to_string()),
-        (X_AMZ_DATE.to_string(), amzdate),
-    ];
+    let lines_for = |signed_value: &str| {
+        let signing_view = vec![
+            ("host".to_string(), "svc.example".to_string()),
+            ("x-amz-meta-tag".to_string(), signed_value.to_string()),
+            (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
+            (X_AMZ_DATE.to_string(), amzdate.clone()),
+        ];
+        let (sig, signed_headers) = sign_v4(
+            SECRET,
+            "us-east-1",
+            "svc",
+            "POST",
+            &uri_encode_path(PATH),
+            "",
+            &signing_view,
+            &payload_hash,
+            &amzdate,
+            &datestamp,
+        );
+        let auth = format!(
+            "AWS4-HMAC-SHA256 Credential={AKID}/{datestamp}/us-east-1/svc/aws4_request, \
+             SignedHeaders={signed_headers}, Signature={sig}"
+        );
+        vec![
+            ("authorization".to_string(), auth),
+            ("host".to_string(), "svc.example".to_string()),
+            ("x-amz-meta-tag".to_string(), "a".to_string()),
+            (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
+            ("x-amz-meta-tag".to_string(), "b".to_string()),
+            (X_AMZ_DATE.to_string(), amzdate.clone()),
+        ]
+    };
+    // The client signed the first value (1.5.5 reads a repeated header at its first value).
     assert_eq!(
-        run(&lines, None, Some(b""), &mut Fake::default()),
+        run(&lines_for("a"), None, Some(b""), &mut Fake::default()),
         Judgement::Identity(AKID.to_string())
     );
-    // Reordered values sign differently.
-    let mut swapped = lines.clone();
-    swapped[2].1 = "b".to_string();
-    swapped[4].1 = "a".to_string();
+    // The client signed the comma-joined `a,b`: rejected.
     assert_eq!(
-        run(&swapped, None, Some(b""), &mut Fake::default()),
+        run(&lines_for("a,b"), None, Some(b""), &mut Fake::default()),
         Judgement::Reject
     );
 }
@@ -1097,4 +1158,138 @@ fn the_fake_source_answers_the_dummy_for_any_other_id() {
     };
     assert_eq!(&secret[..], DUMMY_SECRET.as_bytes());
     assert!(!live);
+}
+
+/// A request signed over `claimed` (the SignedHeaders list as the client writes it) whose
+/// canonical headers are `canon` (name, value) in the order verify recomputes them, with a real
+/// signature over that canonical form. The wire carries `wire`.
+fn forged_signed_headers(
+    claimed: &str,
+    canon: &[(&str, &str)],
+    wire: &[(&str, &str)],
+) -> (ParsedAuthHeader, Vec<(String, String)>, String, String) {
+    let amzdate = "20150830T123600Z".to_string();
+    let payload_hash = sha256_hex(b"{\"x\":1}");
+    let own = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+        v.iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    };
+    // Sign the canonical form the way verify recomputes it, then swap in the claimed list.
+    let (sig, computed) = sign_v4(
+        "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+        "us-east-1",
+        "svc",
+        "POST",
+        "/v1/x",
+        "",
+        &own(canon),
+        &payload_hash,
+        &amzdate,
+        "20150830",
+    );
+    let _ = computed;
+    let parsed = ParsedAuthHeader {
+        access_key_id: "AKIAEXAMPLE1234567890".to_string(),
+        datestamp: "20150830".to_string(),
+        region: "us-east-1".to_string(),
+        service: "svc".to_string(),
+        signed_headers: claimed.to_string(),
+        signature: sig,
+    };
+    (parsed, own(wire), payload_hash, amzdate)
+}
+
+#[test]
+fn a_signed_headers_list_that_repeats_a_name_is_refused_before_any_copying() {
+    let ph = sha256_hex(b"{\"x\":1}");
+    let wire = [
+        ("host", "svc.example"),
+        (X_AMZ_CONTENT_SHA256, ph.as_str()),
+        (X_AMZ_DATE, "20150830T123600Z"),
+        ("x-dup", "v"),
+    ];
+    // Canonical headers carry x-dup twice, as a consistent (pre-fix) recompute would build them.
+    let canon = [
+        ("host", "svc.example"),
+        (X_AMZ_CONTENT_SHA256, ph.as_str()),
+        (X_AMZ_DATE, "20150830T123600Z"),
+        ("x-dup", "v"),
+        ("x-dup", "v"),
+    ];
+    let claimed = "host;x-amz-content-sha256;x-amz-date;x-dup;x-dup";
+    let (parsed, headers, payload_hash, amzdate) = forged_signed_headers(claimed, &canon, &wire);
+    let now = parse_amz_date(&amzdate).unwrap();
+    let req = InboundRequest {
+        method: "POST",
+        canonical_uri: "/v1/x",
+        canonical_querystring: "",
+        headers: &headers,
+        payload_hash: &payload_hash,
+        amzdate: &amzdate,
+    };
+    assert_eq!(
+        verify_inbound_sigv4(
+            &parsed,
+            &req,
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            now
+        ),
+        Err(VerifyError::SignedHeadersMismatch)
+    );
+}
+
+#[test]
+fn a_repeated_name_signed_headers_list_is_rejected_by_judge() {
+    let (amzdate, datestamp) = format_amz_time(NOW);
+    let ph = sha256_hex(b"");
+    let canon = vec![
+        ("host".to_string(), "svc.example".to_string()),
+        (X_AMZ_CONTENT_SHA256.to_string(), ph.clone()),
+        (X_AMZ_DATE.to_string(), amzdate.clone()),
+        ("x-dup".to_string(), "v".to_string()),
+        ("x-dup".to_string(), "v".to_string()),
+    ];
+    let (sig, _) = sign_v4(
+        SECRET,
+        "us-east-1",
+        "svc",
+        "POST",
+        &uri_encode_path(PATH),
+        "",
+        &canon,
+        &ph,
+        &amzdate,
+        &datestamp,
+    );
+    let auth = format!(
+        "AWS4-HMAC-SHA256 Credential={AKID}/{datestamp}/us-east-1/svc/aws4_request, \
+         SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-dup;x-dup, Signature={sig}"
+    );
+    let lines = vec![
+        ("authorization".to_string(), auth),
+        ("host".to_string(), "svc.example".to_string()),
+        (X_AMZ_CONTENT_SHA256.to_string(), ph),
+        (X_AMZ_DATE.to_string(), amzdate),
+        ("x-dup".to_string(), "v".to_string()),
+    ];
+    assert_eq!(
+        run(&lines, None, Some(b""), &mut Fake::default()),
+        Judgement::Reject
+    );
+}
+
+#[test]
+fn a_mixed_case_signed_headers_list_is_refused_before_the_signature_compare() {
+    let secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+    let amzdate = "20150830T123600Z";
+    let now = parse_amz_date(amzdate).unwrap();
+    let (mut parsed, headers, ph) =
+        signed_fixture(secret, "us-east-1", "acme-svc", amzdate, "20150830");
+    parsed.signed_headers = "Host;x-amz-content-sha256;x-amz-date".to_string();
+    let req = inbound(&headers, &ph, amzdate);
+    assert_eq!(
+        verify_inbound_sigv4(&parsed, &req, secret, now),
+        Err(VerifyError::SignedHeadersMismatch)
+    );
 }

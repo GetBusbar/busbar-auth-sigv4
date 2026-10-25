@@ -33,7 +33,7 @@ jobs:
     with:
       service: none
       busbar_checkout: true
-      macos_test: "cargo test --workspace --locked --lib --test conformance"
+      macos_test: "cargo test --workspace --locked"
       extra_test: ""
       plugin_crate: busbar-auth-sigv4-plugin
       plugin_kind: auth

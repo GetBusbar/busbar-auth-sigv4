@@ -21,8 +21,8 @@
 //! 4. the key's own signed token carried as `Authorization: Bearer` on the same route is still
 //!    admitted (the plugin passes a non-SigV4 credential, the `keys` bearer path admits it);
 //! 5. a body over the size cap under a MALFORMED SigV4 authorization line is refused AT THE CAP
-//!    (413), before any verdict, and nothing reaches the upstream: the body the kernel holds for the
-//!    `HeadBody` verify is bounded by the cap (ARCHITECT ruling D1 2026-10-05, inbound buffering).
+//!    with the opaque auth refusal (403), before any verdict, and nothing reaches the upstream: the
+//!    body the kernel holds for the `HeadBody` verify is bounded by the cap (ARCHITECT ruling D1 2026-10-05, inbound buffering).
 //!
 //! THE BINARY. This suite moved here from busbar's `crates/busbar/tests/sigv4_both_ways.rs`
 //! (busbar Law 0: a test of one plugin instance lives in that plugin's repo). It boots the REAL

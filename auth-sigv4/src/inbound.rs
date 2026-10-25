@@ -54,25 +54,17 @@ const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
 const DUMMY_SECRET: &str = "AWS4-DUMMY-SECRET-FOR-CONSTANT-TIME-REJECT-PATH";
 
 /// Canonicalize a signed-header value per AWS SigV4: trim leading/trailing ASCII spaces (0x20) and
-/// collapse each run of sequential ASCII spaces to a single space — EXCEPT inside a quoted string,
-/// whose spaces are significant and pass through verbatim. ONLY the ASCII space character is treated
-/// as whitespace — tabs, NBSP (U+00A0), newlines, and every other Unicode whitespace codepoint are
-/// preserved verbatim, because AWS does the same. (This is intentionally NOT `split_whitespace`,
-/// which would also fold tabs/NBSP/newlines and break the signature.)
-///
-/// The quote state matters because a header whose value carries a quoted string (a `user-agent`
-/// comment, a `content-disposition` filename) is signed by the client with those interior spaces
-/// intact; folding them here produced a canonical value the client never signed, so a correctly
-/// signed request was rejected.
+/// collapse each run of sequential ASCII spaces to a single space, quoted or not (AWS and botocore
+/// do not treat quotes specially). ONLY the ASCII space character is treated as whitespace — tabs,
+/// NBSP (U+00A0), newlines, and every other Unicode whitespace codepoint are preserved verbatim,
+/// because AWS does the same. (This is intentionally NOT `split_whitespace`, which would also fold
+/// tabs/NBSP/newlines and break the signature.) Matches busbar 1.5.5
+/// (`crates/busbar/src/sigv4.rs:137-155`).
 fn canonicalize_header_value(v: &str) -> String {
     let mut out = String::with_capacity(v.len());
     let mut prev_space = false;
-    let mut in_quotes = false;
     for ch in v.chars() {
-        if ch == '"' {
-            in_quotes = !in_quotes;
-        }
-        if ch == ' ' && !in_quotes {
+        if ch == ' ' {
             // Defer emitting until we know it is not a trailing run; mark that a space is pending.
             prev_space = true;
         } else {
@@ -106,7 +98,7 @@ pub fn sign_v4(
 ) -> (String, String) {
     let mut h: Vec<(String, String)> = headers
         .iter()
-        // AWS SigV4 canonicalization of a (non-quoted) header value: trim leading/trailing ASCII
+        // AWS SigV4 canonicalization of a header value, quoted or not: trim leading/trailing ASCII
         // spaces (0x20) AND collapse runs of sequential ASCII spaces to a single space. AWS operates
         // on ASCII space ONLY — NBSP (U+00A0), tabs, and other Unicode whitespace are NOT treated as
         // whitespace and must pass through verbatim, byte-for-byte, into the signed value.
@@ -369,28 +361,31 @@ pub fn verify_inbound_sigv4(
     if !signed.iter().any(|h| h.eq_ignore_ascii_case("host")) {
         return Err(VerifyError::SignedHeadersMismatch);
     }
-    // A header name may legally appear SEVERAL times in one request. AWS canonicalizes such a name
-    // to ONE entry whose value is every occurrence's value joined with a comma, in the order the
-    // values appear in the request.
+    // The claimed list must equal the computed one (lowercased, sorted) to verify, so this refuses
+    // nothing that could verify except a list that repeats a name, which no compliant SigV4 client
+    // sends. Without it a list repeating one name N times copies that header's value N times
+    // before any secret is involved (pre-auth amplification).
+    let mut prev: Option<&str> = None;
+    for name in &signed {
+        if name.bytes().any(|b| b.is_ascii_uppercase()) || prev.is_some_and(|p| p >= *name) {
+            return Err(VerifyError::SignedHeadersMismatch);
+        }
+        prev = Some(name);
+    }
+    // Each signed name takes the FIRST matching request header's value (case-insensitive), as
+    // busbar 1.5.5 does (`crates/busbar/src/sigv4.rs:446-460`); a signed name the request does not
+    // carry cannot be reconstructed. `sign_v4` canonicalizes the value.
     let mut selected: Vec<(String, String)> = Vec::with_capacity(signed.len());
     for name in &signed {
         let lname = name.to_ascii_lowercase();
-        let mut values = req
+        let Some((_, value)) = req
             .headers
             .iter()
-            .filter(|(k, _)| k.eq_ignore_ascii_case(&lname))
-            .map(|(_, v)| v.as_str())
-            .peekable();
-        if values.peek().is_none() {
+            .find(|(k, _)| k.eq_ignore_ascii_case(&lname))
+        else {
             return Err(VerifyError::SignedHeadersMismatch);
-        }
-        // Canonicalize each occurrence BEFORE joining: AWS trims and collapses each value, then
-        // joins. `sign_v4` canonicalizes again, which is idempotent.
-        let joined = values
-            .map(canonicalize_header_value)
-            .collect::<Vec<_>>()
-            .join(",");
-        selected.push((lname, joined));
+        };
+        selected.push((lname, value.clone()));
     }
 
     // (4) Recompute — same canonicalization, byte-for-byte.
@@ -490,16 +485,16 @@ impl Request<'_> {
     }
 }
 
-/// Does the request carry an inbound AWS SigV4 `Authorization` header (`AWS4-HMAC-SHA256 ...`)?
-/// The kernel's `has_sigv4_authorization`: the FIRST `authorization` line, read as visible ASCII,
-/// trimmed at the start, opens with the algorithm token. Everything else (bearer, no Authorization)
-/// is not this plugin's credential.
 /// Whether the request's credential is this plugin's: a SigV4 `authorization` line, which `verify`
 /// names for the transport to strip whatever its verdict.
 pub(crate) fn carries_sigv4(req: &Request<'_>) -> bool {
     sigv4_authorization(req).is_some()
 }
 
+/// The request's inbound AWS SigV4 `Authorization` value (`AWS4-HMAC-SHA256 ...`), the kernel's
+/// `has_sigv4_authorization`: the FIRST `authorization` line, read as visible ASCII, trimmed at the
+/// start, opens with the algorithm token. Everything else (bearer, no Authorization) is not this
+/// plugin's credential.
 fn sigv4_authorization<'r>(req: &'r Request<'_>) -> Option<&'r str> {
     req.first(AUTHORIZATION)
         .and_then(header_str)

@@ -401,3 +401,52 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
         "the transport's host and accept lines leave the signature 1.5.5's"
     );
 }
+
+/// `outbound_ready` is true for a handle this generation holds and for no other: not for one never
+/// opened, not for one whose generation was retired.
+#[test]
+fn outbound_ready_is_false_for_an_unknown_or_retired_handle() {
+    use busbar_contract::abi::sdk::auth_outbound::OutboundPlugin;
+    let s = SigV4::new(1);
+    assert!(!s.outbound_ready(7), "never opened");
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    assert!(s.outbound_ready(handle));
+    assert!(!s.outbound_ready(handle + 1), "a handle never handed out");
+    s.retire(1);
+    assert!(!s.outbound_ready(handle), "its generation was retired");
+}
+
+/// `tick` pre-derives each live binding's key for today, so the first request of the day finds it
+/// held rather than deriving it on the request path.
+#[test]
+fn tick_holds_todays_day_key_on_each_open_binding() {
+    let s = SigV4::new(1);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    let binding = s.binding(handle).expect("the binding is held");
+    assert!(binding.held().is_empty(), "nothing derived before a tick");
+    s.tick(1_000);
+    let (_, today) = crate::sigv4::format_amz_time(crate::now_epoch());
+    // Tomorrow's key rides too when the clock is within the hour of midnight.
+    assert!(
+        binding.held().contains(&today),
+        "tick held {:?}, not {today}",
+        binding.held()
+    );
+}
+
+/// The unsendable-token line capitalises the service's first CHARACTER, not its first byte: a
+/// service that opens with a multi-byte character builds the line instead of panicking at bind.
+#[test]
+fn the_unsendable_line_capitalises_a_multibyte_initial() {
+    assert_eq!(
+        SigV4::note_unsendable("ébedrock"),
+        "Ébedrock lane session token contains a byte rejected by HeaderValue; skipping signing to \
+         avoid a signed-but-absent x-amz-security-token header."
+    );
+    let s = SigV4::new(1);
+    let settings = r#"{"service":"ébedrock","region":"us-east-1"}"#;
+    let binding =
+        crate::style::open_binding("sigv4", Some(b"AKID:SECRET"), Some(settings.as_bytes()))
+            .expect("the binding opens");
+    assert!(s.binding(s.keep(binding)).is_some(), "the handle is kept");
+}

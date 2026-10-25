@@ -214,6 +214,11 @@ struct Req {
 }
 
 fn signed(secret: &str, akid: &str, body: &[u8]) -> Req {
+    signed_as(secret, akid, body, "POST", "")
+}
+
+/// [`signed`] for `method` over the canonical query `query` (signed as given).
+fn signed_as(secret: &str, akid: &str, body: &[u8], method: &str, query: &str) -> Req {
     let (amzdate, datestamp) = (AMZDATE.to_string(), DATESTAMP.to_string());
     let payload_hash = sha256_hex(body);
     let headers = vec![
@@ -226,9 +231,9 @@ fn signed(secret: &str, akid: &str, body: &[u8]) -> Req {
         secret,
         "us-east-1",
         "bedrock",
-        "POST",
+        method,
         PATH,
-        "",
+        query,
         &headers,
         &payload_hash,
         &amzdate,
@@ -296,6 +301,19 @@ fn strip_names(a: &Answer) -> Vec<String> {
 /// `verify` on `ticket` with `flags`, at `HeadBody`, over `req`, into buffers of `cap` bytes; the
 /// answer judged by the kind's `check_identify`.
 fn verify(o: &Opened, req: &Req, ticket: Ticket, flags: u32, cap: usize) -> Answer {
+    verify_as(o, req, ticket, flags, cap, "POST", None)
+}
+
+/// [`verify`] for a request received with `method` and the raw `query` (none = absent).
+fn verify_as(
+    o: &Opened,
+    req: &Req,
+    ticket: Ticket,
+    flags: u32,
+    cap: usize,
+    method: &str,
+    query: Option<&str>,
+) -> Answer {
     let names: Vec<(String, String)> = req.lines.clone();
     let lines: Vec<NamedValue> = names
         .iter()
@@ -316,9 +334,13 @@ fn verify(o: &Opened, req: &Req, ticket: Ticket, flags: u32, cap: usize) -> Answ
     i.head.flags = flags;
     i.lines = lines.as_ptr();
     i.lines_len = lines.len();
-    i.request.method = abi_str("POST");
+    i.request.method = abi_str(method);
     i.request.authority = abi_str("busbar.example");
     i.request.canonical_path = abi_str(PATH);
+    // An absent query is a null pointer and no length.
+    if let Some(q) = query {
+        i.request.query = abi_str(q);
+    }
     i.request.timestamp = NOW;
     i.point = POINT_HEAD_BODY;
     i.body = Blob {
@@ -446,6 +468,26 @@ fn a_signed_request_over_the_live_credential_identifies_its_access_key_id() {
         [((7, 3, 0), "sigv4".to_string(), AKID.to_string())],
         "one read on the call's ticket, kind sigv4, id the AccessKeyId"
     );
+}
+
+/// The door lends the received method and raw query to the check: a GET signed over a query is
+/// admitted, and the same request received with another query or as a POST is not.
+#[test]
+fn a_signed_get_with_a_query_is_admitted_through_the_door() {
+    let o = open();
+    let req = signed_as(SECRET, AKID, b"", "GET", "a=1&b=2");
+    let a = verify_as(&o, &req, TICKET, 0, 256, "GET", Some("a=1&b=2"));
+    assert_eq!(a.outcome, Outcome::Ready);
+    assert_eq!(a.out.verdict, VERDICT_IDENTITY);
+    assert_eq!(a.subject.as_deref(), Some(AKID));
+    for (method, query) in [
+        ("GET", None),
+        ("GET", Some("a=1&b=3")),
+        ("POST", Some("a=1&b=2")),
+    ] {
+        let a = verify_as(&o, &req, TICKET, 0, 256, method, query);
+        assert_eq!(a.out.verdict, VERDICT_REJECT, "{method} {query:?}");
+    }
 }
 
 #[test]

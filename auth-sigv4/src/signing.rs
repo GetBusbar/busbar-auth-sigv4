@@ -38,7 +38,7 @@ const PREDERIVE_AHEAD_SECS: u64 = 3_600;
 
 /// A `sigv4` binding's settings: the service and region the signature is scoped to. The kernel
 /// resolves them at seal (the region from the provider's host through the plane's declared
-/// function) — see the seam in the crate doc. The content type the signature covers is the one the
+/// function). The content type the signature covers is the one the
 /// request is sent with ([`SignFacts::content_type`]), never a setting.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SigV4Params {

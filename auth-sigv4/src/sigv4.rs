@@ -161,8 +161,8 @@ pub fn canonical_query(query: Option<&str>) -> String {
     out
 }
 
-/// Convert a epoch (1970-01-01 UTC) (seconds) to (amzdate `YYYYMMDDTHHMMSSZ`, datestamp `YYYYMMDD`). Pure UTC,
-/// no external date crate (a public-domain civil-from-days algorithm).
+/// Convert seconds since the epoch (1970-01-01 UTC) to (amzdate `YYYYMMDDTHHMMSSZ`, datestamp
+/// `YYYYMMDD`). Pure UTC, no external date crate (a public-domain civil-from-days algorithm).
 pub fn format_amz_time(epoch_secs: u64) -> (String, String) {
     let days = (epoch_secs / SECS_PER_DAY) as i64;
     let sod = epoch_secs % SECS_PER_DAY;

@@ -401,3 +401,19 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
         "the transport's host and accept lines leave the signature 1.5.5's"
     );
 }
+
+/// The unsendable-token line capitalises the service's first CHARACTER, not its first byte: a
+/// service that opens with a multi-byte character builds the line instead of panicking at bind.
+#[test]
+fn the_unsendable_line_capitalises_a_multibyte_initial() {
+    assert_eq!(
+        SigV4::note_unsendable("ébedrock"),
+        "Ébedrock lane session token contains a byte rejected by HeaderValue; skipping signing to \
+         avoid a signed-but-absent x-amz-security-token header."
+    );
+    let s = SigV4::new(1);
+    let settings = r#"{"service":"ébedrock","region":"us-east-1"}"#;
+    let binding = crate::style::open_binding("sigv4", Some(b"AKID:SECRET"), Some(settings.as_bytes()))
+        .expect("the binding opens");
+    assert!(s.binding(s.keep(binding)).is_some(), "the handle is kept");
+}

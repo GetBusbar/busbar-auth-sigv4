@@ -150,7 +150,9 @@ impl SigV4 {
     /// header value reports, in the words 1.5.5's signer logged on each such request, naming
     /// `service`.
     pub(crate) fn note_unsendable(service: &str) -> String {
-        let (initial, rest) = service.split_at(service.len().min(1));
+        // Split after the first CHARACTER: a byte index inside a multi-byte one would panic.
+        let first = service.chars().next().map_or(0, char::len_utf8);
+        let (initial, rest) = service.split_at(first);
         format!(
             "{}{rest} lane session token contains a byte rejected by HeaderValue; \
              skipping signing to avoid a signed-but-absent x-amz-security-token header.",

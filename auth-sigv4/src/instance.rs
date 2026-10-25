@@ -1,34 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! ONE INSTANCE: the handles (generation data, each with the unsendable-token line its `fields`
-//! reports). No token cache, no waker: a sigv4 binding never mints and never pends — `tick` only
-//! pre-derives day keys ahead of midnight. Nothing of `verify`'s is kept here: no secret, no
+//! ONE INSTANCE: the handles (generation data). No token cache, no waker: a sigv4 binding never
+//! mints and never pends — `tick` only pre-derives day keys ahead of midnight. Nothing of `verify`'s is kept here: no secret, no
 //! verdict, no per-ticket state (the kernel never cached a SigV4 verdict, and the secret is the
 //! host's `records.secret` answer, read on every call). The answers' memory, the instance pointer
 //! and the host tables are the contract kit's (`busbar_contract::auth_door!`), so this crate holds
 //! no per-thread or process-global store (THE DESIGN §2).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use crate::signing::{Field, SigV4Binding, SignFacts, SigningCredential};
 
-/// The index of each diagnostic id in the Statement (`crate::DIAG_IDS`).
-pub(crate) mod diag {
-    /// A signing credential's session token is not a legal header value.
-    pub const SESSION_TOKEN_INVALID_BYTES: u32 = 0;
-}
-
-/// The severity of the unsendable-token line: WARN, as 1.5.5 logged it.
-pub(crate) const WARN: u8 = 1;
-
 /// How often `tick` re-checks the SigV4 day keys while a binding is open.
 const PREDERIVE_TICK_NS: u64 = 60 * 1_000_000_000;
 
-/// One handle: its generation, its binding, and its `fields` note ([`SigV4::note_unsendable`]).
-type Handle = (u64, Arc<SigV4Binding>, Arc<str>);
+/// One handle: its generation and its binding.
+type Handle = (u64, Arc<SigV4Binding>);
+
+/// What `fields` answers in passthrough mode when the host lent no caller credential.
+pub(crate) const NO_CALLER_CREDENTIAL: &str =
+    "sigv4 passthrough: the caller presented no credential; the request is not sent unsigned";
 
 /// Whose credential one `fields` call signs with. No `Debug`: it carries the caller's credential.
 #[derive(Clone, Copy)]
@@ -43,14 +38,12 @@ pub(crate) enum Who<'a> {
 /// What one `fields` call on a held handle answers. No `Debug`: its fields carry credential
 /// material.
 pub(crate) enum Signed {
-    /// The fields to set, in order (none: the credential signs nothing), and the line the request
-    /// reports when the signer's session token is no legal header value.
-    Fields {
-        /// The signed fields.
-        fields: Vec<Field>,
-        /// The unsendable-token line, when the signer's session token is unsendable.
-        note: Option<Arc<str>>,
-    },
+    /// The fields to set, in order (never none: a request with nothing to sign with FAILS).
+    Fields(Vec<Field>),
+    /// Nothing can be signed, for this reason: no credential of the binding's own (own mode), no
+    /// caller credential or a malformed one (passthrough), or an `Authorization` value no header
+    /// may carry. The request FAILS; it is never sent unsigned.
+    Failed(Cow<'static, str>),
     /// The host lent no method, host or path: nothing can be signed.
     NoFacts,
 }
@@ -59,8 +52,7 @@ pub(crate) enum Signed {
 pub struct SigV4 {
     generation: AtomicU64,
     next_handle: AtomicU64,
-    /// Each handle: its generation, its binding, and the line its `fields` reports when the signing
-    /// credential's session token is unsendable (built once at open, kept until retire).
+    /// Each handle: its generation and its binding (kept until retire).
     handles: RwLock<HashMap<u64, Handle>>,
 }
 
@@ -83,13 +75,10 @@ impl SigV4 {
     pub(crate) fn keep(&self, binding: SigV4Binding) -> u64 {
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
         let generation = self.generation.load(Ordering::Acquire);
-        // The line a request signed with nothing reports names the binding's service, the one
-        // input it varies on: built here, once, so `fields` builds nothing for it.
-        let note = Self::note_unsendable(&binding.params().service);
         self.handles
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(handle, (generation, Arc::new(binding), note.into()));
+            .insert(handle, (generation, Arc::new(binding)));
         handle
     }
 
@@ -99,7 +88,7 @@ impl SigV4 {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&handle)
-            .map(|(_, b, _)| b.clone())
+            .map(|(_, b)| b.clone())
     }
 
     /// `fields`' body: sign one request on `handle` for `who` over `facts` (`None`: the host lent
@@ -110,32 +99,41 @@ impl SigV4 {
         who: Who<'_>,
         facts: Option<SignFacts<'_>>,
     ) -> Option<Signed> {
-        let (binding, note) = self
-            .handles
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&handle)
-            .map(|(_, b, n)| (b.clone(), n.clone()))?;
+        let binding = self.binding(handle)?;
         let Some(facts) = facts else {
             return Some(Signed::NoFacts);
         };
         let fresh;
         let signer = match who {
             Who::Own => &*binding,
-            Who::Caller(caller) => {
-                let caller = caller
-                    .and_then(|c| std::str::from_utf8(c).ok())
-                    .unwrap_or("");
+            Who::Caller(None) => {
+                return Some(Signed::Failed(Cow::Borrowed(NO_CALLER_CREDENTIAL)));
+            }
+            Who::Caller(Some(caller)) => {
+                let parsed = std::str::from_utf8(caller)
+                    .map_err(|_| vec!["the credential is not UTF-8"])
+                    .and_then(SigningCredential::parse);
+                let credential = match parsed {
+                    Ok(c) => c,
+                    Err(findings) => {
+                        let reason = findings
+                            .iter()
+                            .map(|f| format!("caller credential: {f}"))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        return Some(Signed::Failed(Cow::Owned(reason)));
+                    }
+                };
                 // A FRESH binding, per request: the caller's key varies request to request, so it
                 // never enters the operator binding's day-key cache (`signing` module doc).
-                fresh =
-                    SigV4Binding::new(binding.params().clone(), SigningCredential::split(caller));
+                fresh = SigV4Binding::new(binding.params().clone(), Some(credential));
                 &fresh
             }
         };
-        let fields = signer.sign(&facts);
-        let note = signer.session_token_unsendable().then_some(note);
-        Some(Signed::Fields { fields, note })
+        Some(match signer.sign(&facts) {
+            Ok(fields) => Signed::Fields(fields),
+            Err(reason) => Signed::Failed(Cow::Borrowed(reason)),
+        })
     }
 
     /// `retire`: drop the handles opened at `generation`.
@@ -143,21 +141,7 @@ impl SigV4 {
         self.handles
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .retain(|_, (g, _, _)| *g != generation);
-    }
-
-    /// The line a request signed with nothing because its credential's session token is no legal
-    /// header value reports, in the words 1.5.5's signer logged on each such request, naming
-    /// `service`.
-    pub(crate) fn note_unsendable(service: &str) -> String {
-        // Split after the first CHARACTER: a byte index inside a multi-byte one would panic.
-        let first = service.chars().next().map_or(0, char::len_utf8);
-        let (initial, rest) = service.split_at(first);
-        format!(
-            "{}{rest} lane session token contains a byte rejected by HeaderValue; \
-             skipping signing to avoid a signed-but-absent x-amz-security-token header.",
-            initial.to_uppercase()
-        )
+            .retain(|_, (g, _)| *g != generation);
     }
 
     /// `tick`: pre-derive every live binding's day keys ahead of midnight. Answers the next tick,
@@ -170,7 +154,7 @@ impl SigV4 {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .values()
-            .map(|(_, b, _)| b.clone())
+            .map(|(_, b)| b.clone())
             .collect();
         let now = crate::now_epoch();
         for b in &bindings {

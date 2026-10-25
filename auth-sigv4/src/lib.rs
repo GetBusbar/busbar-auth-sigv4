@@ -23,8 +23,13 @@
 //!   passthrough binding is built fresh, per request, from the caller's credential, exactly the
 //!   code path the operator-credential binding signs with, minus the day-key cache (the caller's
 //!   key varies request to request, so there is nothing to hold ahead of time).
-//! * `outbound_ready` is the handle's `ready` fact for the health prober: always ready — a sigv4
-//!   binding never mints.
+//!   `fields` never answers READY with no field (OWNER RULING): own mode on a binding opened with
+//!   no credential (passthrough-only), a passthrough with no caller credential or a malformed one,
+//!   and a signature whose `Authorization` value no header may carry each FAIL with the reason —
+//!   the request is never sent unsigned. A malformed operator credential never gets that far:
+//!   `open_outbound` refuses it, one `credential: ...` line per finding.
+//! * `outbound_ready` is the handle's `ready` fact for the health prober: true for a handle this
+//!   generation holds — a sigv4 binding never mints, so there is nothing else to wait for.
 //! * `tick` pre-derives the SigV4 day keys ahead of UTC midnight (BUSBAR-1.6.0.md §6.5).
 //!
 //! The style logic is `egress_auth/*` MOVED VERBATIM (KERNEL<>PLUGINS step 22), staged
@@ -53,7 +58,8 @@
 //!   from the credential kind and the subject), no TTL (never cached: the kernel never cached a
 //!   SigV4 verdict), no replay claim, no credential. Whatever the verdict, a SigV4 `authorization`
 //!   line is named for the transport to strip (THE DESIGN §6). Every failure is the one REJECT,
-//!   the kernel's one opaque 401.
+//!   the kernel's one opaque 401; the plugin's own log names its reason (module `sigv4`), never
+//!   the signature, the secret or a token.
 //!
 //! NOTHING OF `verify`'S IS CACHED. Every `verify` reads the secret through the host's
 //! `records.secret` (the contract SDK's `VerifyOp::records_secret`): a `verify` whose read pends
@@ -111,7 +117,7 @@ use busbar_contract::abi::sdk::life::Refusal;
 use busbar_contract::abi::sdk::services::CredentialSecret;
 
 use crate::inbound::{Judgement, Read, SecretSource};
-use crate::instance::{diag, SigV4, Signed, Who, WARN};
+use crate::instance::{SigV4, Signed, Who};
 use crate::signing::SignFacts;
 
 /// The flags every field this plugin writes carries: NONE. 1.5.5 sent its credential headers
@@ -182,8 +188,9 @@ const MARKS: [MarkWord; 6] = [
     ),
 ];
 
-/// The diagnostic ids, in [`instance::diag`] order: 1.5.5's catalog codes where the line had one.
-const DIAG_IDS: [AbiStr; 1] = [abi_str("auth.sigv4-session-token-invalid-bytes")];
+/// The diagnostic ids: none (a credential that cannot sign is refused at open, or its request
+/// FAILS with the reason; nothing is noted beside a request sent unsigned).
+const DIAG_IDS: [AbiStr; 0] = [];
 
 /// What the plugin states: its name, version, concurrency, diagnostics, marks and auth tail.
 const STATEMENT: Statement = Statement {
@@ -267,12 +274,13 @@ fn sign_facts<'a>(view: &FieldsView<'a>, hash: &'a str) -> Option<SignFacts<'a>>
 }
 
 impl OutboundPlugin for SigV4 {
-    /// `validate`: present settings must be a JSON object (REFUSED with the reason).
+    /// `validate`: present settings must be a JSON object (FAILED with the reason, as `open` and
+    /// `refresh` answer the same settings).
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
         if settings_ok(settings) {
             Ok(())
         } else {
-            Err(Refusal::refused(SETTINGS_NOT_OBJECT))
+            Err(Refusal::failed(SETTINGS_NOT_OBJECT))
         }
     }
 
@@ -325,13 +333,10 @@ impl OutboundPlugin for SigV4 {
             match self.sign(view.handle(), who, sign_facts(view, &hash)) {
                 None => FieldsAnswer::Refused,
                 Some(Signed::NoFacts) => FieldsAnswer::Failed(Cow::Borrowed(NO_FACTS)),
-                Some(Signed::Fields { fields, note }) => {
+                Some(Signed::Failed(reason)) => FieldsAnswer::Failed(reason),
+                Some(Signed::Fields(fields)) => {
                     for (name, value) in &fields {
                         out.push(name.as_bytes(), value.as_bytes(), FIELD_FLAGS);
-                    }
-                    // The signer's line, as 1.5.5 logged it on each such request.
-                    if let Some(note) = note {
-                        out.diag(diag::SESSION_TOKEN_INVALID_BYTES, WARN, &*note);
                     }
                     FieldsAnswer::Ready
                 }
@@ -339,7 +344,9 @@ impl OutboundPlugin for SigV4 {
         )
     }
 
-    /// Always ready — a sigv4 binding never mints — for a handle this generation holds.
+    /// True for a handle this generation holds, false for any other: a sigv4 binding never mints,
+    /// so a held handle has nothing to wait for (whether a request can be signed is `fields`'
+    /// answer, per request).
     fn outbound_ready(&self, handle: u64) -> bool {
         self.binding(handle).is_some()
     }

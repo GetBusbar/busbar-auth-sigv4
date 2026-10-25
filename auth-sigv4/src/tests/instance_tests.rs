@@ -3,8 +3,7 @@
 
 //! THE HANDLE BOOKKEEPING AND `fields`' BODY ([`SigV4::sign`]), both credential modes — no mint,
 //! no wire, no waiting ticket: a sigv4 binding signs synchronously. The frames around it (the
-//! fields written under the short-buffer rule, the note in the reply's envelope) are the contract
-//! kit's, driven through the real loader by the `-plugin` crate's conformance script.
+//! fields written under the short-buffer rule, a FAILED call's reason) are the contract kit's, driven through the real loader by the `-plugin` crate's conformance script.
 
 use super::*;
 use crate::sigv4::sha256_hex;
@@ -24,27 +23,24 @@ fn who(mode: u32, caller: &str) -> Who<'_> {
     }
 }
 
-/// What a `fields` call answers for `signed`: its outcome, whether it set any field, and how many
-/// diagnostics it reported.
-fn answered(signed: Option<Signed>) -> (Outcome, bool, usize) {
+/// What a `fields` call answers for `signed`: its outcome, whether it set any field, and a FAILED
+/// call's reason (empty otherwise).
+fn answered(signed: Option<Signed>) -> (Outcome, bool, String) {
     match signed {
-        None => (Outcome::Refused, false, 0),
-        Some(Signed::NoFacts) => (Outcome::Failed, false, 0),
-        Some(Signed::Fields { fields, note }) => (
-            Outcome::Ready,
-            !fields.is_empty(),
-            usize::from(note.is_some()),
-        ),
+        None => (Outcome::Refused, false, String::new()),
+        Some(Signed::NoFacts) => (Outcome::Failed, false, String::new()),
+        Some(Signed::Failed(reason)) => (Outcome::Failed, false, reason.into_owned()),
+        Some(Signed::Fields(fields)) => (Outcome::Ready, !fields.is_empty(), String::new()),
     }
 }
 
 fn fields(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bool) {
-    let (outcome, signed, _) = fields_noted(s, handle, mode, caller);
+    let (outcome, signed, _) = fields_said(s, handle, mode, caller);
     (outcome, signed)
 }
 
-/// [`fields`], with how many diagnostics the call reported.
-fn fields_noted(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bool, usize) {
+/// [`fields`], with a FAILED call's reason.
+fn fields_said(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bool, String) {
     let hash = sha256_hex(b"");
     // The host lends the walked request's method on every call.
     let facts = SignFacts {
@@ -62,7 +58,7 @@ fn fields_noted(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bo
 /// The `authorization` field among `signed`'s fields.
 fn authorization_of(signed: Option<Signed>) -> String {
     match signed {
-        Some(Signed::Fields { fields, .. }) => fields
+        Some(Signed::Fields(fields)) => fields
             .iter()
             .find(|(n, _)| n == "authorization")
             .map(|(_, v)| v.as_str().to_owned())
@@ -91,21 +87,28 @@ fn own_mode_signs_with_the_operator_credential_and_passthrough_with_the_callers(
         (Outcome::Ready, true),
         "the caller's own credential signs, independent of the operator's binding"
     );
+    // OWNER RULING (was: READY with no field): the request is not sent unsigned.
     assert_eq!(
-        fields(&s, handle, MODE_PASSTHROUGH, ""),
-        (Outcome::Ready, false),
-        "no caller credential: nothing to sign with, no fields"
+        fields_said(&s, handle, MODE_PASSTHROUGH, ""),
+        (Outcome::Failed, false, NO_CALLER_CREDENTIAL.to_string()),
+        "no caller credential: nothing to sign with, so the request fails with the reason"
     );
 }
 
+/// OWNER RULING (was: own mode on a keyless binding answered READY with no field): a binding with
+/// no credential of its own FAILS in own mode, with the reason, and still serves passthrough.
 #[test]
-fn a_keyless_binding_signs_nothing_in_own_mode_but_still_serves_passthrough() {
+fn a_keyless_binding_fails_in_own_mode_but_still_serves_passthrough() {
     let s = SigV4::new(1);
     let handle = open(&s, None);
     assert_eq!(
-        fields(&s, handle, MODE_OWN, ""),
-        (Outcome::Ready, false),
-        "no operator credential: no header, not a fault"
+        fields_said(&s, handle, MODE_OWN, ""),
+        (
+            Outcome::Failed,
+            false,
+            crate::signing::NO_OWN_CREDENTIAL.to_string()
+        ),
+        "no operator credential: the request is not sent unsigned"
     );
     assert_eq!(
         fields(&s, handle, MODE_PASSTHROUGH, "AKIDCALLER:CALLERSECRET"),
@@ -113,32 +116,65 @@ fn a_keyless_binding_signs_nothing_in_own_mode_but_still_serves_passthrough() {
     );
 }
 
-/// A credential whose session token no header value may carry signs nothing, and EACH request
-/// reports the signer's line on its `fields` envelope (1.5.5 logged it per request; the open
-/// reports nothing, as 1.5.5's boot did not), in either mode; a merely malformed one reports none.
+/// OWNER RULING (was: a credential whose session token no header value may carry opened, and each
+/// request signed nothing beside a WARN note): the operator's is refused at open, and a caller's
+/// FAILS its request, each naming the finding, never the credential's bytes.
 #[test]
-fn an_unsendable_session_token_is_noted_on_each_fields_call() {
-    let s = SigV4::new(1);
-    let handle = open(&s, Some("AKID:SECRET:TOK\r\nEN"));
-    for _ in 0..2 {
-        assert_eq!(
-            fields_noted(&s, handle, MODE_OWN, ""),
-            (Outcome::Ready, false, 1)
+fn an_unsendable_or_malformed_credential_is_refused_at_open_or_fails_its_request() {
+    for operator in ["AKID:SECRET:TOK\r\nEN", "not-a-valid-key"] {
+        assert!(
+            style::open_binding(
+                style::SIGV4,
+                Some(operator.as_bytes()),
+                Some(SETTINGS.as_bytes())
+            )
+            .is_err(),
+            "{operator:?} is refused at open"
         );
     }
+    let s = SigV4::new(1);
     let quiet = open(&s, Some("AKID:SECRET:CLEAN"));
+    assert_eq!(fields(&s, quiet, MODE_OWN, ""), (Outcome::Ready, true));
+    for (caller, reason) in [
+        (
+            "AKID:SECRET:TOK\r\nEN",
+            "caller credential: the session token holds a byte no header value may carry",
+        ),
+        (
+            "not-a-valid-key",
+            "caller credential: expected ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]",
+        ),
+        (
+            ":",
+            "caller credential: the access key id is empty; caller credential: the secret \
+             access key is empty",
+        ),
+    ] {
+        assert_eq!(
+            fields_said(&s, quiet, MODE_PASSTHROUGH, caller),
+            (Outcome::Failed, false, reason.to_string()),
+            "{caller:?}"
+        );
+    }
     assert_eq!(
-        fields_noted(&s, quiet, MODE_OWN, ""),
-        (Outcome::Ready, true, 0)
-    );
-    assert_eq!(
-        fields_noted(&s, quiet, MODE_PASSTHROUGH, "AKID:SECRET:TOK\r\nEN"),
-        (Outcome::Ready, false, 1)
-    );
-    let malformed = open(&s, Some("not-a-valid-key"));
-    assert_eq!(
-        fields_noted(&s, malformed, MODE_OWN, ""),
-        (Outcome::Ready, false, 0)
+        answered(s.sign(
+            quiet,
+            Who::Caller(Some(&[0xff_u8][..])),
+            Some(SignFacts {
+                method: "POST",
+                host: "h",
+                path: "/p",
+                query: None,
+                content_type: None,
+                payload_hash: &sha256_hex(b""),
+                timestamp_epoch: 1,
+            })
+        )),
+        (
+            Outcome::Failed,
+            false,
+            "caller credential: the credential is not UTF-8".to_string()
+        )
     );
 }
 
@@ -434,15 +470,10 @@ fn tick_holds_todays_day_key_on_each_open_binding() {
     );
 }
 
-/// The unsendable-token line capitalises the service's first CHARACTER, not its first byte: a
-/// service that opens with a multi-byte character builds the line instead of panicking at bind.
+/// A service that opens with a multi-byte character binds and is kept (the unsendable-token line
+/// that capitalised its first character is gone: such a credential is refused at open).
 #[test]
-fn the_unsendable_line_capitalises_a_multibyte_initial() {
-    assert_eq!(
-        SigV4::note_unsendable("ébedrock"),
-        "Ébedrock lane session token contains a byte rejected by HeaderValue; skipping signing to \
-         avoid a signed-but-absent x-amz-security-token header."
-    );
+fn a_multibyte_service_binds_and_is_kept() {
     let s = SigV4::new(1);
     let settings = r#"{"service":"ébedrock","region":"us-east-1"}"#;
     let binding =

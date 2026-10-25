@@ -94,3 +94,14 @@ fn hmac_agrees_with_ring_across_block_boundaries() {
         }
     }
 }
+
+/// `validate` answers settings that are not a JSON object with the same outcome `open` and
+/// `refresh` do: FAILED (it answered REFUSED, which says "not this plugin's call").
+#[test]
+fn validate_fails_settings_that_are_not_an_object() {
+    use busbar_contract::abi::mechanism::call::Outcome;
+    use busbar_contract::abi::sdk::auth_outbound::OutboundPlugin;
+    let refusal = <crate::instance::SigV4 as OutboundPlugin>::validate(b"[]")
+        .expect_err("an array is not the settings object");
+    assert_eq!(refusal.outcome(), Outcome::Failed);
+}

@@ -1360,3 +1360,53 @@ fn a_mixed_case_signed_headers_list_is_refused_before_the_signature_compare() {
         Err(VerifyError::SignedHeadersMismatch)
     );
 }
+
+/// A `Request`'s `Debug` names its header lines and never prints their values: the Authorization
+/// signature and the session token ride in them.
+#[test]
+fn a_requests_debug_names_its_lines_but_prints_no_value() {
+    let req = Request {
+        method: b"POST",
+        path: PATH.as_bytes(),
+        query: Some(b"a=1"),
+        lines: vec![
+            (
+                &b"authorization"[..],
+                &b"AWS4-HMAC-SHA256 Signature=SIGSECRET"[..],
+            ),
+            (&b"x-amz-security-token"[..], &b"SECRETTOK"[..]),
+        ],
+        body: Some(b"BODYSECRET"),
+        now: NOW,
+    };
+    let printed = format!("{req:?}");
+    for secret in ["SECRETTOK", "SIGSECRET", "BODYSECRET"] {
+        assert!(!printed.contains(secret), "{secret} leaked: {printed}");
+    }
+    assert!(printed.contains("x-amz-security-token"), "{printed}");
+    assert!(printed.contains("POST"), "{printed}");
+}
+
+/// A rejected SigV4 request is logged (module `sigv4`, its reason), never with the signature or
+/// the secret; the client still gets the one opaque 401.
+#[test]
+fn a_bad_signature_reject_is_logged_without_the_signature() {
+    let s = sign("not-the-secret", AKID, None, b"", None);
+    let signature = s.auth.rsplit("Signature=").next().unwrap().to_string();
+    let cap = busbar_contract::testkit::WarnCapture::capturing_debug();
+    let judged = tracing::subscriber::with_default(cap.clone(), || {
+        run(&s.lines, None, Some(b""), &mut Fake::default())
+    });
+    assert_eq!(judged, Judgement::Reject);
+    let logged = cap.messages().join("\n");
+    assert!(logged.contains("module=sigv4"), "{logged:?}");
+    assert!(
+        logged.contains("signature mismatch or credential not live"),
+        "{logged:?}"
+    );
+    assert!(
+        !logged.contains(&signature),
+        "the signature leaked: {logged:?}"
+    );
+    assert!(!logged.contains(SECRET), "the secret leaked: {logged:?}");
+}

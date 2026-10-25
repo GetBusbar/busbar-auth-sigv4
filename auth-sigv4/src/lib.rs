@@ -231,6 +231,9 @@ const SETTINGS_NOT_OBJECT: &str = "busbar-auth-sigv4 settings must be a JSON obj
 /// The refusal `open_outbound` answers for a bind that names no style.
 const NO_STYLE: &str = "settings: no outbound auth style was named";
 
+/// The reason `fields` answers FAILED with when the host lent no method, host or path to sign.
+const NO_FACTS: &str = "sigv4 cannot sign: the host lent no method, host or path";
+
 /// A request fact as text: UTF-8 and not empty; `None` when the host lent none.
 fn fact(b: &[u8]) -> Option<&str> {
     std::str::from_utf8(b).ok().filter(|s| !s.is_empty())
@@ -321,7 +324,7 @@ impl OutboundPlugin for SigV4 {
         Poll::Ready(
             match self.sign(view.handle(), who, sign_facts(view, &hash)) {
                 None => FieldsAnswer::Refused,
-                Some(Signed::NoFacts) => FieldsAnswer::Failed(Cow::Borrowed("")),
+                Some(Signed::NoFacts) => FieldsAnswer::Failed(Cow::Borrowed(NO_FACTS)),
                 Some(Signed::Fields { fields, note }) => {
                     for (name, value) in &fields {
                         out.push(name.as_bytes(), value.as_bytes(), FIELD_FLAGS);

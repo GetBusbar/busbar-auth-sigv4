@@ -287,17 +287,6 @@ impl SigV4Binding {
         }
     }
 
-    /// The datestamps whose keys are held, oldest first.
-    #[cfg(test)]
-    pub fn held(&self) -> Vec<String> {
-        self.keys
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .map(|k| k.datestamp.clone())
-            .collect()
-    }
-
     /// `tick`: hold today's key, and tomorrow's once within [`PREDERIVE_AHEAD_SECS`] of midnight.
     pub fn prederive(&self, now_epoch: u64) {
         let (_, today) = sigv4::format_amz_time(now_epoch);

@@ -23,7 +23,7 @@ pub fn z<T>() -> T {
 /// The plugin's auth table, read off its `'static` door.
 pub fn ops() -> Ops {
     // SAFETY: the plugin's door is `'static` plain data, its `ops` the auth table it states.
-    unsafe { *(*busbar_auth_sigv4::door()).ops.cast::<Ops>() }
+    unsafe { *busbar_auth_sigv4::door().ops().cast::<Ops>() }
 }
 
 /// An `in` head for slot `op` over a frame of `I`.

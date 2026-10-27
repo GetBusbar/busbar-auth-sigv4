@@ -89,7 +89,6 @@ mod style;
 
 use std::borrow::Cow;
 use std::mem::size_of;
-use std::ptr;
 use std::task::Poll;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -105,7 +104,8 @@ use busbar_contract::abi::mechanism::door::{
 };
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::{
-    carrier, Answer, Strip, Verdict, VerifiedIdentity, VerifyOp, VerifyPlugin, VerifyView,
+    carrier, with_tail, Answer, Strip, Verdict, VerifiedIdentity, VerifyOp, VerifyPlugin,
+    VerifyView,
 };
 use busbar_contract::abi::sdk::auth_outbound::{
     Diags, Driven, FieldsAnswer, FieldsView, FieldsWriter, Mode, OpenRefusal, OutboundPlugin,
@@ -188,19 +188,13 @@ const MARKS: [MarkWord; 6] = [
     ),
 ];
 
-/// The diagnostic ids: none (a credential that cannot sign is refused at open, or its request
-/// FAILS with the reason; nothing is noted beside a request sent unsigned).
-const DIAG_IDS: [AbiStr; 0] = [];
-
-/// What the plugin states: its name, version, concurrency, diagnostics, marks and auth tail.
-const STATEMENT: Statement = Statement {
-    kind_tail: ptr::from_ref(TAIL).cast::<KindTailHead>(),
-    diag_ids: DIAG_IDS.as_ptr(),
-    diag_ids_len: DIAG_IDS.len(),
-    mark_words: MARKS.as_ptr(),
-    mark_words_len: MARKS.len(),
-    ..statement("busbar-auth-sigv4", env!("CARGO_PKG_VERSION"), 1024)
-};
+/// What the plugin states: its name, version, concurrency, marks and auth tail. It states no
+/// diagnostic ids (a credential that cannot sign is refused at open, or its request FAILS with the
+/// reason; nothing is noted beside a request sent unsigned).
+const STATEMENT: Statement = with_tail(
+    statement("busbar-auth-sigv4", env!("CARGO_PKG_VERSION"), 1024).with_mark_words(&MARKS),
+    TAIL,
+);
 
 busbar_contract::auth_door!(verify_and_outbound: SigV4, STATEMENT);
 

@@ -26,9 +26,9 @@
 //! identity on the spot.
 
 // THE PUBLISHED CONFORMANCE SUITE (busbar-plugin-loader's `conformance` feature, TODO ABI-b4): the
-// auth kind's OUTBOUND script over this crate's linked door and its dropped-in cdylib (built with
-// `dropped-in`), driven by `conformance.json`; the hand-written both-ways proof below stays beside
-// it. `plugin-ci.yml` runs the suite under `--release` once the crate lives in its own repo.
+// auth kind's OUTBOUND script over this crate's linked door and its dropped-in cdylib (this crate,
+// which exports the logic crate's door), driven by `conformance.json`; the hand-written both-ways
+// proof below stays beside it. `plugin-ci.yml` runs the suite under `--release` once the crate lives in its own repo.
 busbar_plugin_loader::conformance_suite! {
     door: busbar_auth_sigv4::door,
     cdylib: "busbar_auth_sigv4_plugin",
@@ -201,13 +201,26 @@ fn fields_over(
     cap: (usize, usize),
     body: Option<&'static str>,
 ) -> String {
+    fields_for(p, handle, mode, caller, cap, body, facts())
+}
+
+/// [`fields_over`] for the walked request `request`.
+fn fields_for(
+    p: &Plugin<Auth>,
+    handle: u64,
+    mode: u32,
+    caller: Blob,
+    cap: (usize, usize),
+    body: Option<&'static str>,
+    request: RequestFacts,
+) -> String {
     let mut b = Buffers::new(cap.0, cap.1);
     let mut f: Frame<FieldsIn, FieldsOut> = Frame::new(z(), z());
     f.input.head = in_head();
     f.out.head = out_head();
     f.input.handle = handle;
     f.input.mode = mode;
-    f.input.request = facts();
+    f.input.request = request;
     // The header envelope the framer sends (the style declares STYLE_NEEDS_HEADERS): the JSON
     // content type the signature covers, as 1.5.5's signing writer signed it.
     let sent = [NamedValue {
@@ -681,7 +694,7 @@ fn script(p: &Plugin<Auth>, host: Option<(&Dispatcher, &Creds)>) -> Vec<String> 
 }
 
 const EXPECTED: &[&str] = &[
-    "validate [1] Refused busbar-auth-sigv4 settings must be a JSON object",
+    "validate [1] Failed busbar-auth-sigv4 settings must be a JSON object",
     "validate Ready",
     "open Ready",
     "open_outbound sigv4 Ready ",
@@ -706,7 +719,8 @@ const EXPECTED: &[&str] = &[
      Signature=SIGNATURE [flags=0] ; x-amz-date: 20150830T123600Z [flags=0] ; \
      x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 \
      [flags=0]",
-    "fields Ready  ",
+    "fields Failed sigv4: this binding holds no credential of its own (passthrough-only); the \
+     request is not sent unsigned",
     "fields Refused ",
     "fields Ready  authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/\
      svc/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;\
@@ -739,7 +753,16 @@ const EXPECTED: &[&str] = &[
     "close Ready",
 ];
 
-const EXPECTED_FOLDS: &[&str] = &[];
+/// The plugin's own log, folded into the host's: each inbound REJECT names its reason (module
+/// `sigv4`, at info), the AccessKeyId where one parsed, never the signature or the secret.
+const EXPECTED_FOLDS: &[&str] = &[
+    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"unparseable SigV4 authorization\"",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature mismatch or credential not live\" access_key_id=BBAKNOBODY",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature mismatch or credential not live\" access_key_id=BBAKNOBODY",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature mismatch or credential not live\" access_key_id=BBAKCONFORMANCE000002",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature mismatch or credential not live\" access_key_id=BBAKCONFORMANCE000001",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"payload hash mismatch\"",
+];
 
 /// The SigV4 signature depends on nothing but its inputs; it is replaced by a marker so the
 /// transcript reads, and pinned separately by `signing_tests` and the AWS vectors.
@@ -836,10 +859,12 @@ extern "C" fn sensitive_door() -> *const Door {
 
 #[test]
 fn red_a_sensitive_field_flag_is_not_the_1_5_5_bytes() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    // The same host as the green test, so the flag is the transcript's only difference.
+    let creds = Arc::new(Creds::default());
+    let d = Dispatcher::with_services(DispatchConfig::default(), creds.clone());
     let folds = Arc::new(Folds::default());
     let red = load_linked::<Auth>(&row(sensitive_door), bind(&folds, &d)).expect("the door loads");
-    let t = mask_signature(script(&red, None));
+    let t = mask_signature(script(&red, Some((&d, &creds))));
     assert_ne!(
         t, EXPECTED,
         "a sensitive flag must not pass as the 1.5.5 bytes"
@@ -876,4 +901,161 @@ fn red_a_writer_that_ignores_the_host_capacity_faults() {
     assert_eq!(red.call(life::OPEN, &mut o).outcome, Outcome::Ready);
     let (_, h) = open_outbound(&red, "sigv4", Some("AKIDEXAMPLE:SECRET"), SIGV4_SETTINGS);
     assert!(fields(&red, h, MODE_OWN, z(), (1024, 4)).starts_with("fields Fault"));
+}
+
+// ── THE FIELDS CALL'S FACTS AND DIAGS, THROUGH THE DOOR ─────────────────────────────────────────
+
+/// An opened linked instance over the inbound cell's host, with one sigv4 handle on `credential`.
+fn open_signing(credential: &'static str) -> (Arc<Folds>, Plugin<Auth>, u64) {
+    let creds = Arc::new(Creds::default());
+    let d = Dispatcher::with_services(DispatchConfig::default(), creds);
+    let folds = Arc::new(Folds::default());
+    let p = linked(&folds, &d);
+    let mut o: Frame<OpenIn, OpenOut> = Frame::new(z(), z());
+    o.input.head = in_head();
+    o.out.head = out_head();
+    o.input.generation = 1;
+    assert_eq!(p.call(life::OPEN, &mut o).outcome, Outcome::Ready);
+    let (line, handle) = open_outbound(&p, "sigv4", Some(credential), SIGV4_SETTINGS);
+    assert_eq!(line, "open_outbound sigv4 Ready ");
+    (folds, p, handle)
+}
+
+/// The walked request's method and query reach the signer: a GET with a query is signed over that
+/// query, so its signature is not the one of the same GET without it, nor of the POST.
+#[test]
+fn fields_signs_the_walked_requests_query_and_method_through_the_door() {
+    let (_, p, handle) = open_signing("AKIDEXAMPLE:SECRET");
+    let sign = |method: &'static str, query: Option<&'static str>| {
+        let mut request = facts();
+        request.method = s(method);
+        if let Some(q) = query {
+            request.query = s(q);
+        }
+        fields_for(&p, handle, MODE_OWN, z(), (1024, 4), None, request)
+    };
+    let get_with_query = sign("GET", Some("a=1&b=2"));
+    assert!(
+        get_with_query.starts_with("fields Ready  authorization: AWS4-HMAC-SHA256"),
+        "{get_with_query}"
+    );
+    assert_ne!(get_with_query, sign("GET", None), "the query is signed");
+    assert_ne!(
+        get_with_query,
+        sign("GET", Some("a=1&b=3")),
+        "its value too"
+    );
+    assert_ne!(
+        get_with_query,
+        sign("POST", Some("a=1&b=2")),
+        "the method too"
+    );
+    assert_eq!(
+        get_with_query,
+        sign("GET", Some("b=2&a=1")),
+        "sorted, as signed"
+    );
+}
+
+/// OWNER RULING (was: the credential opened, its fields call answered READY with no field and
+/// reported the signer's WARN line, diag id `auth.sigv4-session-token-invalid-bytes`): a credential
+/// whose session token holds a byte no header value may carry is refused at `open_outbound`,
+/// FAILED with the finding and never the token, and nothing is noted beside it.
+#[test]
+fn an_unsendable_session_token_is_refused_at_open_through_the_door() {
+    let creds = Arc::new(Creds::default());
+    let d = Dispatcher::with_services(DispatchConfig::default(), creds);
+    let folds = Arc::new(Folds::default());
+    let p = linked(&folds, &d);
+    let mut o: Frame<OpenIn, OpenOut> = Frame::new(z(), z());
+    o.input.head = in_head();
+    o.out.head = out_head();
+    o.input.generation = 1;
+    assert_eq!(p.call(life::OPEN, &mut o).outcome, Outcome::Ready);
+    let (line, _) = open_outbound(&p, "sigv4", Some("AKID:SECRET:bad\x01tok"), SIGV4_SETTINGS);
+    assert_eq!(
+        line,
+        "open_outbound sigv4 Failed credential: the session token holds a byte no header value \
+         may carry"
+    );
+    assert!(
+        std::mem::take(&mut *folds.0.lock().unwrap()).is_empty(),
+        "nothing is noted beside the refusal"
+    );
+}
+
+/// A `fields` call the host lends no authority cannot be signed: FAILED, and the failure says why
+/// (a refusal with an empty reason leaves the operator nothing to act on).
+#[test]
+fn a_fields_call_without_an_authority_fails_with_its_reason() {
+    let d = Dispatcher::new(DispatchConfig::default());
+    let folds = Arc::new(Folds::default());
+    let p = linked(&folds, &d);
+    let mut o: Frame<OpenIn, OpenOut> = Frame::new(z(), z());
+    o.input.head = in_head();
+    o.out.head = out_head();
+    assert_eq!(p.call(life::OPEN, &mut o).outcome, Outcome::Ready);
+    let (_, h) = open_outbound(&p, "sigv4", Some("AKIDEXAMPLE:SECRET"), SIGV4_SETTINGS);
+    let mut b = Buffers::new(1024, 4);
+    let mut f: Frame<FieldsIn, FieldsOut> = Frame::new(z(), z());
+    f.input.head = in_head();
+    f.out.head = out_head();
+    f.input.handle = h;
+    f.input.mode = MODE_OWN;
+    f.input.request = facts();
+    f.input.request.authority = s("");
+    f.input.point = POINT_HEAD_BODY;
+    (f.input.field_buf, f.input.field_buf_cap) = (b.buf.as_mut_ptr(), b.buf.len());
+    (f.input.fields, f.input.fields_cap) = (b.spans.as_mut_ptr(), b.spans.len() as u32);
+    let c = p.call(slot::FIELDS, &mut f);
+    assert_eq!(c.outcome, Outcome::Failed);
+    assert!(
+        !err(&c.error).is_empty(),
+        "a FAILED fields call names its reason"
+    );
+}
+
+/// OWNER RULING: `fields` never answers READY with no field. A binding with no credential of its
+/// own asked to sign in own mode, and a passthrough with no caller credential or a malformed one,
+/// each FAIL with the reason: the request is not sent unsigned.
+#[test]
+fn a_fields_call_with_nothing_to_sign_with_fails_with_its_reason() {
+    let creds = Arc::new(Creds::default());
+    let d = Dispatcher::with_services(DispatchConfig::default(), creds);
+    let folds = Arc::new(Folds::default());
+    let p = linked(&folds, &d);
+    let mut o: Frame<OpenIn, OpenOut> = Frame::new(z(), z());
+    o.input.head = in_head();
+    o.out.head = out_head();
+    o.input.generation = 1;
+    assert_eq!(p.call(life::OPEN, &mut o).outcome, Outcome::Ready);
+    let (line, keyless) = open_outbound(&p, "sigv4", None, SIGV4_SETTINGS);
+    assert_eq!(line, "open_outbound sigv4 Ready ");
+    assert_eq!(
+        fields(&p, keyless, MODE_OWN, z(), (1024, 4)),
+        "fields Failed sigv4: this binding holds no credential of its own (passthrough-only); \
+         the request is not sent unsigned"
+    );
+    assert_eq!(
+        fields(&p, keyless, MODE_PASSTHROUGH, z(), (1024, 4)),
+        "fields Failed sigv4 passthrough: the caller presented no credential; the request is \
+         not sent unsigned"
+    );
+    for (caller, reason) in [
+        (
+            "AKIDCALLER",
+            "caller credential: expected ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]",
+        ),
+        (
+            "AKIDCALLER:",
+            "caller credential: the secret access key is empty",
+        ),
+        (
+            "AKIDCALLER:CALLERSECRET:bad\x01tok",
+            "caller credential: the session token holds a byte no header value may carry",
+        ),
+    ] {
+        let line = fields(&p, keyless, MODE_PASSTHROUGH, secret(caller), (1024, 4));
+        assert_eq!(line, format!("fields Failed {reason}"), "{caller:?}");
+    }
 }

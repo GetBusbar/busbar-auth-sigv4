@@ -26,8 +26,11 @@
 //! revoked key and a bad signature reject alike.
 //!
 //! EVERY FAILURE IS ONE ANSWER ([`Judgement::Reject`]): the kernel maps it to its one opaque 401.
-//! The reason ([`VerifyError`]) never leaves this module, and nothing here logs: no secret, no
-//! signature, no body is ever written anywhere.
+//! The reason never reaches the client: [`judge`] names a coarse category in the plugin's OWN log
+//! (module `sigv4`; an end-user decline at `info`, a host read failure at `warn`), with the
+//! AccessKeyId (an identifier) where one parsed. The signature-stage reasons share one category,
+//! so the log does not tell an unknown AccessKeyId from a bad signature either. No secret, no
+//! signature, no token, no body is ever written anywhere.
 
 use zeroize::Zeroizing;
 
@@ -54,25 +57,17 @@ const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
 const DUMMY_SECRET: &str = "AWS4-DUMMY-SECRET-FOR-CONSTANT-TIME-REJECT-PATH";
 
 /// Canonicalize a signed-header value per AWS SigV4: trim leading/trailing ASCII spaces (0x20) and
-/// collapse each run of sequential ASCII spaces to a single space — EXCEPT inside a quoted string,
-/// whose spaces are significant and pass through verbatim. ONLY the ASCII space character is treated
-/// as whitespace — tabs, NBSP (U+00A0), newlines, and every other Unicode whitespace codepoint are
-/// preserved verbatim, because AWS does the same. (This is intentionally NOT `split_whitespace`,
-/// which would also fold tabs/NBSP/newlines and break the signature.)
-///
-/// The quote state matters because a header whose value carries a quoted string (a `user-agent`
-/// comment, a `content-disposition` filename) is signed by the client with those interior spaces
-/// intact; folding them here produced a canonical value the client never signed, so a correctly
-/// signed request was rejected.
+/// collapse each run of sequential ASCII spaces to a single space, quoted or not (AWS and botocore
+/// do not treat quotes specially). ONLY the ASCII space character is treated as whitespace — tabs,
+/// NBSP (U+00A0), newlines, and every other Unicode whitespace codepoint are preserved verbatim,
+/// because AWS does the same. (This is intentionally NOT `split_whitespace`, which would also fold
+/// tabs/NBSP/newlines and break the signature.) Matches busbar 1.5.5
+/// (`crates/busbar/src/sigv4.rs:137-155`).
 fn canonicalize_header_value(v: &str) -> String {
     let mut out = String::with_capacity(v.len());
     let mut prev_space = false;
-    let mut in_quotes = false;
     for ch in v.chars() {
-        if ch == '"' {
-            in_quotes = !in_quotes;
-        }
-        if ch == ' ' && !in_quotes {
+        if ch == ' ' {
             // Defer emitting until we know it is not a trailing run; mark that a space is pending.
             prev_space = true;
         } else {
@@ -106,7 +101,7 @@ pub fn sign_v4(
 ) -> (String, String) {
     let mut h: Vec<(String, String)> = headers
         .iter()
-        // AWS SigV4 canonicalization of a (non-quoted) header value: trim leading/trailing ASCII
+        // AWS SigV4 canonicalization of a header value, quoted or not: trim leading/trailing ASCII
         // spaces (0x20) AND collapse runs of sequential ASCII spaces to a single space. AWS operates
         // on ASCII space ONLY — NBSP (U+00A0), tabs, and other Unicode whitespace are NOT treated as
         // whitespace and must pass through verbatim, byte-for-byte, into the signed value.
@@ -369,28 +364,31 @@ pub fn verify_inbound_sigv4(
     if !signed.iter().any(|h| h.eq_ignore_ascii_case("host")) {
         return Err(VerifyError::SignedHeadersMismatch);
     }
-    // A header name may legally appear SEVERAL times in one request. AWS canonicalizes such a name
-    // to ONE entry whose value is every occurrence's value joined with a comma, in the order the
-    // values appear in the request.
+    // The claimed list must equal the computed one (lowercased, sorted) to verify, so this refuses
+    // nothing that could verify except a list that repeats a name, which no compliant SigV4 client
+    // sends. Without it a list repeating one name N times copies that header's value N times
+    // before any secret is involved (pre-auth amplification).
+    let mut prev: Option<&str> = None;
+    for name in &signed {
+        if name.bytes().any(|b| b.is_ascii_uppercase()) || prev.is_some_and(|p| p >= *name) {
+            return Err(VerifyError::SignedHeadersMismatch);
+        }
+        prev = Some(name);
+    }
+    // Each signed name takes the FIRST matching request header's value (case-insensitive), as
+    // busbar 1.5.5 does (`crates/busbar/src/sigv4.rs:446-460`); a signed name the request does not
+    // carry cannot be reconstructed. `sign_v4` canonicalizes the value.
     let mut selected: Vec<(String, String)> = Vec::with_capacity(signed.len());
     for name in &signed {
         let lname = name.to_ascii_lowercase();
-        let mut values = req
+        let Some((_, value)) = req
             .headers
             .iter()
-            .filter(|(k, _)| k.eq_ignore_ascii_case(&lname))
-            .map(|(_, v)| v.as_str())
-            .peekable();
-        if values.peek().is_none() {
+            .find(|(k, _)| k.eq_ignore_ascii_case(&lname))
+        else {
             return Err(VerifyError::SignedHeadersMismatch);
-        }
-        // Canonicalize each occurrence BEFORE joining: AWS trims and collapses each value, then
-        // joins. `sign_v4` canonicalizes again, which is idempotent.
-        let joined = values
-            .map(canonicalize_header_value)
-            .collect::<Vec<_>>()
-            .join(",");
-        selected.push((lname, joined));
+        };
+        selected.push((lname, value.clone()));
     }
 
     // (4) Recompute — same canonicalization, byte-for-byte.
@@ -458,7 +456,9 @@ fn header_str(v: &[u8]) -> Option<&str> {
 }
 
 /// One `verify`'s request, as the check reads it: the facts the host hands in, raw as received.
-#[derive(Debug, Clone, Default)]
+/// Its `Debug` prints the method, the path, the field NAMES and the body's length only: the
+/// `authorization` and `x-amz-security-token` values (and the query and body) carry credentials.
+#[derive(Clone, Default)]
 pub struct Request<'a> {
     /// The method, as given.
     pub method: &'a [u8],
@@ -472,6 +472,24 @@ pub struct Request<'a> {
     pub body: Option<&'a [u8]>,
     /// Wall-clock seconds, read once by the host for this call.
     pub now: u64,
+}
+
+impl std::fmt::Debug for Request<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<std::borrow::Cow<'_, str>> = self
+            .lines
+            .iter()
+            .map(|(n, _)| String::from_utf8_lossy(n))
+            .collect();
+        f.debug_struct("Request")
+            .field("method", &String::from_utf8_lossy(self.method))
+            .field("path", &String::from_utf8_lossy(self.path))
+            .field("query", &self.query.map(|_| "<redacted>"))
+            .field("lines", &names)
+            .field("body_len", &self.body.map(<[u8]>::len))
+            .field("now", &self.now)
+            .finish()
+    }
 }
 
 impl Request<'_> {
@@ -490,47 +508,68 @@ impl Request<'_> {
     }
 }
 
-/// Does the request carry an inbound AWS SigV4 `Authorization` header (`AWS4-HMAC-SHA256 ...`)?
-/// The kernel's `has_sigv4_authorization`: the FIRST `authorization` line, read as visible ASCII,
-/// trimmed at the start, opens with the algorithm token. Everything else (bearer, no Authorization)
-/// is not this plugin's credential.
 /// Whether the request's credential is this plugin's: a SigV4 `authorization` line, which `verify`
 /// names for the transport to strip whatever its verdict.
 pub(crate) fn carries_sigv4(req: &Request<'_>) -> bool {
     sigv4_authorization(req).is_some()
 }
 
+/// The request's inbound AWS SigV4 `Authorization` value (`AWS4-HMAC-SHA256 ...`), the kernel's
+/// `has_sigv4_authorization`: the FIRST `authorization` line, read as visible ASCII, trimmed at the
+/// start, opens with the algorithm token. Everything else (bearer, no Authorization) is not this
+/// plugin's credential.
 fn sigv4_authorization<'r>(req: &'r Request<'_>) -> Option<&'r str> {
     req.first(AUTHORIZATION)
         .and_then(header_str)
         .filter(|v| v.trim_start().starts_with(SIGV4_ALGORITHM))
 }
 
+/// A secret's bytes, as the check reads them: the host's answer (the contract's
+/// `CredentialSecret`, wiped on drop) on the request path, a wiped buffer in the unit tests.
+pub trait SecretBytes {
+    /// The secret's bytes.
+    fn bytes(&self) -> &[u8];
+}
+
+impl SecretBytes for Zeroizing<Vec<u8>> {
+    fn bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+impl SecretBytes for busbar_contract::abi::sdk::services::CredentialSecret {
+    fn bytes(&self) -> &[u8] {
+        self.secret()
+    }
+}
+
 /// What the host's `records.secret` answered for one credential.
-pub enum Read {
-    /// The secret (span `0`'s bytes, wiped on drop), and whether the credential is live. For an id
-    /// the host does not hold, its fixed dummy secret, not live.
+pub enum Read<S: SecretBytes = Zeroizing<Vec<u8>>> {
+    /// The secret (wiped on drop), and whether the credential is live. For an id the host does not
+    /// hold, its fixed dummy secret, not live.
     Secret {
         /// The secret's bytes.
-        secret: Zeroizing<Vec<u8>>,
+        secret: S,
         /// `SECRET_LIVE`.
         live: bool,
     },
-    /// The host holds the call on the op's ticket: answer PENDING and re-issue the same handle.
+    /// The read pends: on the op's ticket (answer PENDING; the resumed call re-issues the same
+    /// handle and reads the stored answer), or on none (`records.secret` may pend, so a ticket-less
+    /// `verify` cannot make it: the door answers REFUSED, and the host submits the same `verify` on
+    /// a ticket).
     Pending,
-    /// The read cannot be made on this call (a ticket-less `verify`: `records.secret` may pend, so
-    /// the host refuses it there): answer REFUSED, and the host submits the same `verify` on a
-    /// ticket.
-    NotNow,
     /// The host serves no `records.secret`, refused or failed it, or broke its rules: fail closed.
     Unavailable,
 }
 
 /// Where the check reads a credential's secret: the host's `records.secret` on the request path, a
-/// fake in the unit tests.
+/// fake in the unit tests. Read on EVERY check: nothing is cached between two.
 pub trait SecretSource {
+    /// The secret's holder.
+    type Secret: SecretBytes;
+
     /// The secret of credential `id` of `kind`.
-    fn read(&mut self, kind: &str, id: &str) -> Read;
+    fn read(&mut self, kind: &str, id: &str) -> Read<Self::Secret>;
 }
 
 /// The check's answer for one request.
@@ -542,14 +581,19 @@ pub enum Judgement {
     Reject,
     /// Verified, and the credential is live: the identity's subject is the AccessKeyId.
     Identity(String),
-    /// The secret read pends on the op's ticket.
+    /// The secret read pends (on the op's ticket, or on none: the door answers REFUSED).
     Pending,
-    /// The secret cannot be read on this (ticket-less) call.
-    NotNow,
+}
+
+/// A REJECT, its reason logged at `info` in the plugin's own log (module `sigv4`): an end-user
+/// decline. The client still gets the one opaque 401; no signature, secret or token is logged.
+fn reject(reason: &'static str) -> Judgement {
+    tracing::info!(module = "sigv4", reason, "sigv4 inbound request rejected");
+    Judgement::Reject
 }
 
 /// Judge one request: the kernel's SigV4 pre-step and `verify_sigv4_ingress_credential`, in its
-/// order, the secret read through `source`.
+/// order, the secret read through `source`. Every REJECT names its reason in the plugin's log.
 pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
     // ENTRY (the kernel's `has_sigv4_authorization`): not a SigV4 Authorization is not ours.
     let Some(auth_value) = sigv4_authorization(req) else {
@@ -559,14 +603,20 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
     // `x-amz-content-sha256` / `x-amz-date` lines are present. All three are attacker-known, so this
     // is not an oracle: it never depends on whether an AccessKeyId is valid.
     let Ok(parsed) = parse_authorization_header(auth_value) else {
-        return Judgement::Reject;
+        return reject("unparseable SigV4 authorization");
     };
     if !req.has(X_AMZ_CONTENT_SHA256) || !req.has(X_AMZ_DATE) {
-        return Judgement::Reject;
+        return reject("no x-amz-content-sha256 or x-amz-date line");
     }
     // The kernel buffered the body here, a buffering failure the same opaque 401: a body the host
     // did not lend cannot be bound to the signed hash.
     let Some(body) = req.body else {
+        // The host broke its own `HeadBody` rule: an operator matter, not the client's.
+        tracing::warn!(
+            module = "sigv4",
+            reason = "the host lent no body",
+            "sigv4 inbound request rejected: the signed payload hash cannot be checked"
+        );
         return Judgement::Reject;
     };
 
@@ -596,23 +646,23 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
         .find(|(k, _)| k == X_AMZ_CONTENT_SHA256)
         .map(|(_, v)| v.clone())
     else {
-        return Judgement::Reject;
+        return reject("x-amz-content-sha256 is not signed");
     };
     // BODY INTEGRITY: `UNSIGNED-PAYLOAD` is refused for governed ingress, and the body's own hash
     // must equal the signed declared hash (lowercase hex, constant time).
     if payload_hash.eq_ignore_ascii_case(UNSIGNED_PAYLOAD) {
-        return Judgement::Reject;
+        return reject("unsigned payload refused");
     }
     let actual_body_hash = sha256_hex(body);
     if !constant_time_eq(&actual_body_hash, &payload_hash.to_ascii_lowercase()) {
-        return Judgement::Reject;
+        return reject("payload hash mismatch");
     }
     let Some(amzdate) = headers
         .iter()
         .find(|(k, _)| k == X_AMZ_DATE)
         .map(|(_, v)| v.clone())
     else {
-        return Judgement::Reject;
+        return reject("x-amz-date is not signed");
     };
 
     // The request's own facts, as the kernel read them off its `Uri` and `Method`.
@@ -620,12 +670,12 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
         std::str::from_utf8(req.method),
         std::str::from_utf8(req.path),
     ) else {
-        return Judgement::Reject;
+        return reject("the method or path is not UTF-8");
     };
     let query = match req.query.map(std::str::from_utf8) {
         None => None,
         Some(Ok(q)) => Some(q),
-        Some(Err(_)) => return Judgement::Reject,
+        Some(Err(_)) => return reject("the query is not UTF-8"),
     };
     // `Uri::path` never answers an empty path: it reads `/` for one.
     let path = if path.is_empty() { "/" } else { path };
@@ -646,10 +696,18 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
     let (secret, live) = match source.read(CREDENTIAL_KIND, &parsed.access_key_id) {
         Read::Secret { secret, live } => (secret, live),
         Read::Pending => return Judgement::Pending,
-        Read::NotNow => return Judgement::NotNow,
-        Read::Unavailable => return Judgement::Reject,
+        Read::Unavailable => {
+            // An outage-like read failure: operator-actionable, so WARN.
+            tracing::warn!(
+                module = "sigv4",
+                reason = "credential unavailable",
+                access_key_id = %parsed.access_key_id,
+                "sigv4 inbound request rejected: the host's records.secret did not answer"
+            );
+            return Judgement::Reject;
+        }
     };
-    let (text, utf8) = match std::str::from_utf8(&secret) {
+    let (text, utf8) = match std::str::from_utf8(secret.bytes()) {
         Ok(s) => (s, true),
         Err(_) => (DUMMY_SECRET, false),
     };
@@ -659,6 +717,14 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
     if std::hint::black_box(u8::from(verified) & u8::from(live) & u8::from(utf8)) == 1 {
         Judgement::Identity(parsed.access_key_id)
     } else {
+        // One reason for every cause, as the client's one 401: the log must not tell an unknown
+        // AccessKeyId from a known one. The id is an identifier, not a secret.
+        tracing::info!(
+            module = "sigv4",
+            reason = "signature mismatch or credential not live",
+            access_key_id = %parsed.access_key_id,
+            "sigv4 inbound request rejected"
+        );
         Judgement::Reject
     }
 }

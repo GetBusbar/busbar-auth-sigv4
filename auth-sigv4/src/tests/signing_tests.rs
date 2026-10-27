@@ -6,6 +6,18 @@
 
 use super::*;
 
+impl SigV4Binding {
+    /// The datestamps whose keys are held, oldest first.
+    pub(crate) fn held(&self) -> Vec<String> {
+        self.keys
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|k| k.datestamp.clone())
+            .collect()
+    }
+}
+
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
 
 fn params() -> SigV4Params {
@@ -44,9 +56,9 @@ fn session_token_is_sent_and_signed_over_the_writer_header_set() {
     let hash = sigv4::sha256_hex(br#"{"messages":[]}"#);
     let b = SigV4Binding::new(
         params(),
-        SigningCredential::split(&format!("AKIDEXAMPLE:{SECRET}:SESSIONTOKEN")),
+        SigningCredential::parse(&format!("AKIDEXAMPLE:{SECRET}:SESSIONTOKEN")).ok(),
     );
-    let sent = b.sign(&facts(&hash));
+    let sent = b.sign(&facts(&hash)).expect("signs");
     assert_eq!(
         sent.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
         [
@@ -94,37 +106,51 @@ fn session_token_is_sent_and_signed_over_the_writer_header_set() {
     );
 }
 
-/// Every credential 1.5.5 refused to sign with signs nothing: a session token the wire cannot
-/// carry, an empty secret or access key id (the split refuses those), no credential at all.
+/// OWNER RULING: a credential 1.5.5 bound to sign nothing — a session token the wire cannot carry,
+/// an empty secret or access key id, an access key id no header value may carry — is refused when
+/// it is parsed, naming what is wrong; and a binding with no credential of its own signs nothing
+/// in own mode but says so (was: each signed an empty field set, silently).
 #[test]
-fn unsendable_or_incomplete_signing_credentials_sign_nothing() {
+fn unsendable_or_incomplete_signing_credentials_are_refused_not_signed_with_nothing() {
     let hash = sigv4::sha256_hex(b"{}");
-    for raw in [
-        format!("AKIDEXAMPLE:{SECRET}:TOK\r\nEN"),
-        format!("AKIDEXAMPLE:{SECRET}:TOK\u{1}EN"),
-        "AKIDEXAMPLE:".to_string(),
-        format!(":{SECRET}"),
+    for (raw, finding) in [
+        (
+            format!("AKIDEXAMPLE:{SECRET}:TOK\r\nEN"),
+            SESSION_TOKEN_UNSENDABLE,
+        ),
+        (
+            format!("AKIDEXAMPLE:{SECRET}:TOK\u{1}EN"),
+            SESSION_TOKEN_UNSENDABLE,
+        ),
+        ("AKIDEXAMPLE:".to_string(), SECRET_EMPTY),
+        (format!(":{SECRET}"), ACCESS_KEY_ID_EMPTY),
+        (format!("AKID\u{7f}:{SECRET}"), ACCESS_KEY_ID_UNSENDABLE),
     ] {
-        let b = SigV4Binding::new(params(), SigningCredential::split(&raw));
-        assert!(
-            b.sign(&facts(&hash)).is_empty(),
-            "{raw:?} must sign nothing"
+        assert_eq!(
+            SigningCredential::parse(&raw).map(|_| ()),
+            Err(vec![finding]),
+            "{raw:?}"
         );
     }
-    assert!(SigV4Binding::new(params(), None)
-        .sign(&facts(&hash))
-        .is_empty());
+    assert_eq!(
+        SigV4Binding::new(params(), None).sign(&facts(&hash)),
+        Err(NO_OWN_CREDENTIAL)
+    );
 }
 
-/// An access key id that makes the `Authorization` value illegal signs nothing.
+/// A service or region no header value may carry makes the `Authorization` value unsendable: the
+/// request FAILS with the reason, never sent unsigned.
 #[test]
-fn an_access_key_id_the_wire_cannot_carry_signs_nothing() {
+fn an_authorization_the_wire_cannot_carry_fails_with_its_reason() {
     let hash = sigv4::sha256_hex(b"{}");
     let b = SigV4Binding::new(
-        params(),
-        SigningCredential::split(&format!("AKID\u{7f}:{SECRET}")),
+        SigV4Params {
+            service: "iam\u{7f}".to_string(),
+            region: "us-east-1".to_string(),
+        },
+        SigningCredential::parse(&format!("AKIDEXAMPLE:{SECRET}")).ok(),
     );
-    assert!(b.sign(&facts(&hash)).is_empty());
+    assert_eq!(b.sign(&facts(&hash)), Err(AUTHORIZATION_UNSENDABLE));
 }
 
 /// Re-signing the same request is idempotent: the day key held after the first signature signs the
@@ -132,11 +158,13 @@ fn an_access_key_id_the_wire_cannot_carry_signs_nothing() {
 #[test]
 fn the_held_day_key_signs_exactly_as_a_fresh_derivation() {
     let hash = sigv4::sha256_hex(b"{}");
-    let cred = || SigningCredential::split(&format!("AKIDEXAMPLE:{SECRET}"));
+    let cred = || SigningCredential::parse(&format!("AKIDEXAMPLE:{SECRET}")).ok();
     let warm = SigV4Binding::new(params(), cred());
-    let first = warm.sign(&facts(&hash));
-    let second = warm.sign(&facts(&hash));
-    let cold = SigV4Binding::new(params(), cred()).sign(&facts(&hash));
+    let first = warm.sign(&facts(&hash)).expect("signs");
+    let second = warm.sign(&facts(&hash)).expect("signs");
+    let cold = SigV4Binding::new(params(), cred())
+        .sign(&facts(&hash))
+        .expect("signs");
     assert_eq!(first, second);
     assert_eq!(first, cold);
 }
@@ -146,7 +174,7 @@ fn the_held_day_key_signs_exactly_as_a_fresh_derivation() {
 fn tick_prederives_tomorrows_key_ahead_of_midnight() {
     let b = SigV4Binding::new(
         params(),
-        SigningCredential::split(&format!("AKIDEXAMPLE:{SECRET}")),
+        SigningCredential::parse(&format!("AKIDEXAMPLE:{SECRET}")).ok(),
     );
     let midnight = 1_440_979_200; // 2015-08-31T00:00:00Z
     b.prederive(midnight - 7_200);
@@ -168,9 +196,32 @@ fn tick_prederives_tomorrows_key_ahead_of_midnight() {
 /// A logged credential shows that a secret and a token are present, never either.
 #[test]
 fn a_logged_credential_redacts_its_secret_and_token() {
-    let c = SigningCredential::split(&format!("AKIDEXAMPLE:{SECRET}:SESSIONTOKEN")).unwrap();
+    let c =
+        SigningCredential::parse(&format!("AKIDEXAMPLE:{SECRET}:SESSIONTOKEN")).expect("parses");
     let printed = format!("{c:?}");
     assert!(!printed.contains("SESSIONTOKEN"), "{printed}");
     assert!(!printed.contains("wJalr"), "{printed}");
     assert!(printed.contains("<redacted>"), "{printed}");
+}
+
+/// A request dated before both held day keys (a skewed clock) signs as a fresh binding signs it,
+/// from a key derived for that request alone, and the held keys stay as they were.
+#[test]
+fn a_request_older_than_both_held_keys_signs_as_a_fresh_binding_does() {
+    let hash = sigv4::sha256_hex(b"{}");
+    let cred = || SigningCredential::parse(&format!("AKIDEXAMPLE:{SECRET}")).ok();
+    let held = SigV4Binding::new(params(), cred());
+    let midnight = 1_440_979_200; // 2015-08-31T00:00:00Z
+    held.prederive(midnight - 600);
+    assert_eq!(held.held(), ["20150830", "20150831"]);
+    let mut old = facts(&hash);
+    old.timestamp_epoch = 1_440_938_160 - 2 * 86_400; // 2015-08-28
+    let skewed = held.sign(&old).expect("signs");
+    assert_eq!(
+        field(&skewed, "x-amz-date"),
+        "20150828T123600Z",
+        "dated by the request"
+    );
+    assert_eq!(Ok(skewed), SigV4Binding::new(params(), cred()).sign(&old));
+    assert_eq!(held.held(), ["20150830", "20150831"], "no key evicted");
 }

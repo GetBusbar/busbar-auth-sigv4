@@ -29,10 +29,10 @@ permissions:
 
 jobs:
   ci:
-    uses: GetBusbar/busbar/.github/workflows/plugin-ci.yml@932feea23969a65af25926a4aaaa932b1b4465d3
+    uses: GetBusbar/busbar/.github/workflows/plugin-ci.yml@71b70e487bebe5ae2feb1fabf32d8906edf4ccad
     with:
       service: none
-      busbar_checkout: false
+      busbar_checkout: true
       macos_test: "cargo test --workspace --locked"
       extra_test: ""
       plugin_crate: busbar-auth-sigv4-plugin

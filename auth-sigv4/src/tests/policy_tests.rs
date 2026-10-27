@@ -5,9 +5,8 @@
 //! inbound check share, proven against RFC 4231 and against ring's.
 
 /// Every production source of the crate (the test modules are not production).
-const SOURCES: [(&str, &str); 8] = [
+const SOURCES: [(&str, &str); 7] = [
     ("lib.rs", include_str!("../lib.rs")),
-    ("abi.rs", include_str!("../abi.rs")),
     ("held.rs", include_str!("../held.rs")),
     ("inbound.rs", include_str!("../inbound.rs")),
     ("instance.rs", include_str!("../instance.rs")),
@@ -94,4 +93,15 @@ fn hmac_agrees_with_ring_across_block_boundaries() {
             );
         }
     }
+}
+
+/// `validate` answers settings that are not a JSON object with the same outcome `open` and
+/// `refresh` do: FAILED (it answered REFUSED, which says "not this plugin's call").
+#[test]
+fn validate_fails_settings_that_are_not_an_object() {
+    use busbar_contract::abi::mechanism::call::Outcome;
+    use busbar_contract::abi::sdk::auth_outbound::OutboundPlugin;
+    let refusal = <crate::instance::SigV4 as OutboundPlugin>::validate(b"[]")
+        .expect_err("an array is not the settings object");
+    assert_eq!(refusal.outcome(), Outcome::Failed);
 }

@@ -1,76 +1,70 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE HANDLE BOOKKEEPING AND `fields` SLOT, both credential modes, over the trampoline the door
-//! macro builds — no mint, no wire, no waiting ticket: a sigv4 binding signs synchronously.
+//! THE HANDLE BOOKKEEPING AND `fields`' BODY ([`SigV4::sign`]), both credential modes — no mint,
+//! no wire, no waiting ticket: a sigv4 binding signs synchronously. The frames around it (the
+//! fields written under the short-buffer rule, a FAILED call's reason) are the contract kit's, driven through the real loader by the `-plugin` crate's conformance script.
 
 use super::*;
+use crate::sigv4::sha256_hex;
 use crate::style;
-use crate::Fields;
-use busbar_contract::abi::auth::{FieldSpan, FieldsIn, FieldsOut, MODE_OWN, MODE_PASSTHROUGH};
-use busbar_contract::abi::mechanism::call::{Blob, Outcome, BLOB_OCTETS};
-use busbar_contract::abi::sdk::door::Slot;
-use std::ffi::c_void;
-
-fn auth_span() -> busbar_contract::abi::mechanism::call::Span {
-    busbar_contract::abi::mechanism::call::Span { offset: 0, len: 0 }
-}
+use busbar_contract::abi::auth::{MODE_OWN, MODE_PASSTHROUGH};
+use busbar_contract::abi::mechanism::call::Outcome;
 
 const SETTINGS: &str =
     r#"{"service":"svc","region":"us-east-1","content_type":"application/json"}"#;
 
+/// Whose credential `mode` signs with: the caller's (`caller`, none when empty) in passthrough.
+fn who(mode: u32, caller: &str) -> Who<'_> {
+    if mode == MODE_PASSTHROUGH {
+        Who::Caller((!caller.is_empty()).then_some(caller.as_bytes()))
+    } else {
+        Who::Own
+    }
+}
+
+/// What a `fields` call answers for `signed`: its outcome, whether it set any field, and a FAILED
+/// call's reason (empty otherwise).
+fn answered(signed: Option<Signed>) -> (Outcome, bool, String) {
+    match signed {
+        None => (Outcome::Refused, false, String::new()),
+        Some(Signed::NoFacts) => (Outcome::Failed, false, String::new()),
+        Some(Signed::Failed(reason)) => (Outcome::Failed, false, reason.into_owned()),
+        Some(Signed::Fields(fields)) => (Outcome::Ready, !fields.is_empty(), String::new()),
+    }
+}
+
 fn fields(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bool) {
-    let (outcome, signed, _) = fields_noted(s, handle, mode, caller);
+    let (outcome, signed, _) = fields_said(s, handle, mode, caller);
     (outcome, signed)
 }
 
-/// [`fields`], with how many diagnostics the call's envelope carried.
-fn fields_noted(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bool, usize) {
-    let mut buf = [0_u8; 1024];
-    let mut spans = [FieldSpan {
-        name: auth_span(),
-        value: auth_span(),
-        flags: 0,
-        _reserved: 0,
-    }; 8];
-    let mut i: FieldsIn = crate::abi::zeroed_in();
-    i.handle = handle;
-    i.mode = mode;
-    i.request.authority = busbar_contract::abi::mechanism::call::AbiStr {
-        ptr: "runtime.signer.example".as_ptr(),
-        len: "runtime.signer.example".len(),
-    };
-    i.request.canonical_path = busbar_contract::abi::mechanism::call::AbiStr {
-        ptr: "/model/m/converse".as_ptr(),
-        len: "/model/m/converse".len(),
-    };
+/// [`fields`], with a FAILED call's reason.
+fn fields_said(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, bool, String) {
+    let hash = sha256_hex(b"");
     // The host lends the walked request's method on every call.
-    i.request.method = busbar_contract::abi::mechanism::call::AbiStr {
-        ptr: "POST".as_ptr(),
-        len: "POST".len(),
+    let facts = SignFacts {
+        method: "POST",
+        host: "runtime.signer.example",
+        path: "/model/m/converse",
+        query: None,
+        content_type: None,
+        payload_hash: &hash,
+        timestamp_epoch: 1_440_938_160,
     };
-    i.request.timestamp = 1_440_938_160;
-    i.caller_credential = if caller.is_empty() {
-        Blob {
-            ptr: std::ptr::null(),
-            len: 0,
-            fmt: 0,
-            flags: 0,
-        }
-    } else {
-        Blob {
-            ptr: caller.as_ptr(),
-            len: caller.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
-        }
-    };
-    (i.field_buf, i.field_buf_cap) = (buf.as_mut_ptr(), buf.len());
-    (i.fields, i.fields_cap) = (spans.as_mut_ptr(), 8);
-    let mut out: FieldsOut = crate::abi::zeroed_out();
-    let inst = std::ptr::from_ref(s).cast_mut().cast::<c_void>();
-    let outcome = Fields::call(inst, &i, &mut out);
-    (outcome, out.fields_len > 0, out.head.envelope.diags_len)
+    answered(s.sign(handle, who(mode, caller), Some(facts)))
+}
+
+/// The `authorization` field among `signed`'s fields.
+fn authorization_of(signed: Option<Signed>) -> String {
+    match signed {
+        Some(Signed::Fields(fields)) => fields
+            .iter()
+            .find(|(n, _)| n == "authorization")
+            .map(|(_, v)| v.as_str().to_owned())
+            .expect("an authorization is set"),
+        _ => panic!("the handle signs"),
+    }
 }
 
 fn open(s: &SigV4, cred: Option<&str>) -> u64 {
@@ -85,7 +79,7 @@ fn open(s: &SigV4, cred: Option<&str>) -> u64 {
 
 #[test]
 fn own_mode_signs_with_the_operator_credential_and_passthrough_with_the_callers() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     assert_eq!(fields(&s, handle, MODE_OWN, ""), (Outcome::Ready, true));
     assert_eq!(
@@ -93,21 +87,28 @@ fn own_mode_signs_with_the_operator_credential_and_passthrough_with_the_callers(
         (Outcome::Ready, true),
         "the caller's own credential signs, independent of the operator's binding"
     );
+    // OWNER RULING (was: READY with no field): the request is not sent unsigned.
     assert_eq!(
-        fields(&s, handle, MODE_PASSTHROUGH, ""),
-        (Outcome::Ready, false),
-        "no caller credential: nothing to sign with, no fields"
+        fields_said(&s, handle, MODE_PASSTHROUGH, ""),
+        (Outcome::Failed, false, NO_CALLER_CREDENTIAL.to_string()),
+        "no caller credential: nothing to sign with, so the request fails with the reason"
     );
 }
 
+/// OWNER RULING (was: own mode on a keyless binding answered READY with no field): a binding with
+/// no credential of its own FAILS in own mode, with the reason, and still serves passthrough.
 #[test]
-fn a_keyless_binding_signs_nothing_in_own_mode_but_still_serves_passthrough() {
-    let s = SigV4::new(1, None);
+fn a_keyless_binding_fails_in_own_mode_but_still_serves_passthrough() {
+    let s = SigV4::new(1);
     let handle = open(&s, None);
     assert_eq!(
-        fields(&s, handle, MODE_OWN, ""),
-        (Outcome::Ready, false),
-        "no operator credential: no header, not a fault"
+        fields_said(&s, handle, MODE_OWN, ""),
+        (
+            Outcome::Failed,
+            false,
+            crate::signing::NO_OWN_CREDENTIAL.to_string()
+        ),
+        "no operator credential: the request is not sent unsigned"
     );
     assert_eq!(
         fields(&s, handle, MODE_PASSTHROUGH, "AKIDCALLER:CALLERSECRET"),
@@ -115,38 +116,71 @@ fn a_keyless_binding_signs_nothing_in_own_mode_but_still_serves_passthrough() {
     );
 }
 
-/// A credential whose session token no header value may carry signs nothing, and EACH request
-/// reports the signer's line on its `fields` envelope (1.5.5 logged it per request; the open
-/// reports nothing, as 1.5.5's boot did not), in either mode; a merely malformed one reports none.
+/// OWNER RULING (was: a credential whose session token no header value may carry opened, and each
+/// request signed nothing beside a WARN note): the operator's is refused at open, and a caller's
+/// FAILS its request, each naming the finding, never the credential's bytes.
 #[test]
-fn an_unsendable_session_token_is_noted_on_each_fields_call() {
-    let s = SigV4::new(1, None);
-    let handle = open(&s, Some("AKID:SECRET:TOK\r\nEN"));
-    for _ in 0..2 {
-        assert_eq!(
-            fields_noted(&s, handle, MODE_OWN, ""),
-            (Outcome::Ready, false, 1)
+fn an_unsendable_or_malformed_credential_is_refused_at_open_or_fails_its_request() {
+    for operator in ["AKID:SECRET:TOK\r\nEN", "not-a-valid-key"] {
+        assert!(
+            style::open_binding(
+                style::SIGV4,
+                Some(operator.as_bytes()),
+                Some(SETTINGS.as_bytes())
+            )
+            .is_err(),
+            "{operator:?} is refused at open"
         );
     }
+    let s = SigV4::new(1);
     let quiet = open(&s, Some("AKID:SECRET:CLEAN"));
+    assert_eq!(fields(&s, quiet, MODE_OWN, ""), (Outcome::Ready, true));
+    for (caller, reason) in [
+        (
+            "AKID:SECRET:TOK\r\nEN",
+            "caller credential: the session token holds a byte no header value may carry",
+        ),
+        (
+            "not-a-valid-key",
+            "caller credential: expected ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]",
+        ),
+        (
+            ":",
+            "caller credential: the access key id is empty; caller credential: the secret \
+             access key is empty",
+        ),
+    ] {
+        assert_eq!(
+            fields_said(&s, quiet, MODE_PASSTHROUGH, caller),
+            (Outcome::Failed, false, reason.to_string()),
+            "{caller:?}"
+        );
+    }
     assert_eq!(
-        fields_noted(&s, quiet, MODE_OWN, ""),
-        (Outcome::Ready, true, 0)
-    );
-    assert_eq!(
-        fields_noted(&s, quiet, MODE_PASSTHROUGH, "AKID:SECRET:TOK\r\nEN"),
-        (Outcome::Ready, false, 1)
-    );
-    let malformed = open(&s, Some("not-a-valid-key"));
-    assert_eq!(
-        fields_noted(&s, malformed, MODE_OWN, ""),
-        (Outcome::Ready, false, 0)
+        answered(s.sign(
+            quiet,
+            Who::Caller(Some(&[0xff_u8][..])),
+            Some(SignFacts {
+                method: "POST",
+                host: "h",
+                path: "/p",
+                query: None,
+                content_type: None,
+                payload_hash: &sha256_hex(b""),
+                timestamp_epoch: 1,
+            })
+        )),
+        (
+            Outcome::Failed,
+            false,
+            "caller credential: the credential is not UTF-8".to_string()
+        )
     );
 }
 
 #[test]
 fn retire_drops_the_generations_handles() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     s.retire(1);
     assert_eq!(fields(&s, handle, MODE_OWN, ""), (Outcome::Refused, false));
@@ -158,7 +192,7 @@ fn retire_drops_the_generations_handles() {
 /// next tick whether or not a binding is open, and pre-derives every live binding's key.
 #[test]
 fn tick_answers_its_next_tick_with_or_without_an_open_binding() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     assert!(
         s.tick(1_000) > 1_000,
         "no binding open yet: the schedule goes on"
@@ -178,57 +212,22 @@ struct Walked {
 
 /// The `authorization` field `fields` sets for `walked` on the operator's binding `handle`.
 fn authorization(s: &SigV4, handle: u64, walked: &Walked) -> String {
-    use busbar_contract::abi::auth::NamedValue;
-    use busbar_contract::abi::mechanism::call::AbiStr;
-    let at = |t: &'static str| AbiStr {
-        ptr: t.as_ptr(),
-        len: t.len(),
-    };
-    let mut buf = [0_u8; 1024];
-    let mut spans = [FieldSpan {
-        name: auth_span(),
-        value: auth_span(),
-        flags: 0,
-        _reserved: 0,
-    }; 8];
-    let headers: Vec<NamedValue> = walked
+    let hash = sha256_hex(b"");
+    let headers: Vec<(&[u8], &[u8])> = walked
         .content_type
-        .map(|ct| NamedValue {
-            name: at("Content-Type"),
-            value: Blob {
-                ptr: ct.as_ptr(),
-                len: ct.len(),
-                fmt: BLOB_OCTETS,
-                flags: 0,
-            },
-        })
+        .map(|ct| (&b"Content-Type"[..], ct.as_bytes()))
         .into_iter()
         .collect();
-    let mut i: FieldsIn = crate::abi::zeroed_in();
-    i.handle = handle;
-    i.mode = MODE_OWN;
-    i.request.method = at(walked.method);
-    i.request.authority = at("runtime.signer.example");
-    i.request.canonical_path = at(walked.path);
-    if let Some(q) = walked.query {
-        i.request.query = at(q);
-    }
-    i.request.timestamp = 1_440_938_160;
-    (i.headers, i.headers_len) = (headers.as_ptr(), headers.len());
-    (i.field_buf, i.field_buf_cap) = (buf.as_mut_ptr(), buf.len());
-    (i.fields, i.fields_cap) = (spans.as_mut_ptr(), 8);
-    let mut out: FieldsOut = crate::abi::zeroed_out();
-    let inst = std::ptr::from_ref(s).cast_mut().cast::<c_void>();
-    assert_eq!(Fields::call(inst, &i, &mut out), Outcome::Ready);
-    let text = |sp: busbar_contract::abi::mechanism::call::Span| {
-        String::from_utf8_lossy(&buf[sp.offset as usize..(sp.offset + sp.len) as usize])
-            .into_owned()
+    let facts = SignFacts {
+        method: walked.method,
+        host: "runtime.signer.example",
+        path: walked.path,
+        query: walked.query.filter(|q| !q.is_empty()),
+        content_type: crate::sent_content_type(headers),
+        payload_hash: &hash,
+        timestamp_epoch: 1_440_938_160,
     };
-    (0..out.fields_len as usize)
-        .map(|k| spans[k])
-        .find(|f| text(f.name) == "authorization")
-        .map(|f| text(f.value))
-        .expect("an authorization is set")
+    authorization_of(s.sign(handle, Who::Own, Some(facts)))
 }
 
 /// The `authorization` AWS computes for a request with this canonical method, URI and query over
@@ -270,7 +269,7 @@ fn expected(
 /// its sorted query, not as a POST with none.
 #[test]
 fn fields_signs_the_walked_requests_method_and_query() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     let walked = Walked {
         method: "GET",
@@ -294,7 +293,7 @@ fn fields_signs_the_walked_requests_method_and_query() {
 /// `%253A`, as 1.5.5 signed it and as AWS recomputes it.
 #[test]
 fn fields_signs_the_double_encoded_canonical_uri() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     let walked = Walked {
         method: "POST",
@@ -317,7 +316,7 @@ fn fields_signs_the_double_encoded_canonical_uri() {
 /// request is sent with, and a request sent with none signs none — never the binding's setting.
 #[test]
 fn fields_signs_the_content_type_only_as_sent() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     let mut walked = Walked {
         method: "POST",
@@ -351,7 +350,7 @@ fn fields_signs_the_content_type_only_as_sent() {
 /// never computed by the code under test.
 #[test]
 fn fields_signs_the_query_in_its_canonical_encoding() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     let walked = Walked {
         method: "GET",
@@ -373,7 +372,7 @@ fn fields_signs_the_query_in_its_canonical_encoding() {
 /// An already canonical query is signed unchanged: encoding is idempotent over the canonical form.
 #[test]
 fn fields_signs_an_already_canonical_query_unchanged() {
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     let walked = Walked {
         method: "GET",
@@ -404,64 +403,26 @@ fn fields_signs_an_already_canonical_query_unchanged() {
 /// content-type;host;x-amz-content-sha256;x-amz-date\n5e4c…e30a`.
 #[test]
 fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
-    use busbar_contract::abi::auth::NamedValue;
-    use busbar_contract::abi::mechanism::call::AbiStr;
     const VECTOR: &str = "AWS4-HMAC-SHA256 \
         Credential=AKIDEXAMPLE/20150830/us-east-1/svc/aws4_request, \
         SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, \
         Signature=758de1b14d97b1d58b6307ff4c2924f7bdb3cbe3773ed02f7329925faee62472";
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     let body: &[u8] = br#"{"messages":[]}"#;
-    let at = |t: &'static str| AbiStr {
-        ptr: t.as_ptr(),
-        len: t.len(),
-    };
-    let line = |name: &'static str, value: &'static str| NamedValue {
-        name: at(name),
-        value: Blob {
-            ptr: value.as_ptr(),
-            len: value.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
-        },
-    };
-    let sign = |head: &[NamedValue]| {
-        let mut buf = [0_u8; 1024];
-        let mut spans = [FieldSpan {
-            name: auth_span(),
-            value: auth_span(),
-            flags: 0,
-            _reserved: 0,
-        }; 8];
-        let mut i: FieldsIn = crate::abi::zeroed_in();
-        i.handle = handle;
-        i.mode = MODE_OWN;
-        i.request.method = at("POST");
-        i.request.authority = at("runtime.signer.example");
-        i.request.canonical_path = at("/model/m/converse");
-        i.request.timestamp = 1_440_938_160;
-        i.body = Blob {
-            ptr: body.as_ptr(),
-            len: body.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
+    let hash = sha256_hex(body);
+    let line = |name: &'static str, value: &'static str| (name.as_bytes(), value.as_bytes());
+    let sign = |head: &[(&'static [u8], &'static [u8])]| {
+        let facts = SignFacts {
+            method: "POST",
+            host: "runtime.signer.example",
+            path: "/model/m/converse",
+            query: None,
+            content_type: crate::sent_content_type(head.iter().copied()),
+            payload_hash: &hash,
+            timestamp_epoch: 1_440_938_160,
         };
-        (i.headers, i.headers_len) = (head.as_ptr(), head.len());
-        (i.field_buf, i.field_buf_cap) = (buf.as_mut_ptr(), buf.len());
-        (i.fields, i.fields_cap) = (spans.as_mut_ptr(), 8);
-        let mut out: FieldsOut = crate::abi::zeroed_out();
-        let inst = std::ptr::from_ref(&s).cast_mut().cast::<c_void>();
-        assert_eq!(Fields::call(inst, &i, &mut out), Outcome::Ready);
-        let text = |sp: busbar_contract::abi::mechanism::call::Span| {
-            String::from_utf8_lossy(&buf[sp.offset as usize..(sp.offset + sp.len) as usize])
-                .into_owned()
-        };
-        (0..out.fields_len as usize)
-            .map(|k| spans[k])
-            .find(|f| text(f.name) == "authorization")
-            .map(|f| text(f.value))
-            .expect("an authorization is set")
+        authorization_of(s.sign(handle, Who::Own, Some(facts)))
     };
     let plane_only = [line("content-type", "application/json")];
     let completed = [
@@ -477,74 +438,66 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
     );
 }
 
-/// THE LENGTH LINE IS NEVER SIGNED (busbar Q128 transport-http, ruling (D)). The fleet's one auth
-/// style handed the head (`STYLE_NEEDS_HEADERS`) is this one; every other style is handed none. So
-/// the one line a framing adds after the auth, HTTP/2's `content-length: 0` for an empty
-/// payload-method body (as 1.5.5's client added it), is signed by no auth: this style signs 1.5.5's
-/// fixed set (v1.5.5 `proto/bedrock/writer.rs`), and a head carrying a length line, any length or
-/// none, signs to the same bytes, with `SignedHeaders` never naming `content-length`.
+/// `outbound_ready` is true for a handle this generation holds and for no other: not for one never
+/// opened, not for one whose generation was retired.
+#[test]
+fn outbound_ready_is_false_for_an_unknown_or_retired_handle() {
+    use busbar_contract::abi::sdk::auth_outbound::OutboundPlugin;
+    let s = SigV4::new(1);
+    assert!(!s.outbound_ready(7), "never opened");
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    assert!(s.outbound_ready(handle));
+    assert!(!s.outbound_ready(handle + 1), "a handle never handed out");
+    s.retire(1);
+    assert!(!s.outbound_ready(handle), "its generation was retired");
+}
+
+/// `tick` pre-derives each live binding's key for today, so the first request of the day finds it
+/// held rather than deriving it on the request path.
+#[test]
+fn tick_holds_todays_day_key_on_each_open_binding() {
+    let s = SigV4::new(1);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    let binding = s.binding(handle).expect("the binding is held");
+    assert!(binding.held().is_empty(), "nothing derived before a tick");
+    s.tick(1_000);
+    let (_, today) = crate::sigv4::format_amz_time(crate::now_epoch());
+    // Tomorrow's key rides too when the clock is within the hour of midnight.
+    assert!(
+        binding.held().contains(&today),
+        "tick held {:?}, not {today}",
+        binding.held()
+    );
+}
+
+/// A service that opens with a multi-byte character binds and is kept (the unsendable-token line
+/// that capitalised its first character is gone: such a credential is refused at open).
+#[test]
+fn a_multibyte_service_binds_and_is_kept() {
+    let s = SigV4::new(1);
+    let settings = r#"{"service":"ébedrock","region":"us-east-1"}"#;
+    let binding =
+        crate::style::open_binding("sigv4", Some(b"AKID:SECRET"), Some(settings.as_bytes()))
+            .expect("the binding opens");
+    assert!(s.binding(s.keep(binding)).is_some(), "the handle is kept");
+}
+
+/// THE LENGTH LINE IS NEVER SIGNED (busbar Q128 transport-http, ruling (D)). The one line a framing
+/// adds after the auth, HTTP/2's `content-length: 0` for an empty payload-method body (as 1.5.5's
+/// client added it), is signed by no auth: this style signs 1.5.5's fixed set (v1.5.5
+/// `proto/bedrock/writer.rs`), so a head carrying a length line, any length or none, signs to the
+/// same bytes, with `SignedHeaders` never naming `content-length`.
 #[test]
 fn no_length_line_is_ever_signed() {
-    use busbar_contract::abi::auth::NamedValue;
-    use busbar_contract::abi::mechanism::call::AbiStr;
     const VECTOR: &str = "AWS4-HMAC-SHA256 \
         Credential=AKIDEXAMPLE/20150830/us-east-1/svc/aws4_request, \
         SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, \
         Signature=758de1b14d97b1d58b6307ff4c2924f7bdb3cbe3773ed02f7329925faee62472";
-    let s = SigV4::new(1, None);
+    let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
-    let body: &[u8] = br#"{"messages":[]}"#;
-    let at = |t: &'static str| AbiStr {
-        ptr: t.as_ptr(),
-        len: t.len(),
-    };
-    let line = |name: &'static str, value: &'static str| NamedValue {
-        name: at(name),
-        value: Blob {
-            ptr: value.as_ptr(),
-            len: value.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
-        },
-    };
-    let sign = |head: &[NamedValue]| {
-        let mut buf = [0_u8; 1024];
-        let mut spans = [FieldSpan {
-            name: auth_span(),
-            value: auth_span(),
-            flags: 0,
-            _reserved: 0,
-        }; 8];
-        let mut i: FieldsIn = crate::abi::zeroed_in();
-        i.handle = handle;
-        i.mode = MODE_OWN;
-        i.request.method = at("POST");
-        i.request.authority = at("runtime.signer.example");
-        i.request.canonical_path = at("/model/m/converse");
-        i.request.timestamp = 1_440_938_160;
-        i.body = Blob {
-            ptr: body.as_ptr(),
-            len: body.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
-        };
-        (i.headers, i.headers_len) = (head.as_ptr(), head.len());
-        (i.field_buf, i.field_buf_cap) = (buf.as_mut_ptr(), buf.len());
-        (i.fields, i.fields_cap) = (spans.as_mut_ptr(), 8);
-        let mut out: FieldsOut = crate::abi::zeroed_out();
-        let inst = std::ptr::from_ref(&s).cast_mut().cast::<c_void>();
-        assert_eq!(Fields::call(inst, &i, &mut out), Outcome::Ready);
-        let text = |sp: busbar_contract::abi::mechanism::call::Span| {
-            String::from_utf8_lossy(&buf[sp.offset as usize..(sp.offset + sp.len) as usize])
-                .into_owned()
-        };
-        (0..out.fields_len as usize)
-            .map(|k| spans[k])
-            .find(|f| text(f.name) == "authorization")
-            .map(|f| text(f.value))
-            .expect("an authorization is set")
-    };
-    let heads: [&[NamedValue]; 4] = [
+    let hash = sha256_hex(br#"{"messages":[]}"#);
+    let line = |name: &'static str, value: &'static str| (name.as_bytes(), value.as_bytes());
+    let heads: [&[(&[u8], &[u8])]; 4] = [
         &[line("content-type", "application/json")],
         &[
             line("content-type", "application/json"),
@@ -562,7 +515,16 @@ fn no_length_line_is_ever_signed() {
         ],
     ];
     for head in heads {
-        let authorization = sign(head);
+        let facts = SignFacts {
+            method: "POST",
+            host: "runtime.signer.example",
+            path: "/model/m/converse",
+            query: None,
+            content_type: crate::sent_content_type(head.iter().copied()),
+            payload_hash: &hash,
+            timestamp_epoch: 1_440_938_160,
+        };
+        let authorization = authorization_of(s.sign(handle, Who::Own, Some(facts)));
         let signed = authorization
             .split("SignedHeaders=")
             .nth(1)

@@ -6,6 +6,18 @@
 
 use super::*;
 
+impl SigV4Binding {
+    /// The datestamps whose keys are held, oldest first.
+    pub(crate) fn held(&self) -> Vec<String> {
+        self.keys
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|k| k.datestamp.clone())
+            .collect()
+    }
+}
+
 const SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
 
 fn params() -> SigV4Params {

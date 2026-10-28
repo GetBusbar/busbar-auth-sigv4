@@ -9,7 +9,9 @@
 //! THE SETTINGS SCHEMA (ARCHITECT ruling 2026-09-28): `{service, region}`. A `content_type` key is
 //! read past (1.5.5 configs carry it): the content type a signature covers is the one the request
 //! is sent with (the style declares `STYLE_NEEDS_HEADERS` and signs the sent value), never a
-//! setting. Any other key is refused by name (``settings: unknown key `<k>` ``), never ignored.
+//! setting. `region_unread` is the kernel's warning for a region it defaulted at seal, logged with
+//! each signature as 1.5.5's signer logged it. Any other key is refused by name
+//! (``settings: unknown key `<k>` ``), never ignored.
 //!
 //! THE CREDENTIAL (OWNER RULING): `ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]`, checked here,
 //! at open (`SigningCredential::parse`): one that is not UTF-8, has no `:`, has an empty access
@@ -79,7 +81,9 @@ fn text(m: &Map<String, Value>, key: &str) -> Result<Option<String>, Refusal> {
 }
 
 /// The style settings this plugin reads, and `content_type`, read past (1.5.5 configs carry it).
-const KNOWN_KEYS: [&str; 3] = ["service", "region", "content_type"];
+/// `region_unread` is the kernel's: the warning it hands in when it resolved `region` at seal to the
+/// dialect's default (see [`SigV4Params::region_unread`]).
+const KNOWN_KEYS: [&str; 4] = ["service", "region", "region_unread", "content_type"];
 
 /// One refusal per key the style settings name that this plugin does not read.
 fn unknown_keys(m: &Map<String, Value>) -> Vec<Refusal> {
@@ -94,6 +98,7 @@ fn sigv4_params(m: &Map<String, Value>) -> Result<SigV4Params, Refusal> {
     Ok(SigV4Params {
         service: text(m, "service")?.ok_or_else(|| missing("service"))?,
         region: text(m, "region")?.ok_or_else(|| missing("region"))?,
+        region_unread: text(m, "region_unread")?,
     })
 }
 

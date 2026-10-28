@@ -93,3 +93,68 @@ fn an_unknown_style_or_malformed_settings_is_refused() {
         "bearer is a different mechanism, busbar-auth-header"
     );
 }
+
+/// The warning the kernel hands in as `region_unread` when the provider's host names no region and
+/// the scope falls back to the dialect's default: 1.5.5's signer's own words
+/// (`proto/bedrock/writer.rs`, v1.5.5).
+const REGION_UNREAD: &str = "could not derive AWS region from Bedrock endpoint host; defaulting \
+                             SigV4 scope to us-east-1 (set a \
+                             bedrock-runtime[-fips].<region>.amazonaws.com host)";
+
+/// The WARN lines logged while `binding` signs one request to `host` `times` times.
+fn warned_signing(binding: &SigV4Binding, host: &str, times: usize) -> Vec<String> {
+    let hash = sigv4::sha256_hex(b"{}");
+    let facts = SignFacts {
+        method: "POST",
+        host,
+        path: "/model/m-cap/converse",
+        query: None,
+        content_type: Some("application/json"),
+        payload_hash: &hash,
+        timestamp_epoch: 1_440_938_160,
+    };
+    let cap = busbar_contract::testkit::WarnCapture::default();
+    tracing::subscriber::with_default(cap.clone(), || {
+        for _ in 0..times {
+            assert!(!binding.sign(&facts).is_empty(), "a clean credential signs");
+        }
+    });
+    cap.messages()
+        .into_iter()
+        .map(|m| m.trim_end().to_string())
+        .collect()
+}
+
+/// A BEDROCK HOST WITH NO DERIVABLE REGION WARNS ON EVERY SIGNATURE, as 1.5.5's signer did: the
+/// kernel resolved the region at seal to the default and handed the dialect's warning in as
+/// `region_unread`, which this plugin reads and logs, word for word, with the request's `host`, on
+/// each request it signs under that default. 1.5.5 wrote it to busbar's own log,
+/// `<TS>  WARN could not derive AWS region ... host=127.0.0.1:<PORT>` (the oracle's
+/// `egress.image-detail|high|bedrock` golden); a plugin's WARN line reaches that log through its
+/// own. A host whose region reads is handed no warning and logs none.
+#[test]
+fn a_bedrock_host_with_no_derivable_region_warns_on_every_signature() {
+    let settings = serde_json::json!({
+        "service": "bedrock",
+        "region": "us-east-1",
+        "content_type": "application/json",
+        "region_unread": REGION_UNREAD,
+    })
+    .to_string();
+    let defaulted = open(SIGV4, Some("AKIDORACLEDETAIL0001:SECRET"), &settings).expect("opens");
+    let want = format!("{REGION_UNREAD} host=127.0.0.1:41234");
+    assert_eq!(
+        warned_signing(&defaulted, "127.0.0.1:41234", 2),
+        vec![want.clone(), want]
+    );
+    let named = open(
+        SIGV4,
+        Some("AKIDORACLEDETAIL0001:SECRET"),
+        r#"{"service":"bedrock","region":"eu-west-1"}"#,
+    )
+    .expect("opens");
+    assert!(
+        warned_signing(&named, "bedrock-runtime.eu-west-1.amazonaws.com", 2).is_empty(),
+        "a host whose region reads warns nothing"
+    );
+}

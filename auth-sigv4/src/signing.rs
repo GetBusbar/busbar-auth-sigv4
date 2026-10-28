@@ -1,26 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE `sigv4` STYLE: per-request AWS Signature Version 4 over the request, the credential being
-//! `ACCESS_KEY_ID:SECRET[:SESSION_TOKEN]`. MOVED VERBATIM from the `Scheme::SigV4` arm of
-//! the identity unit's `egress_auth/mod.rs::decorate` in the kernel and the `EgressScheme::SigV4` arm of
-//! `.../declared.rs::present`, staged `busbar-auth-outbound::signing` (KERNEL<>PLUGINS step 22),
-//! then here (AUTH-SPLIT): the same checks before signing, the same SET-never-append over the
-//! signed set, the same `Authorization` value and the same field order.
+//! The `sigv4` style: per-request AWS Signature Version 4 over the request, the credential being
+//! `ACCESS_KEY_ID:SECRET[:SESSION_TOKEN]`. The checks run before signing, the signed set is SET
+//! never appended, and the `Authorization` value and field order are fixed.
 //!
-//! THE DAILY KEY (BUSBAR-1.6.0.md THE DESIGN, §6.5). The HMAC chain over date, region and service is derived once per
+//! The daily key: the HMAC chain over date, region and service is derived once per
 //! UTC day and held here, wiped on drop; `tick` derives the next day's key ahead of midnight
 //! ([`SigV4Binding::prederive`]), so a request signs with a key already in hand. A binding built for
-//! the CALLER's credential (`STYLE_CALLER_CREDENTIAL` passthrough mode, ARCHITECT ruling
-//! 2026-09-29) is instead constructed fresh per request in `crate::instance::SigV4::sign` and never enters this
-//! cache — the caller's key varies request to request, so there is nothing to hold ahead of time.
+//! the CALLER's credential (`STYLE_CALLER_CREDENTIAL` passthrough mode) is instead constructed fresh per request in
+//! `crate::instance::SigV4::sign` and never enters this cache — the caller's key varies request to
+//! request, so there is nothing to hold ahead of time.
 //!
-//! THE REQUEST IT SIGNS (BUSBAR-1.6.0.md THE DESIGN §6, "the per-request auth call on the route
-//! walk": "SigV4 signs the real method and query of the walked request"): the method, the query
-//! and the content type are the walked request's own, as the host lends them; the canonical URI is
-//! the wire path URI-encoded once more (SigV4's non-S3 rule, 1.5.5's `sign_and_wire_path_parts`,
-//! `proxy/egress.rs`, v1.5.5). For the request 1.5.5 signed — a POST of a JSON body to its path,
-//! no query — every signed byte is 1.5.5's.
+//! The request it signs: the method, the query and the content type are the walked request's own,
+//! as the host lends them; the canonical URI is the wire path URI-encoded once more (SigV4's non-S3
+//! rule).
 
 use std::sync::RwLock;
 
@@ -48,7 +42,7 @@ pub struct SigV4Params {
     pub region: String,
     /// The warning to log with each signature, set when the kernel resolved [`Self::region`] at seal
     /// to the dialect's default because the provider's host names none (its `region_unread`): the
-    /// dialect's own words, 1.5.5's signer's (`proto/bedrock/writer.rs`, v1.5.5). `None`: the host
+    /// dialect's own words. `None`: the host
     /// named the region, and nothing is logged.
     #[serde(default)]
     pub region_unread: Option<String>,
@@ -126,7 +120,7 @@ impl std::fmt::Debug for SigningCredential {
 
 impl SigningCredential {
     /// Parse `raw`, `ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]`, into a credential that can
-    /// sign (OWNER RULING: a credential that cannot is refused, never bound to sign nothing).
+    /// sign (a credential that cannot is refused, never bound to sign nothing).
     ///
     /// # Errors
     ///
@@ -283,18 +277,17 @@ impl SigV4Binding {
             return Err(NO_OWN_CREDENTIAL);
         };
         if let Some(unread) = &self.params.region_unread {
-            // 1.5.5's signer warned here, on every signature it scoped to the default region (after
-            // the credential split, before signing), naming the host the request goes to. The line
-            // goes to this plugin's own log, and the host copies a WARN line to busbar's.
+            // Warn on every signature scoped to the default region (after the credential split,
+            // before signing), naming the host the request goes to. The line goes to this plugin's
+            // own log, and the host copies a WARN line to busbar's.
             tracing::warn!(host = %facts.host, "{unread}");
         }
         let region = self.params.region.as_str();
         let service = self.params.service.as_str();
         let (amzdate, datestamp) = sigv4::format_amz_time(facts.timestamp_epoch);
         let payload_hash = facts.payload_hash.to_string();
-        // The set 1.5.5's signing writer signed (`proto/bedrock/writer.rs`, v1.5.5): the content
-        // type the request is sent with (none sent, none signed) and the host, then SET, never
-        // appended, the fields it writes.
+        // The signed set: the content type the request is sent with (none sent, none signed) and
+        // the host, then SET, never appended, the fields it writes.
         let mut headers: Vec<(String, String)> = Vec::with_capacity(5);
         if let Some(content_type) = facts.content_type {
             headers.push(("content-type".to_string(), content_type.to_string()));

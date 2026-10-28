@@ -6,22 +6,22 @@
 //! modes, is [`crate::signing::SigV4Binding::sign`] through the door kit's `fields`
 //! (`crate::instance::SigV4::sign`).
 //!
-//! THE SETTINGS SCHEMA (ARCHITECT ruling 2026-09-28): `{service, region}`. A `content_type` key is
-//! read past (1.5.5 configs carry it): the content type a signature covers is the one the request
+//! The settings schema: `{service, region}`. A `content_type` key is
+//! read past (older configs carry it): the content type a signature covers is the one the request
 //! is sent with (the style declares `STYLE_NEEDS_HEADERS` and signs the sent value), never a
 //! setting. `region_unread` is the kernel's warning for a region it defaulted at seal, logged with
-//! each signature as 1.5.5's signer logged it. Any other key is refused by name
+//! each signature. Any other key is refused by name
 //! (``settings: unknown key `<k>` ``), never ignored.
 //!
-//! THE CREDENTIAL (OWNER RULING): `ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]`, checked here,
+//! The credential: `ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]`, checked here,
 //! at open (`SigningCredential::parse`): one that is not UTF-8, has no `:`, has an empty access
 //! key id or secret, an access key id or session token no header value may carry, or an empty
 //! session token, is refused — never bound to sign nothing. No credential at all opens: the
 //! contract defines that as a passthrough-only binding, which signs only with a caller's
 //! credential (own-mode `fields` on it FAILS, never sends the request unsigned).
 //!
-//! THE REFUSALS (ARCHITECT ruling 2026-09-28): a binding that cannot open answers FAILED with one
-//! line per finding, each `credential: <text>` or `settings: <text>`. The kernel composes the 1.5.5
+//! The refusals: a binding that cannot open answers FAILED with one
+//! line per finding, each `credential: <text>` or `settings: <text>`. The kernel composes the
 //! sentence — `provider '<p>' <style> credential (from <src>) is invalid: <text>`, or
 //! `provider '<p>' <text>`. No line ever carries the credential's bytes.
 
@@ -80,7 +80,7 @@ fn text(m: &Map<String, Value>, key: &str) -> Result<Option<String>, Refusal> {
     }
 }
 
-/// The style settings this plugin reads, and `content_type`, read past (1.5.5 configs carry it).
+/// The style settings this plugin reads, and `content_type`, read past (older configs carry it).
 /// `region_unread` is the kernel's: the warning it hands in when it resolved `region` at seal to the
 /// dialect's default (see [`SigV4Params::region_unread`]).
 const KNOWN_KEYS: [&str; 4] = ["service", "region", "region_unread", "content_type"];

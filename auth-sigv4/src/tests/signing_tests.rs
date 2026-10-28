@@ -12,6 +12,7 @@ fn params() -> SigV4Params {
     SigV4Params {
         service: "iam".to_string(),
         region: "us-east-1".to_string(),
+        region_unread: None,
     }
 }
 

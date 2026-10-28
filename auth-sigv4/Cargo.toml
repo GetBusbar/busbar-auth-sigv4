@@ -35,10 +35,11 @@ hex = { workspace = true }
 ring = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The signer's operator warning (a region defaulted at seal), into the plugin's own log.
+tracing = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
 # The contract's test kit (`busbar_contract::testkit::WarnCapture`) for the region-warning test: it
 # is compiled only under the dev-only `test-seal` feature, which no non-dev edge enables.
 busbar-contract = { workspace = true, features = ["test-seal"] }
-tracing = { workspace = true }

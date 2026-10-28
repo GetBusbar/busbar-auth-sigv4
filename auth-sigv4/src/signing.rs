@@ -46,6 +46,12 @@ pub struct SigV4Params {
     pub service: String,
     /// The AWS region.
     pub region: String,
+    /// The warning to log with each signature, set when the kernel resolved [`Self::region`] at seal
+    /// to the dialect's default because the provider's host names none (its `region_unread`): the
+    /// dialect's own words, 1.5.5's signer's (`proto/bedrock/writer.rs`, v1.5.5). `None`: the host
+    /// named the region, and nothing is logged.
+    #[serde(default)]
+    pub region_unread: Option<String>,
 }
 
 /// The request facts a signature covers: the walked request's own.
@@ -242,10 +248,16 @@ impl SigV4Binding {
         };
         // Validated BEFORE signing, so the signed set and the sent set are gated by the same
         // check: a token the wire cannot carry must not be signed over and then dropped.
-        if cred.access_key_id.is_empty()
-            || cred.secret.reveal().is_empty()
-            || cred.session_token_unsendable()
-        {
+        if cred.access_key_id.is_empty() || cred.secret.reveal().is_empty() {
+            return Vec::new();
+        }
+        if let Some(unread) = &self.params.region_unread {
+            // 1.5.5's signer warned here, on every signature it scoped to the default region: after
+            // the key split, before the session token's check, naming the host the request goes to.
+            // The line goes to this plugin's own log, and the host copies a WARN line to busbar's.
+            tracing::warn!(host = %facts.host, "{unread}");
+        }
+        if cred.session_token_unsendable() {
             return Vec::new();
         }
         let region = self.params.region.as_str();

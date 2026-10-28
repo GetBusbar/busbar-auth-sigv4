@@ -7,7 +7,9 @@
 //!
 //! THE SETTINGS SCHEMA (ARCHITECT ruling 2026-09-28): `{service, region}`. A `content_type` key is
 //! read past: the content type a signature covers is the one the request is sent with (the style
-//! declares `STYLE_NEEDS_HEADERS` and signs the sent value), never a setting.
+//! declares `STYLE_NEEDS_HEADERS` and signs the sent value), never a setting. `region_unread` is the
+//! kernel's warning for a region it defaulted at seal, logged with each signature as 1.5.5's signer
+//! logged it.
 //!
 //! THE REFUSALS (ARCHITECT ruling 2026-09-28): a binding that cannot open answers FAILED with one
 //! line per finding, each `credential: <text>` or `settings: <text>`. The kernel composes the 1.5.5
@@ -74,6 +76,7 @@ fn sigv4_params(m: &Map<String, Value>) -> Result<SigV4Params, Refusal> {
     Ok(SigV4Params {
         service: text(m, "service")?.ok_or_else(|| missing("service"))?,
         region: text(m, "region")?.ok_or_else(|| missing("region"))?,
+        region_unread: text(m, "region_unread")?,
     })
 }
 

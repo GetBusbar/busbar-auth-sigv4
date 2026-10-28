@@ -25,7 +25,8 @@ busbar-contract = { workspace = true, features = ["services-double"] }
 # busbar's published conformance suite and the door's own both-ways proof (`tests/conformance.rs`,
 # moved from busbar's crates/busbar-auth-sigv4) load the linked door and dlopen the built cdylib over
 # busbar's REAL loader: dev-only, never in the shipped artifact.
-busbar-plugin-loader = { workspace = true, features = ["conformance"] }
+busbar-plugin-loader = { workspace = true }
+busbar-test-kit = { workspace = true }
 # The binary-level both-ways suite (`tests/sigv4_both_ways.rs`, moved from busbar's root): it
 # recomputes the SigV4 signatures it sends and receives (sha2, hex) and reads the admin API's JSON.
 hex = { workspace = true }

@@ -46,6 +46,12 @@ pub struct SigV4Params {
     pub service: String,
     /// The AWS region.
     pub region: String,
+    /// The warning to log with each signature, set when the kernel resolved [`Self::region`] at seal
+    /// to the dialect's default because the provider's host names none (its `region_unread`): the
+    /// dialect's own words, 1.5.5's signer's (`proto/bedrock/writer.rs`, v1.5.5). `None`: the host
+    /// named the region, and nothing is logged.
+    #[serde(default)]
+    pub region_unread: Option<String>,
 }
 
 /// The request facts a signature covers: the walked request's own.
@@ -276,6 +282,12 @@ impl SigV4Binding {
         let Some(cred) = &self.credential else {
             return Err(NO_OWN_CREDENTIAL);
         };
+        if let Some(unread) = &self.params.region_unread {
+            // 1.5.5's signer warned here, on every signature it scoped to the default region (after
+            // the credential split, before signing), naming the host the request goes to. The line
+            // goes to this plugin's own log, and the host copies a WARN line to busbar's.
+            tracing::warn!(host = %facts.host, "{unread}");
+        }
         let region = self.params.region.as_str();
         let service = self.params.service.as_str();
         let (amzdate, datestamp) = sigv4::format_amz_time(facts.timestamp_epoch);

@@ -24,6 +24,7 @@ fn params() -> SigV4Params {
     SigV4Params {
         service: "iam".to_string(),
         region: "us-east-1".to_string(),
+        region_unread: None,
     }
 }
 
@@ -147,6 +148,7 @@ fn an_authorization_the_wire_cannot_carry_fails_with_its_reason() {
         SigV4Params {
             service: "iam\u{7f}".to_string(),
             region: "us-east-1".to_string(),
+            region_unread: None,
         },
         SigningCredential::parse(&format!("AKIDEXAMPLE:{SECRET}")).ok(),
     );

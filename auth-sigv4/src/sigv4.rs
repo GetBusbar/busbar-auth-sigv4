@@ -2,27 +2,19 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! AWS Signature Version 4 request signing — no AWS SDK: SHA-256 on ring's digest, the keyed HMAC
-//! the contract SDK's one wiped HMAC-SHA256 ([`hmac`]; coordinator ruling, Q128 auth-sigv4 round 2:
-//! THE DESIGN §6's zeroisation over §2's single backend, for that one primitive only). MOVED VERBATIM from the identity unit's `egress_auth/sigv4/mod.rs` in the kernel, staged
-//! `busbar-auth-outbound::sigv4` (KERNEL<>PLUGINS step 22), then here (AUTH-SPLIT: sigv4 is its
-//! own mechanism, its own crate): the canonical-request -> string-to-sign -> signature chain is
-//! verified against AWS's own published worked example (GET iam ListUsers, 2015-08-30) in the
-//! tests, so correctness does not rely on trusting the move.
+//! the contract SDK's one wiped HMAC-SHA256 ([`hmac`]). The canonical-request -> string-to-sign ->
+//! signature chain is verified against AWS's own published worked example (GET iam ListUsers,
+//! 2015-08-30) in the tests.
 //!
-//! Two changes, both at the edge of the chain and neither touching a signed byte:
-//!
-//! * THE DAILY KEY (BUSBAR-1.6.0.md THE DESIGN, §6.5: "SigV4 signs per request with a daily signing key derived
-//!   ahead of time"): [`sign_v4`] is split into [`signing_key`] (the HMAC chain over date, region,
+//! * The daily key: [`sign_v4`] is split into [`signing_key`] (the HMAC chain over date, region,
 //!   service) and [`sign_v4_with_key`] (the per-request part), so a caller holding the day's key
-//!   signs without re-deriving it. [`sign_v4`] is the two composed, exactly the old function.
-//! * THE SECRET IS ZEROISED (TODO item 586, #53/#54; THE DESIGN §6: "auth material is zeroised"):
-//!   the `AWS4<secret>` key material, every derived key, and the HMAC's own key state (the padded
+//!   signs without re-deriving it. [`sign_v4`] is the two composed.
+//! * The secret is zeroised: the `AWS4<secret>` key material, every derived key, and the HMAC's own key state (the padded
 //!   key blocks and the chaining state after each) are [`Zeroizing`] buffers, wiped on drop. A
 //!   library HMAC keeps its key's inner and outer pad states in a value it frees unwiped, so the
 //!   contract's wiped HMAC holds them.
 //!
-//! The signer's chain is shared with the INBOUND check ([`crate::inbound`], moved here from the
-//! kernel): it recomputes a client's signature through [`hmac`], [`signing_key`] and [`sha256_hex`],
+//! The signer's chain is shared with the INBOUND check ([`crate::inbound`]): it recomputes a client's signature through [`hmac`], [`signing_key`] and [`sha256_hex`],
 //! and derives the canonical URI with [`uri_encode_path`], keeping its own canonical signing (a
 //! quoted header value's interior spaces are kept verbatim there).
 
@@ -65,7 +57,7 @@ pub(crate) fn signing_key(
 }
 
 /// Wipe every value of a header list (a session token rides in one), then drop the entries
-/// (THE DESIGN §6: "auth material is zeroised").
+/// (auth material is zeroised).
 pub(crate) fn wipe(headers: &mut Vec<(String, String)>) {
     for (_, v) in headers.iter_mut() {
         v.zeroize();
@@ -89,9 +81,8 @@ fn push_encoded(out: &mut String, b: u8, keep_slash: bool) {
 }
 
 /// SigV4 URI-encode a request path: every byte outside the unreserved set (`A-Z a-z 0-9 - _ . ~`)
-/// and `/` becomes `%XX` (uppercase hex). MOVED VERBATIM from the kernel's
-/// `egress_auth/sigv4::uri_encode_path`, the encoder the inbound check derives the canonical URI
-/// with (1.5.5's ingress verify called it over the received path).
+/// and `/` becomes `%XX` (uppercase hex). The inbound check derives the canonical URI with it
+/// over the received path.
 pub fn uri_encode_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for &b in path.as_bytes() {

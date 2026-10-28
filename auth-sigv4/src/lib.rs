@@ -3,7 +3,6 @@
 
 //! # busbar-auth-sigv4 — AWS SigV4, outbound and inbound, one auth-kind plugin
 //!
-//! BUSBAR-1.6.0.md THE DESIGN, §6 (OWNER-LOCKED 2026-09-27, split by mechanism per ARCHITECT ruling 2026-09-29):
 //! AWS Signature Version 4 is its own mechanism — a per-request signature over the request, not a
 //! credential carried verbatim — and lives in its own plugin, `busbar-auth-sigv4`, loaded when
 //! some provider uses `auth: sigv4`. It speaks the auth kind's memory ABI
@@ -12,37 +11,30 @@
 //! * `open_outbound` binds the style to its credential and settings and answers a handle
 //!   (generation data). It never touches the network.
 //! * `fields` is the call the binding's transport makes through the host auth handle at the
-//!   style's `HeadBody` point (THE DESIGN §6, "Auth points and guest lists"; §11.6): the request is
+//!   style's `HeadBody` point: the request is
 //!   signed for this attempt, the fields written into the host's buffer, which join the head before
 //!   the framer encodes it. It serves BOTH credential modes `sigv4` declares
 //!   ([`busbar_contract::abi::auth::STYLE_CALLER_CREDENTIAL`]): the operator's own bound
 //!   credential ([`busbar_contract::abi::auth::MODE_OWN`], the day-key-cached
 //!   `signing::SigV4Binding`), and the caller's verified credential passed per-request
-//!   ([`busbar_contract::abi::auth::MODE_PASSTHROUGH`]) — ARCHITECT ruling 2026-09-29: a
-//!   credential SOURCE is not a mechanism, so there is no separate `caller-credential` style; a
-//!   passthrough binding is built fresh, per request, from the caller's credential, exactly the
-//!   code path the operator-credential binding signs with, minus the day-key cache (the caller's
-//!   key varies request to request, so there is nothing to hold ahead of time).
-//!   `fields` never answers READY with no field (OWNER RULING): own mode on a binding opened with
+//!   ([`busbar_contract::abi::auth::MODE_PASSTHROUGH`]). A credential SOURCE is not a
+//!   mechanism, so there is no separate `caller-credential` style; a passthrough binding is built
+//!   fresh, per request, from the caller's credential, exactly the code path the
+//!   operator-credential binding signs with, minus the day-key cache (the caller's key varies
+//!   request to request, so there is nothing to hold ahead of time).
+//!   `fields` never answers READY with no field: own mode on a binding opened with
 //!   no credential (passthrough-only), a passthrough with no caller credential or a malformed one,
 //!   and a signature whose `Authorization` value no header may carry each FAIL with the reason —
 //!   the request is never sent unsigned. A malformed operator credential never gets that far:
 //!   `open_outbound` refuses it, one `credential: ...` line per finding.
 //! * `outbound_ready` is the handle's `ready` fact for the health prober: true for a handle this
 //!   generation holds — a sigv4 binding never mints, so there is nothing else to wait for.
-//! * `tick` pre-derives the SigV4 day keys ahead of UTC midnight (BUSBAR-1.6.0.md §6.5).
+//! * `tick` pre-derives the SigV4 day keys ahead of UTC midnight.
 //!
-//! The style logic is `egress_auth/*` MOVED VERBATIM (KERNEL<>PLUGINS step 22), staged
-//! `busbar-auth-outbound::{sigv4,signing,style}` (step 22), then split here by mechanism
-//! (AUTH-SPLIT): each module names the file it came from.
+//! ## Inbound: SigV4 verification
 //!
-//! ## Inbound: SigV4 verification, moved here from the kernel
-//!
-//! BUSBAR-1.6.0.md THE DESIGN, §6 "Inbound verify": the kernel's inbound SigV4 "reads through a
-//! host store service"; Appendix A, B.3: "Inbound SigV4 moves into an auth plugin's verify over a
-//! store-read host service, keeping the dummy-secret timing equivalence for an unknown
-//! AccessKeyId". The kernel's pre-step and `verify_sigv4_ingress_credential` (and
-//! `busbar-kernel-identity`'s `ingress_sigv4`) are [`inbound`], verbatim; `verify` serves them at
+//! The inbound SigV4 check reads through a host store service, keeping the dummy-secret timing
+//! equivalence for an unknown AccessKeyId. It is [`inbound`]; `verify` serves it at
 //! the `HeadBody` point (`CAP_INBOUND`, every header line, the body):
 //!
 //! * no `authorization` line, or one that does not open with `AWS4-HMAC-SHA256`: PASS (not this
@@ -57,11 +49,11 @@
 //!   admits: an IDENTITY whose subject is the AccessKeyId (the kernel resolves the governance key
 //!   from the credential kind and the subject), no TTL (never cached: the kernel never cached a
 //!   SigV4 verdict), no replay claim, no credential. Whatever the verdict, a SigV4 `authorization`
-//!   line is named for the transport to strip (THE DESIGN §6). Every failure is the one REJECT,
+//!   line is named for the transport to strip. Every failure is the one REJECT,
 //!   the kernel's one opaque 401; the plugin's own log names its reason (module `sigv4`), never
 //!   the signature, the secret or a token.
 //!
-//! NOTHING OF `verify`'S IS CACHED. Every `verify` reads the secret through the host's
+//! Nothing of `verify`'s is cached. Every `verify` reads the secret through the host's
 //! `records.secret` (the contract SDK's `VerifyOp::records_secret`): a `verify` whose read pends
 //! answers PENDING on its ticket, and the host re-enters it from the top, where the re-issued handle
 //! reads the stored answer. A ticket-less `verify` that needs the read answers REFUSED, and the host
@@ -69,13 +61,11 @@
 //!
 //! The login pair is not served and answers REFUSED (the tail does not declare `CAP_LOGIN`).
 //!
-//! THE DOOR is the contract SDK's safe auth kit (`auth_door!(verify_and_outbound: ..)` over
+//! The door is the contract SDK's safe auth kit (`auth_door!(verify_and_outbound: ..)` over
 //! `instance::SigV4`, a `VerifyPlugin` and an `OutboundPlugin` over one instance): the kit reads the
 //! host's frames, writes the fields and the verdict under the short-buffer rule, calls the host's
 //! services and keeps every answer's memory in the answering instance. So this crate is
-//! `#![forbid(unsafe_code)]` and holds no per-thread or process-global state (THE DESIGN §2: "Plane,
-//! hook, auth (inbound and outbound) and secret plugins are `#![forbid(unsafe_code)]`"; "A plugin
-//! holds no process-global state"). The one exported symbol is the sibling `-plugin` cdylib's.
+//! `#![forbid(unsafe_code)]` and holds no per-thread or process-global state. The one exported symbol is the sibling `-plugin` cdylib's.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -120,10 +110,9 @@ use crate::inbound::{Judgement, Read, SecretSource};
 use crate::instance::{SigV4, Signed, Who};
 use crate::signing::SignFacts;
 
-/// The flags every field this plugin writes carries: NONE. 1.5.5 sent its credential headers
-/// indexable, and an h2 encoder that honoured `FIELD_SENSITIVE` would send them never-indexed —
-/// different bytes (ARCHITECT ruling 2026-09-28, Q4: the 1.5.5 bytes win; TODO item 583's
-/// sensitive marking is a behaviour change not taken without the owner).
+/// The flags every field this plugin writes carries: NONE. Credential headers go out
+/// indexable, and an h2 encoder that honoured `FIELD_SENSITIVE` would send them never-indexed,
+/// which is different bytes on the wire.
 const FIELD_FLAGS: u32 = 0;
 
 /// The one style this plugin serves: it signs the body, so it needs the `HeadBody` point (THE
@@ -169,7 +158,7 @@ const fn issued(class: u32, word: &'static str) -> MarkWord {
 }
 
 /// The Statement's word marks: the carrier `verify` reads its credential from, and the shape of
-/// the `sigv4` credential the host issues for it (1.5.5's AWS long-term key shape: an AccessKeyId
+/// the `sigv4` credential the host issues for it (the AWS long-term key shape: an AccessKeyId
 /// of `AKIA` then 16 of [A-Z0-9], 20 in all, and a 40-character secret access key over the base64
 /// alphabet). The host draws every symbol from the OS CSPRNG over these alphabets and names no
 /// format of its own.
@@ -253,8 +242,8 @@ pub(crate) fn sent_content_type<'a>(
 }
 
 /// The SigV4 facts of a `fields` call: the walked request's method, host, path, query and sent
-/// content type (BUSBAR-1.6.0.md THE DESIGN §6: "SigV4 signs the real method and query of the
-/// walked request"); `None` when the host sent no method, host or path.
+/// content type (SigV4 signs the real method and query of the
+/// walked request); `None` when the host sent no method, host or path.
 fn sign_facts<'a>(view: &FieldsView<'a>, hash: &'a str) -> Option<SignFacts<'a>> {
     Some(SignFacts {
         method: fact(view.method())?,
@@ -287,8 +276,7 @@ impl OutboundPlugin for SigV4 {
         Ok(SigV4::new(generation))
     }
 
-    /// Bind `sigv4`; FAILED carries one `credential: …` / `settings: …` line per finding
-    /// (ARCHITECT ruling 2026-09-28).
+    /// Bind `sigv4`; FAILED carries one `credential: …` / `settings: …` line per finding.
     fn open_outbound(
         &self,
         style: &str,
@@ -420,8 +408,7 @@ impl VerifyPlugin for SigV4 {
             Judgement::Pending => return Poll::Pending,
         };
         let mut answer = Answer::from(verdict);
-        // THE CREDENTIAL LINE, named whatever the verdict (THE DESIGN §6, "Auth points and guest
-        // lists"): a SigV4 `authorization` line is this plugin's, and the plane never sees it.
+        // The credential line is named whatever the verdict: a SigV4 `authorization` line is this plugin's, and the plane never sees it.
         if inbound::carries_sigv4(&request) {
             answer.strips = vec![Strip::field(inbound::AUTHORIZATION)];
         }

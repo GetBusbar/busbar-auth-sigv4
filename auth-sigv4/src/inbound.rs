@@ -1,36 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! INBOUND AWS Signature Version 4 verification: the check a CLIENT's signature against busbar
-//! passes before the request is admitted. MOVED HERE FROM THE KERNEL (BUSBAR-1.6.0.md THE DESIGN,
-//! §6 "Inbound verify": "its inbound SigV4 reads through a host store service"; Appendix A, B.3:
-//! "Inbound SigV4 moves into an auth plugin's verify over a store-read host service, keeping the
-//! dummy-secret timing equivalence for an unknown AccessKeyId").
+//! Inbound AWS Signature Version 4 verification: the check a CLIENT's signature against busbar
+//! passes before the request is admitted. The secret is read through a host store service, keeping
+//! the dummy-secret timing equivalence for an unknown AccessKeyId.
 //!
-//! Two sources, each ported verbatim:
+//! The pieces: the `Authorization` parse, the `x-amz-date` window, and the canonical signing the
+//! check recomputes ([`sign_v4`], which keeps a quoted header value's interior spaces verbatim,
+//! unlike the outbound signer); the structural gate before buffering the body; and the credential
+//! check (the signed-header prefilter, `UNSIGNED-PAYLOAD` refused, the body hash against the signed
+//! `x-amz-content-sha256` in constant time, the dummy-secret rule). The HMAC chain, the key
+//! derivation and the algorithm tokens are the outbound signer's ([`crate::sigv4`]), shared.
 //!
-//! * `busbar-kernel-identity/src/ingress_sigv4.rs`: the `Authorization` parse, the `x-amz-date`
-//!   window, and the canonical signing the check recomputes ([`sign_v4`], which keeps a quoted
-//!   header value's interior spaces verbatim, unlike the outbound signer). The HMAC chain, the key
-//!   derivation and the algorithm tokens are the outbound signer's ([`crate::sigv4`]), shared.
-//! * `busbar-kernel/src/auth/mod.rs`: `has_sigv4_authorization`, `canonical_query_string`, the
-//!   structural gate `auth_middleware` ran before buffering the body, and
-//!   `verify_sigv4_ingress_credential` (the signed-header prefilter, `UNSIGNED-PAYLOAD` refused, the
-//!   body hash against the signed `x-amz-content-sha256` in constant time, the dummy-secret rule).
-//!
-//! What changed is only WHERE THE SECRET COMES FROM: the kernel looked the AccessKeyId up in its
-//! governance store; this check reads it through the host's `records.secret` service
+//! The AccessKeyId is looked up through the host's `records.secret` service
 //! ([`SecretSource`]), which answers a fixed dummy secret, not live, for an id it does not hold, in
 //! the time it answers a known one. The full constant-time verification ALWAYS runs over whatever
 //! secret came back, and only (signature verified AND live) admits: an unknown id, a disabled or
 //! revoked key and a bad signature reject alike.
 //!
-//! EVERY FAILURE IS ONE ANSWER ([`Judgement::Reject`]): the kernel maps it to its one opaque 401.
+//! Every failure is one answer ([`Judgement::Reject`]): the kernel maps it to its one opaque 401.
 //! The reason never reaches the client: [`judge`] names a coarse category in the plugin's OWN log
 //! (module `sigv4`; an end-user decline at `info`, a host read failure at `warn`), with the
 //! AccessKeyId (an identifier) where one parsed. The signature-stage reasons share one category,
 //! so the log does not tell an unknown AccessKeyId from a bad signature either. No secret, no
 //! signature, no token, no body is ever written anywhere.
+
+use std::borrow::Cow;
 
 use zeroize::Zeroizing;
 
@@ -61,9 +56,11 @@ const DUMMY_SECRET: &str = "AWS4-DUMMY-SECRET-FOR-CONSTANT-TIME-REJECT-PATH";
 /// do not treat quotes specially). ONLY the ASCII space character is treated as whitespace — tabs,
 /// NBSP (U+00A0), newlines, and every other Unicode whitespace codepoint are preserved verbatim,
 /// because AWS does the same. (This is intentionally NOT `split_whitespace`, which would also fold
-/// tabs/NBSP/newlines and break the signature.) Matches busbar 1.5.5
-/// (`crates/busbar/src/sigv4.rs:137-155`).
-fn canonicalize_header_value(v: &str) -> String {
+/// tabs/NBSP/newlines and break the signature.) A value with nothing to trim or collapse is itself.
+fn canonicalize_header_value(v: &str) -> Cow<'_, str> {
+    if !v.starts_with(' ') && !v.ends_with(' ') && !v.contains("  ") {
+        return Cow::Borrowed(v);
+    }
     let mut out = String::with_capacity(v.len());
     let mut prev_space = false;
     for ch in v.chars() {
@@ -80,50 +77,101 @@ fn canonicalize_header_value(v: &str) -> String {
             out.push(ch);
         }
     }
-    out
+    Cow::Owned(out)
+}
+
+/// A header name lowercased (`str::to_lowercase`), borrowed when it has nothing to lower.
+fn lowercase_name(k: &str) -> Cow<'_, str> {
+    if k.is_ascii() && !k.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Borrowed(k)
+    } else {
+        Cow::Owned(k.to_lowercase())
+    }
 }
 
 /// Compute the SigV4 signature hex + the `SignedHeaders` string for a request. `headers` is the
 /// full set of headers to sign (names case-insensitive); they are lowercased + sorted internally.
 /// `canonical_uri` must already be URI-encoded; `canonical_querystring` sorted + encoded (or empty).
 #[allow(clippy::too_many_arguments)]
-pub fn sign_v4(
+pub fn sign_v4<H: AsRef<str>>(
     secret: &str,
     region: &str,
     service: &str,
     method: &str,
     canonical_uri: &str,
     canonical_querystring: &str,
-    headers: &[(String, String)],
+    headers: &[(H, H)],
     payload_hash: &str,
     amzdate: &str,
     datestamp: &str,
 ) -> (String, String) {
-    let mut h: Vec<(String, String)> = headers
+    let mut h: Vec<(Cow<'_, str>, Cow<'_, str>)> = headers
         .iter()
         // AWS SigV4 canonicalization of a header value, quoted or not: trim leading/trailing ASCII
         // spaces (0x20) AND collapse runs of sequential ASCII spaces to a single space. AWS operates
         // on ASCII space ONLY — NBSP (U+00A0), tabs, and other Unicode whitespace are NOT treated as
         // whitespace and must pass through verbatim, byte-for-byte, into the signed value.
-        .map(|(k, v)| (k.to_lowercase(), canonicalize_header_value(v)))
+        .map(|(k, v)| {
+            (
+                lowercase_name(k.as_ref()),
+                canonicalize_header_value(v.as_ref()),
+            )
+        })
         .collect();
     h.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let canonical_headers: String = h.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
-    let signed_headers = h
-        .iter()
-        .map(|(k, _)| k.as_str())
-        .collect::<Vec<_>>()
-        .join(";");
+    // The canonical request, `method\nuri\nquery\n<name:value\n...>\nsigned;headers\npayload_hash`,
+    // written into one buffer.
+    let mut signed_headers = String::new();
+    for (i, (k, _)) in h.iter().enumerate() {
+        if i > 0 {
+            signed_headers.push(';');
+        }
+        signed_headers.push_str(k);
+    }
+    let mut canonical_request = String::with_capacity(
+        method.len()
+            + canonical_uri.len()
+            + canonical_querystring.len()
+            + h.iter().map(|(k, v)| k.len() + v.len() + 2).sum::<usize>()
+            + signed_headers.len()
+            + payload_hash.len()
+            + 5,
+    );
+    for part in [method, canonical_uri, canonical_querystring] {
+        canonical_request.push_str(part);
+        canonical_request.push('\n');
+    }
+    for (k, v) in &h {
+        canonical_request.push_str(k);
+        canonical_request.push(':');
+        canonical_request.push_str(v);
+        canonical_request.push('\n');
+    }
+    canonical_request.push('\n');
+    canonical_request.push_str(&signed_headers);
+    canonical_request.push('\n');
+    canonical_request.push_str(payload_hash);
 
-    let canonical_request = format!(
-        "{method}\n{canonical_uri}\n{canonical_querystring}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
-    );
-    let scope = format!("{datestamp}/{region}/{service}/{SIGNATURE_TERMINATION}");
-    let string_to_sign = format!(
-        "{SIGV4_ALGORITHM}\n{amzdate}\n{scope}\n{}",
-        sha256_hex(canonical_request.as_bytes())
-    );
+    // The string to sign, `algorithm\namzdate\ndate/region/service/aws4_request\nhex(sha256(cr))`.
+    let mut string_to_sign = String::with_capacity(160 + region.len() + service.len());
+    for part in [
+        SIGV4_ALGORITHM,
+        "\n",
+        amzdate,
+        "\n",
+        datestamp,
+        "/",
+        region,
+        "/",
+        service,
+        "/",
+        SIGNATURE_TERMINATION,
+        "\n",
+    ] {
+        string_to_sign.push_str(part);
+    }
+    string_to_sign.push_str(&sha256_hex(canonical_request.as_bytes()));
     let key = signing_key(secret, datestamp, region, service);
     let signature = hex::encode(&hmac(&key, string_to_sign.as_bytes())[..]);
     (signature, signed_headers)
@@ -303,7 +351,7 @@ fn parse_amz_date(amzdate: &str) -> Option<u64> {
 /// MUST be [`canonical_query_string`]'s (or empty). `headers` carries the ACTUAL request header
 /// values for (at least) every name in the parsed `SignedHeaders` list; extra headers are ignored
 /// (only the signed ones enter the canonical request).
-pub struct InboundRequest<'a> {
+pub struct InboundRequest<'a, H = String> {
     /// The request method, as sent.
     pub method: &'a str,
     /// The URI-encoded request path.
@@ -311,7 +359,7 @@ pub struct InboundRequest<'a> {
     /// The sorted, encoded query string (or empty).
     pub canonical_querystring: &'a str,
     /// (name, value) pairs from the request; names case-insensitive. Must include every signed header.
-    pub headers: &'a [(String, String)],
+    pub headers: &'a [(H, H)],
     /// The hex SHA-256 payload hash the client signed (its `x-amz-content-sha256` header value).
     pub payload_hash: &'a str,
     /// The request's `x-amz-date` (`YYYYMMDDTHHMMSSZ`).
@@ -337,9 +385,9 @@ pub struct InboundRequest<'a> {
 /// # Errors
 ///
 /// The [`VerifyError`] that rejected the request (never surfaced past this module).
-pub fn verify_inbound_sigv4(
+pub fn verify_inbound_sigv4<H: AsRef<str>>(
     parsed: &ParsedAuthHeader,
-    req: &InboundRequest<'_>,
+    req: &InboundRequest<'_, H>,
     secret: &str,
     now: u64,
 ) -> Result<(), VerifyError> {
@@ -375,20 +423,20 @@ pub fn verify_inbound_sigv4(
         }
         prev = Some(name);
     }
-    // Each signed name takes the FIRST matching request header's value (case-insensitive), as
-    // busbar 1.5.5 does (`crates/busbar/src/sigv4.rs:446-460`); a signed name the request does not
+    // Each signed name takes the FIRST matching request header's value (case-insensitive); a signed name the request does not
     // carry cannot be reconstructed. `sign_v4` canonicalizes the value.
-    let mut selected: Vec<(String, String)> = Vec::with_capacity(signed.len());
+    // Every signed name is already lowercase ASCII-wise (checked above), so it is its own lowered
+    // name.
+    let mut selected: Vec<(&str, &str)> = Vec::with_capacity(signed.len());
     for name in &signed {
-        let lname = name.to_ascii_lowercase();
         let Some((_, value)) = req
             .headers
             .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(&lname))
+            .find(|(k, _)| k.as_ref().eq_ignore_ascii_case(name))
         else {
             return Err(VerifyError::SignedHeadersMismatch);
         };
-        selected.push((lname, value.clone()));
+        selected.push((*name, value.as_ref()));
     }
 
     // (4) Recompute — same canonicalization, byte-for-byte.
@@ -438,11 +486,16 @@ pub fn canonical_query_string(query: Option<&str>) -> String {
         .map(|pair| pair.split_once('=').unwrap_or((pair, "")))
         .collect();
     pairs.sort();
-    pairs
-        .into_iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join("&")
+    let mut out = String::with_capacity(q.len() + pairs.len());
+    for (i, (k, v)) in pairs.into_iter().enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        out.push_str(k);
+        out.push('=');
+        out.push_str(v);
+    }
+    out
 }
 
 /// A header value as the kernel's `HeaderValue::to_str` read it: the text when every byte is
@@ -622,30 +675,31 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
 
     // PREFILTER: only the headers named in `SignedHeaders`, names lowercased, each value read as the
     // kernel's `HeaderValue::to_str` read it (a value that is not visible ASCII is left out).
-    let signed_names: std::collections::HashSet<String> = parsed
-        .signed_headers
-        .split(';')
-        .map(|h| h.trim().to_ascii_lowercase())
-        .filter(|h| !h.is_empty())
-        .collect();
-    let headers: Vec<(String, String)> = req
+    // Borrowed from the request: every name match below is ASCII case-insensitive.
+    let signed = |name: &str| {
+        parsed
+            .signed_headers
+            .split(';')
+            .map(str::trim)
+            .any(|h| !h.is_empty() && h.eq_ignore_ascii_case(name))
+    };
+    let headers: Vec<(&str, &str)> = req
         .lines
         .iter()
         .filter_map(|(name, value)| {
-            let lname = std::str::from_utf8(name).ok()?.to_ascii_lowercase();
-            if !signed_names.contains(&lname) {
-                return None;
-            }
-            header_str(value).map(|v| (lname, v.to_string()))
+            let name = std::str::from_utf8(name).ok().filter(|n| signed(n))?;
+            header_str(value).map(|v| (name, v))
         })
         .collect();
+    let signed_value = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| *v)
+    };
 
     // The payload hash the client signed is its (signed) `x-amz-content-sha256` value.
-    let Some(payload_hash) = headers
-        .iter()
-        .find(|(k, _)| k == X_AMZ_CONTENT_SHA256)
-        .map(|(_, v)| v.clone())
-    else {
+    let Some(payload_hash) = signed_value(X_AMZ_CONTENT_SHA256) else {
         return reject("x-amz-content-sha256 is not signed");
     };
     // BODY INTEGRITY: `UNSIGNED-PAYLOAD` is refused for governed ingress, and the body's own hash
@@ -653,15 +707,20 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
     if payload_hash.eq_ignore_ascii_case(UNSIGNED_PAYLOAD) {
         return reject("unsigned payload refused");
     }
-    let actual_body_hash = sha256_hex(body);
-    if !constant_time_eq(&actual_body_hash, &payload_hash.to_ascii_lowercase()) {
+    // Both sides hex on the stack: a declared hash that is not 64 bytes long cannot match.
+    let mut actual = [0_u8; 64];
+    let mut declared = [0_u8; 64];
+    let digest = ring::digest::digest(&ring::digest::SHA256, body);
+    let hashed =
+        hex::encode_to_slice(digest, &mut actual).is_ok() && payload_hash.len() == declared.len();
+    if hashed {
+        declared.copy_from_slice(payload_hash.as_bytes());
+        declared.make_ascii_lowercase();
+    }
+    if !(hashed && constant_time_eq(&actual, &declared)) {
         return reject("payload hash mismatch");
     }
-    let Some(amzdate) = headers
-        .iter()
-        .find(|(k, _)| k == X_AMZ_DATE)
-        .map(|(_, v)| v.clone())
-    else {
+    let Some(amzdate) = signed_value(X_AMZ_DATE) else {
         return reject("x-amz-date is not signed");
     };
 
@@ -686,8 +745,8 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
         canonical_uri: &canonical_uri,
         canonical_querystring: &canonical_qs,
         headers: &headers,
-        payload_hash: &payload_hash,
-        amzdate: &amzdate,
+        payload_hash,
+        amzdate,
     };
 
     // THE SECRET, from the host. An UNKNOWN AccessKeyId does NOT short-circuit: the host answers its

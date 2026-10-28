@@ -6,7 +6,7 @@
 //! verdict, no per-ticket state (the kernel never cached a SigV4 verdict, and the secret is the
 //! host's `records.secret` answer, read on every call). The answers' memory, the instance pointer
 //! and the host tables are the contract kit's (`busbar_contract::auth_door!`), so this crate holds
-//! no per-thread or process-global store (THE DESIGN §2).
+//! no per-thread or process-global store.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -147,7 +147,7 @@ impl SigV4 {
     /// `tick`: pre-derive every live binding's day keys ahead of midnight. Answers the next tick,
     /// ALWAYS: the schedule runs from the instance's open, before any binding exists, and a `0`
     /// would end it for good (`TickOut::next_tick_ns`), leaving a later binding's day keys to be
-    /// derived on the request path (THE DESIGN §6.5: "a daily signing key derived ahead of time").
+    /// derived on the request path (a daily signing key is derived ahead of time).
     pub(crate) fn tick(&self, now_ns: u64) -> u64 {
         let bindings: Vec<Arc<SigV4Binding>> = self
             .handles

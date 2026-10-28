@@ -5,13 +5,10 @@
 //! the session token of a split signing credential.
 //!
 //! These are the plugin's own material, not a value the kernel resolved and lent it, so they are not
-//! the contract's sealed `Secret<T>` (busbar #1021, BUSBAR-1.6.0.md Part 2 #54 / #65: that type's
-//! one raw accessor takes a kernel seal, which a plugin neither holds nor can obtain). `Held` keeps
-//! exactly the hygiene the plugin relied on when it wrapped them in the contract's former redaction
-//! wrapper:
+//! the contract's sealed `Secret<T>` (that type's one raw accessor takes a kernel seal, which a
+//! plugin neither holds nor can obtain). `Held` keeps the same hygiene:
 //!
-//! * **`Debug` / `Display` never reveal it.** Both print the literal `"[REDACTED]"`, byte for byte
-//!   what the former wrapper printed, so a struct that embeds a `Held` field and derives `Debug`
+//! * **`Debug` / `Display` never reveal it.** Both print the literal `"[REDACTED]"`, so a struct that embeds a `Held` field and derives `Debug`
 //!   cannot leak it into a log line, a panic message or an error `{:?}`.
 //! * **It does not serialize.** `Held` implements neither `Serialize` nor `Deserialize`.
 //! * **It zeroizes its backing memory on drop.**
@@ -34,7 +31,7 @@ use zeroize::Zeroize;
 
 /// A credential this plugin holds. `Debug`/`Display` print `"[REDACTED]"`; it never serializes; its
 /// backing memory is zeroized on drop. See the module docs. `Default` is an EMPTY value (no
-/// material), as the former wrapper's was.
+/// material).
 #[derive(Default)]
 pub(crate) struct Held<T: Zeroize>(T);
 

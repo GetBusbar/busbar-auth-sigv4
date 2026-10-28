@@ -481,3 +481,62 @@ fn a_multibyte_service_binds_and_is_kept() {
             .expect("the binding opens");
     assert!(s.binding(s.keep(binding)).is_some(), "the handle is kept");
 }
+
+/// THE LENGTH LINE IS NEVER SIGNED (busbar Q128 transport-http, ruling (D)). The one line a framing
+/// adds after the auth, HTTP/2's `content-length: 0` for an empty payload-method body (as 1.5.5's
+/// client added it), is signed by no auth: this style signs 1.5.5's fixed set (v1.5.5
+/// `proto/bedrock/writer.rs`), so a head carrying a length line, any length or none, signs to the
+/// same bytes, with `SignedHeaders` never naming `content-length`.
+#[test]
+fn no_length_line_is_ever_signed() {
+    const VECTOR: &str = "AWS4-HMAC-SHA256 \
+        Credential=AKIDEXAMPLE/20150830/us-east-1/svc/aws4_request, \
+        SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, \
+        Signature=758de1b14d97b1d58b6307ff4c2924f7bdb3cbe3773ed02f7329925faee62472";
+    let s = SigV4::new(1);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    let hash = sha256_hex(br#"{"messages":[]}"#);
+    let line = |name: &'static str, value: &'static str| (name.as_bytes(), value.as_bytes());
+    let heads: [&[(&[u8], &[u8])]; 4] = [
+        &[line("content-type", "application/json")],
+        &[
+            line("content-type", "application/json"),
+            line("content-length", "15"),
+        ],
+        &[
+            line("content-type", "application/json"),
+            line("content-length", "0"),
+        ],
+        &[
+            line("content-type", "application/json"),
+            line("host", "runtime.signer.example"),
+            line("accept", "*/*"),
+            line("content-length", "15"),
+        ],
+    ];
+    for head in heads {
+        let facts = SignFacts {
+            method: "POST",
+            host: "runtime.signer.example",
+            path: "/model/m/converse",
+            query: None,
+            content_type: crate::sent_content_type(head.iter().copied()),
+            payload_hash: &hash,
+            timestamp_epoch: 1_440_938_160,
+        };
+        let authorization = authorization_of(s.sign(handle, Who::Own, Some(facts)));
+        let signed = authorization
+            .split("SignedHeaders=")
+            .nth(1)
+            .and_then(|r| r.split(',').next())
+            .expect("a SignedHeaders list");
+        assert!(
+            !signed.split(';').any(|h| h == "content-length"),
+            "no length line is signed: {authorization}"
+        );
+        assert_eq!(
+            authorization, VECTOR,
+            "a head with or without a length line signs to 1.5.5's bytes"
+        );
+    }
+}

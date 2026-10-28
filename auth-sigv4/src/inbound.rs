@@ -1,31 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! INBOUND AWS Signature Version 4 verification: the check a CLIENT's signature against busbar
-//! passes before the request is admitted. MOVED HERE FROM THE KERNEL (BUSBAR-1.6.0.md THE DESIGN,
-//! §6 "Inbound verify": "its inbound SigV4 reads through a host store service"; Appendix A, B.3:
-//! "Inbound SigV4 moves into an auth plugin's verify over a store-read host service, keeping the
-//! dummy-secret timing equivalence for an unknown AccessKeyId").
+//! Inbound AWS Signature Version 4 verification: the check a CLIENT's signature against busbar
+//! passes before the request is admitted. The secret is read through a host store service, keeping
+//! the dummy-secret timing equivalence for an unknown AccessKeyId.
 //!
-//! Two sources, each ported verbatim:
+//! The pieces: the `Authorization` parse, the `x-amz-date` window, and the canonical signing the
+//! check recomputes ([`sign_v4`], which keeps a quoted header value's interior spaces verbatim,
+//! unlike the outbound signer); the structural gate before buffering the body; and the credential
+//! check (the signed-header prefilter, `UNSIGNED-PAYLOAD` refused, the body hash against the signed
+//! `x-amz-content-sha256` in constant time, the dummy-secret rule). The HMAC chain, the key
+//! derivation and the algorithm tokens are the outbound signer's ([`crate::sigv4`]), shared.
 //!
-//! * `busbar-kernel-identity/src/ingress_sigv4.rs`: the `Authorization` parse, the `x-amz-date`
-//!   window, and the canonical signing the check recomputes ([`sign_v4`], which keeps a quoted
-//!   header value's interior spaces verbatim, unlike the outbound signer). The HMAC chain, the key
-//!   derivation and the algorithm tokens are the outbound signer's ([`crate::sigv4`]), shared.
-//! * `busbar-kernel/src/auth/mod.rs`: `has_sigv4_authorization`, `canonical_query_string`, the
-//!   structural gate `auth_middleware` ran before buffering the body, and
-//!   `verify_sigv4_ingress_credential` (the signed-header prefilter, `UNSIGNED-PAYLOAD` refused, the
-//!   body hash against the signed `x-amz-content-sha256` in constant time, the dummy-secret rule).
-//!
-//! What changed is only WHERE THE SECRET COMES FROM: the kernel looked the AccessKeyId up in its
-//! governance store; this check reads it through the host's `records.secret` service
+//! The AccessKeyId is looked up through the host's `records.secret` service
 //! ([`SecretSource`]), which answers a fixed dummy secret, not live, for an id it does not hold, in
 //! the time it answers a known one. The full constant-time verification ALWAYS runs over whatever
 //! secret came back, and only (signature verified AND live) admits: an unknown id, a disabled or
 //! revoked key and a bad signature reject alike.
 //!
-//! EVERY FAILURE IS ONE ANSWER ([`Judgement::Reject`]): the kernel maps it to its one opaque 401.
+//! Every failure is one answer ([`Judgement::Reject`]): the kernel maps it to its one opaque 401.
 //! The reason never reaches the client: [`judge`] names a coarse category in the plugin's OWN log
 //! (module `sigv4`; an end-user decline at `info`, a host read failure at `warn`), with the
 //! AccessKeyId (an identifier) where one parsed. The signature-stage reasons share one category,
@@ -63,8 +56,7 @@ const DUMMY_SECRET: &str = "AWS4-DUMMY-SECRET-FOR-CONSTANT-TIME-REJECT-PATH";
 /// do not treat quotes specially). ONLY the ASCII space character is treated as whitespace — tabs,
 /// NBSP (U+00A0), newlines, and every other Unicode whitespace codepoint are preserved verbatim,
 /// because AWS does the same. (This is intentionally NOT `split_whitespace`, which would also fold
-/// tabs/NBSP/newlines and break the signature.) Matches busbar 1.5.5
-/// (`crates/busbar/src/sigv4.rs:137-155`). A value with nothing to trim or collapse is itself.
+/// tabs/NBSP/newlines and break the signature.) A value with nothing to trim or collapse is itself.
 fn canonicalize_header_value(v: &str) -> Cow<'_, str> {
     if !v.starts_with(' ') && !v.ends_with(' ') && !v.contains("  ") {
         return Cow::Borrowed(v);
@@ -431,8 +423,7 @@ pub fn verify_inbound_sigv4<H: AsRef<str>>(
         }
         prev = Some(name);
     }
-    // Each signed name takes the FIRST matching request header's value (case-insensitive), as
-    // busbar 1.5.5 does (`crates/busbar/src/sigv4.rs:446-460`); a signed name the request does not
+    // Each signed name takes the FIRST matching request header's value (case-insensitive); a signed name the request does not
     // carry cannot be reconstructed. `sign_v4` canonicalizes the value.
     // Every signed name is already lowercase ASCII-wise (checked above), so it is its own lowered
     // name.

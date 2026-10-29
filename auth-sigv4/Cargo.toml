@@ -35,6 +35,6 @@ tracing = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
-# The contract's test kit (`busbar_contract::testkit::WarnCapture`) for the reject-log test: it is
-# compiled only under the dev-only `test-seal` feature, which no non-dev edge enables.
-busbar-contract = { workspace = true, features = ["test-seal"] }
+# The test kit's in-memory log double (`busbar_test_kit::warn_capture::WarnCapture`) for the
+# reject-log test.
+busbar-test-kit = { workspace = true }

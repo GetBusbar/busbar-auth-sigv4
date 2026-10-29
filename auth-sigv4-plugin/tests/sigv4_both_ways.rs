@@ -651,7 +651,18 @@ fn busbar_exe() -> PathBuf {
     static BUILT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     BUILT.get_or_init(|| {
         let status = Command::new("cargo")
-            .args(["build", "--release", "-p", "busbar", "--bin", "busbar"])
+            // The shipped busbar (dist/default: the composition root with its linked plugins),
+            // as busbar's signing gate builds it; `-p busbar` alone is bare core.
+            .args([
+                "build",
+                "--release",
+                "--manifest-path",
+                "dist/default/Cargo.toml",
+                "--target-dir",
+                "target",
+                "--bin",
+                "busbar",
+            ])
             .current_dir(&root)
             // The binary is read back from `<checkout>/target/release`: an inherited
             // CARGO_TARGET_DIR (set for the outer `cargo test`) would redirect it.
@@ -698,8 +709,7 @@ fn write_configs(exe: &Path, dir: &Path, data_port: u16, admin_port: u16, upstre
     std::fs::write(
         dir.join("providers.yaml"),
         format!(
-            "bedrock-lane:\n  protocol: bedrock\n  base_url: \"http://127.0.0.1:{upstream_port}\"\n  \
-             api_key_env: {UPSTREAM_CREDS_ENV}\n"
+            "bedrock-lane:\n  protocol: bedrock\n  base_url: \"http://127.0.0.1:{upstream_port}\"\n"
         ),
     )
     .unwrap();
@@ -709,6 +719,9 @@ fn write_configs(exe: &Path, dir: &Path, data_port: u16, admin_port: u16, upstre
         .expect("generate a signing key");
     assert!(signing_key.status.success(), "--generate-signing-key");
     std::fs::write(dir.join("signing.key"), &signing_key.stdout).unwrap();
+    // The at-rest key the minted AWS credential (a recoverable credential) is stored sealed under:
+    // 32 bytes, hex. busbar refuses the mint with none configured.
+    std::fs::write(dir.join("at-rest.key"), "11".repeat(32)).unwrap();
     std::fs::write(
         dir.join("config.yaml"),
         format!(
@@ -720,6 +733,9 @@ advanced:
 limits:
   request_body_max_bytes: {cap}
 admin_require_mtls: false
+credentials:
+  at_rest:
+    key: {{ file: "{at_rest}" }}
 identity-providers:
   admin-tokens:
     module: admin-tokens
@@ -738,6 +754,7 @@ models:
     upstream_model: "{WIRE_MODEL}"
 "#,
             signing = dir.join("signing.key").display(),
+            at_rest = dir.join("at-rest.key").display(),
             cap = BODY_CAP,
         ),
     )

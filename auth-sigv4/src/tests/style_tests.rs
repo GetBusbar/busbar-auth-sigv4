@@ -234,7 +234,7 @@ fn warned_signing(binding: &SigV4Binding, host: &str, times: usize) -> Vec<Strin
         payload_hash: &hash,
         timestamp_epoch: 1_440_938_160,
     };
-    let cap = busbar_contract::testkit::WarnCapture::default();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
     tracing::subscriber::with_default(cap.clone(), || {
         for _ in 0..times {
             binding.sign(&facts).expect("a clean credential signs");

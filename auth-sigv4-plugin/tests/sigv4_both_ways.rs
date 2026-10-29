@@ -725,6 +725,9 @@ fn write_configs(exe: &Path, dir: &Path, data_port: u16, admin_port: u16, upstre
         .expect("generate a signing key");
     assert!(signing_key.status.success(), "--generate-signing-key");
     std::fs::write(dir.join("signing.key"), &signing_key.stdout).unwrap();
+    // The at-rest key the minted AWS credential (a recoverable credential) is stored sealed under:
+    // 32 bytes, hex. busbar refuses the mint with none configured.
+    std::fs::write(dir.join("at-rest.key"), "11".repeat(32)).unwrap();
     std::fs::write(
         dir.join("config.yaml"),
         format!(
@@ -736,6 +739,9 @@ advanced:
 limits:
   request_body_max_bytes: {cap}
 admin_require_mtls: false
+credentials:
+  at_rest:
+    key: {{ file: "{at_rest}" }}
 identity-providers:
   admin-tokens:
     module: admin-tokens
@@ -754,6 +760,7 @@ models:
     upstream_model: "{WIRE_MODEL}"
 "#,
             signing = dir.join("signing.key").display(),
+            at_rest = dir.join("at-rest.key").display(),
             cap = BODY_CAP,
         ),
     )

@@ -1393,7 +1393,7 @@ fn a_requests_debug_names_its_lines_but_prints_no_value() {
 fn a_bad_signature_reject_is_logged_without_the_signature() {
     let s = sign("not-the-secret", AKID, None, b"", None);
     let signature = s.auth.rsplit("Signature=").next().unwrap().to_string();
-    let cap = busbar_contract::testkit::WarnCapture::capturing_debug();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
     let judged = tracing::subscriber::with_default(cap.clone(), || {
         run(&s.lines, None, Some(b""), &mut Fake::default())
     });

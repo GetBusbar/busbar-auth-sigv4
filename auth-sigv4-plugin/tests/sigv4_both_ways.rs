@@ -657,7 +657,18 @@ fn busbar_exe() -> Option<PathBuf> {
     static BUILT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     BUILT.get_or_init(|| {
         let status = Command::new("cargo")
-            .args(["build", "--release", "-p", "busbar", "--bin", "busbar"])
+            // The shipped busbar (dist/default: the composition root with its linked plugins),
+            // as busbar's signing gate builds it; `-p busbar` alone is bare core.
+            .args([
+                "build",
+                "--release",
+                "--manifest-path",
+                "dist/default/Cargo.toml",
+                "--target-dir",
+                "target",
+                "--bin",
+                "busbar",
+            ])
             .current_dir(&root)
             // The binary is read back from `<checkout>/target/release`: an inherited
             // CARGO_TARGET_DIR (set for the outer `cargo test`) would redirect it.
@@ -704,8 +715,7 @@ fn write_configs(exe: &Path, dir: &Path, data_port: u16, admin_port: u16, upstre
     std::fs::write(
         dir.join("providers.yaml"),
         format!(
-            "bedrock-lane:\n  protocol: bedrock\n  base_url: \"http://127.0.0.1:{upstream_port}\"\n  \
-             api_key_env: {UPSTREAM_CREDS_ENV}\n"
+            "bedrock-lane:\n  protocol: bedrock\n  base_url: \"http://127.0.0.1:{upstream_port}\"\n"
         ),
     )
     .unwrap();

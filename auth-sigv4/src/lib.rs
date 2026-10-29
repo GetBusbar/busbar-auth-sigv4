@@ -103,7 +103,7 @@ use busbar_contract::abi::sdk::auth_outbound::{
 use busbar_contract::abi::sdk::conn::Host;
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::Op;
-use busbar_contract::abi::sdk::life::Refusal;
+use busbar_contract::abi::sdk::life::{self, Refusal};
 use busbar_contract::abi::sdk::services::CredentialSecret;
 
 use crate::inbound::{Judgement, Read, SecretSource};
@@ -206,16 +206,8 @@ pub(crate) fn now_epoch() -> u64 {
         .unwrap_or(0)
 }
 
-/// The plugin's own settings: none are read; present settings must be a JSON object (none lent
-/// reads as empty, and takes none).
-fn settings_ok(b: &[u8]) -> bool {
-    b.is_empty()
-        || matches!(
-            serde_json::from_slice::<serde_json::Value>(b),
-            Ok(serde_json::Value::Object(_))
-        )
-}
-
+/// The refusal of the plugin's own settings: none are read; present settings must be a JSON
+/// object (`life::settings_object`: none lent reads as empty, and takes none).
 const SETTINGS_NOT_OBJECT: &str = "busbar-auth-sigv4 settings must be a JSON object";
 
 /// The refusal `open_outbound` answers for a bind that names no style.
@@ -260,7 +252,7 @@ impl OutboundPlugin for SigV4 {
     /// `validate`: present settings must be a JSON object (FAILED with the reason, as `open` and
     /// `refresh` answer the same settings).
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
-        if settings_ok(settings) {
+        if life::settings_object(settings).is_ok() {
             Ok(())
         } else {
             Err(Refusal::failed(SETTINGS_NOT_OBJECT))
@@ -268,7 +260,7 @@ impl OutboundPlugin for SigV4 {
     }
 
     fn open(settings: &[u8], _: &[&[u8]], generation: u64) -> Result<Self, Refusal> {
-        if !settings_ok(settings) {
+        if life::settings_object(settings).is_err() {
             // Settings `open` refuses are FAILED with the reason (the lifecycle's rule, and the
             // inbound conformance script's).
             return Err(Refusal::failed(SETTINGS_NOT_OBJECT));
@@ -335,7 +327,7 @@ impl OutboundPlugin for SigV4 {
 
     /// The new generation.
     fn refresh(&self, settings: &[u8], _: &[&[u8]], generation: u64) -> Result<(), Refusal> {
-        if !settings_ok(settings) {
+        if life::settings_object(settings).is_err() {
             return Err(Refusal::failed(SETTINGS_NOT_OBJECT));
         }
         self.set_generation(generation);
@@ -380,7 +372,7 @@ impl SecretSource for &VerifyOp {
 impl VerifyPlugin for SigV4 {
     /// The kit opens the one instance through [`OutboundPlugin::open`]; this builds the same.
     fn open(settings: &[u8], _: &[&[u8]]) -> Result<Self, &'static str> {
-        if !settings_ok(settings) {
+        if life::settings_object(settings).is_err() {
             return Err(SETTINGS_NOT_OBJECT);
         }
         Ok(SigV4::new(0))

@@ -29,7 +29,7 @@
 //! `busbar` built from `BUSBAR_CHECKOUT`, a checkout of GetBusbar/busbar at `.busbar-ref` field 1
 //! that plugin CI provides (`busbar_checkout: true`). That build's default features link this
 //! plugin on the auth axis, the admin listener, the admin-token door and the model plane that
-//! serves the signed path. Under CI an unset `BUSBAR_CHECKOUT` is a failure, never a skip.
+//! serves the signed path. An unset `BUSBAR_CHECKOUT` is a failure, never a skip.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -60,13 +60,7 @@ const IO_TIMEOUT: Duration = Duration::from_secs(30);
 fn sigv4_is_verified_inbound_and_signed_outbound() {
     let dir = fixture_dir();
     let upstream = Upstream::spawn();
-    let Some(exe) = busbar_exe() else {
-        eprintln!(
-            "skip: BUSBAR_CHECKOUT is unset; this suite boots the real busbar built from a checkout \
-             at .busbar-ref (plugin CI sets it, and under CI an unset one fails)"
-        );
-        return;
-    };
+    let exe = busbar_exe();
     let data_port = free_port();
     let admin_port = free_port();
     write_configs(&exe, &dir, data_port, admin_port, upstream.port);
@@ -641,15 +635,15 @@ impl Node {
 }
 
 /// The real `busbar` binary, built (once, cached by cargo) from `BUSBAR_CHECKOUT` with its default
-/// features. `None` only outside CI with no checkout named; under CI that is a failure.
-fn busbar_exe() -> Option<PathBuf> {
+/// features. An unset `BUSBAR_CHECKOUT` is a FAILURE everywhere, never a skip: a security claim
+/// ("SigV4 is never sent unsigned") must not pass by not running.
+fn busbar_exe() -> PathBuf {
     let Some(dir) = std::env::var_os("BUSBAR_CHECKOUT") else {
-        assert!(
-            std::env::var_os("CI").is_none(),
-            "BUSBAR_CHECKOUT is unset under CI: plugin CI must check busbar out at .busbar-ref \
-             (busbar_checkout: true) so this suite boots the real binary; it never skips there"
+        panic!(
+            "BUSBAR_CHECKOUT is unset: this end-to-end suite needs a busbar checkout at .busbar-ref \
+             (plugin CI sets it with `busbar_checkout: true`; locally export BUSBAR_CHECKOUT=<path>). \
+             It never skips, because a skipped run proves nothing about 'never sent unsigned'"
         );
-        return None;
     };
     let root = PathBuf::from(dir)
         .canonicalize()
@@ -669,7 +663,7 @@ fn busbar_exe() -> Option<PathBuf> {
             "building the real busbar binary must succeed"
         );
     });
-    Some(root.join("target/release/busbar"))
+    root.join("target/release/busbar")
 }
 
 /// A loopback port free at the time of asking: bound, read, released.

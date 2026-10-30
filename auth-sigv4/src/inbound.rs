@@ -207,9 +207,9 @@ pub enum VerifyError {
     SignatureMismatch,
 }
 
-/// The parsed components of an inbound SigV4 `Authorization` header. All fields are non-secret (the
-/// AccessKeyId and signature both travel in plaintext on the wire).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The parsed components of an inbound SigV4 `Authorization` header. Its `Debug` withholds the
+/// signature (a log line never carries one).
+#[derive(Clone, PartialEq, Eq)]
 pub struct ParsedAuthHeader {
     /// The Credential scope's AccessKeyId: which key the client claims to sign with.
     pub access_key_id: String,
@@ -223,6 +223,19 @@ pub struct ParsedAuthHeader {
     pub signed_headers: String,
     /// The hex signature the client computed.
     pub signature: String,
+}
+
+impl std::fmt::Debug for ParsedAuthHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParsedAuthHeader")
+            .field("access_key_id", &self.access_key_id)
+            .field("datestamp", &self.datestamp)
+            .field("region", &self.region)
+            .field("service", &self.service)
+            .field("signed_headers", &self.signed_headers)
+            .field("signature", &"<withheld>")
+            .finish()
+    }
 }
 
 /// Parse an inbound `Authorization: AWS4-HMAC-SHA256 Credential=.../..., SignedHeaders=..., Signature=...`

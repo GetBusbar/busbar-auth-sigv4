@@ -84,8 +84,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use busbar_contract::abi::auth::{
     AuthTail, StyleDecl, CAP_INBOUND, CAP_OUTBOUND, FACT_INBOUND_ALL_HEADERS,
-    FACT_READS_CREDENTIALS, LOGIN_KIND_NONE, POINT_HEAD_BODY, STYLE_CALLER_CREDENTIAL,
-    STYLE_NEEDS_HEADERS,
+    FACT_READS_CREDENTIALS, FIELD_SENSITIVE, LOGIN_KIND_NONE, POINT_HEAD_BODY,
+    STYLE_CALLER_CREDENTIAL, STYLE_NEEDS_HEADERS,
 };
 use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::mechanism::door::{
@@ -110,10 +110,18 @@ use crate::inbound::{Judgement, Read, SecretSource};
 use crate::instance::{SigV4, Signed, Who};
 use crate::signing::SignFacts;
 
-/// The flags every field this plugin writes carries: NONE. Credential headers go out
-/// indexable, and an h2 encoder that honoured `FIELD_SENSITIVE` would send them never-indexed,
-/// which is different bytes on the wire.
-const FIELD_FLAGS: u32 = 0;
+/// The fields that carry credential material: `FIELD_SENSITIVE` (an h2 encoder sends them
+/// never-indexed; lead-signed 2026-10-30). The date and the payload hash carry none.
+const SENSITIVE_FIELDS: [&str; 2] = ["authorization", "x-amz-security-token"];
+
+/// The flags field `name` is written with.
+fn field_flags(name: &str) -> u32 {
+    if SENSITIVE_FIELDS.contains(&name) {
+        FIELD_SENSITIVE
+    } else {
+        0
+    }
+}
 
 /// The one style this plugin serves: it signs the body, so it needs the `HeadBody` point (THE
 /// DESIGN, "Auth points and guest lists") and hashes the body itself; it signs the content type
@@ -317,7 +325,7 @@ impl OutboundPlugin for SigV4 {
                 Some(Signed::Failed(reason)) => FieldsAnswer::Failed(reason),
                 Some(Signed::Fields(fields)) => {
                     for (name, value) in &fields {
-                        out.push(name.as_bytes(), value.as_bytes(), FIELD_FLAGS);
+                        out.push(name.as_bytes(), value.as_bytes(), field_flags(name));
                     }
                     FieldsAnswer::Ready
                 }

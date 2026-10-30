@@ -312,3 +312,32 @@ fn style_settings_that_do_not_parse_withhold_the_decoders_text() {
         ]
     );
 }
+
+/// S5: a refused binding is logged once at `info` (module `sigv4`, each line), never with the
+/// credential's bytes.
+#[test]
+fn a_refused_binding_is_logged_once_without_the_credential() {
+    let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
+    tracing::subscriber::with_default(cap.clone(), || {
+        assert!(open(
+            SIGV4,
+            Some("AKIDNOCOLONSECRET"),
+            r#"{"service":"s","region":"r"}"#
+        )
+        .is_err());
+        assert!(open(
+            SIGV4,
+            Some("AKID:SECRETOK"),
+            r#"{"service":"s","region":"r"}"#
+        )
+        .is_ok());
+    });
+    let logged = cap.messages();
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert!(logged[0].contains("module=sigv4"), "{logged:?}");
+    assert!(
+        logged[0].contains("credential: expected ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]"),
+        "{logged:?}"
+    );
+    assert!(!logged[0].contains("AKIDNOCOLONSECRET"), "{logged:?}");
+}

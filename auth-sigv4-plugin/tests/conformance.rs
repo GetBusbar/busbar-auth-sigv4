@@ -7,9 +7,9 @@
 //!
 //! ## The RED arms stay in the file
 //!
-//! * [`red_a_sensitive_field_flag_is_not_the_1_5_5_bytes`]: the shape TODO item 583 asks for
-//!   loads and passes the kind's checks, yet its transcript diverges from the pinned one (Q4: the
-//!   1.5.5 bytes win).
+//! * [`red_a_writer_that_flags_every_field_is_not_the_pinned_bytes`]: the credential fields
+//!   (`authorization`, `x-amz-security-token`) are FIELD_SENSITIVE and the rest are not; a writer
+//!   that flags every field loads and passes the kind's checks, yet its transcript diverges.
 //! * [`red_a_writer_that_ignores_the_host_capacity_faults`]: a `fields` that writes past the host's
 //!   field capacity is FAULT at the loader, never a truncated header.
 //!
@@ -705,18 +705,18 @@ const EXPECTED: &[&str] = &[
      plugin",
     "fields Ready  authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/\
      svc/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;\
-     x-amz-security-token, Signature=SIGNATURE [flags=0] ; x-amz-date: 20150830T123600Z [flags=0] ; \
+     x-amz-security-token, Signature=SIGNATURE [flags=1] ; x-amz-date: 20150830T123600Z [flags=0] ; \
      x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 \
-     [flags=0] ; x-amz-security-token: TOKEN [flags=0]",
+     [flags=0] ; x-amz-security-token: TOKEN [flags=1]",
     "fields Failed  short(needed_fields=4 needed_bytes=385) -> recall Ready authorization: \
      AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/svc/aws4_request, \
      SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token, \
-     Signature=SIGNATURE [flags=0] ; x-amz-date: 20150830T123600Z [flags=0] ; \
+     Signature=SIGNATURE [flags=1] ; x-amz-date: 20150830T123600Z [flags=0] ; \
      x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 \
-     [flags=0] ; x-amz-security-token: TOKEN [flags=0]",
+     [flags=0] ; x-amz-security-token: TOKEN [flags=1]",
     "fields Ready  authorization: AWS4-HMAC-SHA256 Credential=AKIDCALLER/20150830/us-east-1/svc/\
      aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, \
-     Signature=SIGNATURE [flags=0] ; x-amz-date: 20150830T123600Z [flags=0] ; \
+     Signature=SIGNATURE [flags=1] ; x-amz-date: 20150830T123600Z [flags=0] ; \
      x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 \
      [flags=0]",
     "fields Failed sigv4: this binding holds no credential of its own (passthrough-only); the \
@@ -724,9 +724,9 @@ const EXPECTED: &[&str] = &[
     "fields Refused ",
     "fields Ready  authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/\
      svc/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;\
-     x-amz-security-token, Signature=SIGNATURE [flags=0] ; x-amz-date: 20150830T123600Z [flags=0] ; \
+     x-amz-security-token, Signature=SIGNATURE [flags=1] ; x-amz-date: 20150830T123600Z [flags=0] ; \
      x-amz-content-sha256: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a \
-     [flags=0] ; x-amz-security-token: TOKEN [flags=0]",
+     [flags=0] ; x-amz-security-token: TOKEN [flags=1]",
     "ready Ready 1",
     "ready Ready 1",
     "tick Ready next>1000=true",
@@ -862,7 +862,7 @@ extern "C" fn sensitive_door() -> &'static Door {
 }
 
 #[test]
-fn red_a_sensitive_field_flag_is_not_the_1_5_5_bytes() {
+fn red_a_writer_that_flags_every_field_is_not_the_pinned_bytes() {
     // The same host as the green test, so the flag is the transcript's only difference.
     let creds = Arc::new(Creds::default());
     let d = Dispatcher::with_services(DispatchConfig::default(), creds.clone());
@@ -871,10 +871,11 @@ fn red_a_sensitive_field_flag_is_not_the_1_5_5_bytes() {
     let t = mask_signature(script(&red, Some((&d, &creds))));
     assert_ne!(
         t, EXPECTED,
-        "a sensitive flag must not pass as the 1.5.5 bytes"
+        "a flag on a field that carries no credential must not pass as the pinned bytes"
     );
     assert!(
-        t.iter().any(|l| l.contains("[flags=1]")),
+        t.iter()
+            .any(|l| l.contains("x-amz-date: 20150830T123600Z [flags=1]")),
         "the kind's check admits the flag; only the pinned transcript refuses it"
     );
 }

@@ -163,3 +163,25 @@ fn plugin_level_settings_that_are_not_an_object_answer_the_settings_line() {
     ));
     assert_eq!(plugin_level(b"[]"), [want.clone(), want.clone(), want]);
 }
+
+/// Lead ruling 2026-10-30: the keys core forwards from its shared provider/style schema
+/// (`token_url`, `token_uri`, `scope`, `subject`) mean nothing to sigv4 but are no typo: the
+/// instance opens over them (1.5.5 configs carrying them booted). A key in neither schema is still
+/// refused by name.
+#[test]
+fn a_key_core_forwards_from_its_shared_schema_opens_the_instance() {
+    assert_eq!(
+        plugin_level(
+            br#"{"token_url":"https://t","token_uri":"https://u","scope":"s","subject":"x"}"#
+        ),
+        [None, None, None]
+    );
+    let want = Some((
+        busbar_contract::abi::mechanism::call::Outcome::Failed,
+        "settings: unknown key `regoin`".to_string(),
+    ));
+    assert_eq!(
+        plugin_level(br#"{"scope":"s","regoin":"x"}"#),
+        [want.clone(), want.clone(), want]
+    );
+}

@@ -299,3 +299,16 @@ fn an_unknown_setting_other_than_region_unread_is_still_refused() {
     )
     .is_ok());
 }
+
+/// S1/SZ-P13: style settings that do not parse answer the auth kit's `json_error` line (the class
+/// of failure and where), never the decoder's own text, whose input may carry a pasted secret.
+#[test]
+fn style_settings_that_do_not_parse_withhold_the_decoders_text() {
+    assert_eq!(
+        lines(open(SIGV4, Some("A:S"), r#"{"service": "wJalrXUtnFEMI"#)),
+        [
+            "settings: outbound auth settings are not JSON: it ends before the JSON does (line 1, \
+          column 26; the decoder's text is withheld)"
+        ]
+    );
+}

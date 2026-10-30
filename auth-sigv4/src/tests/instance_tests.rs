@@ -95,12 +95,21 @@ fn own_mode_signs_with_the_operator_credential_and_passthrough_with_the_callers(
     );
 }
 
-/// OWNER RULING (was: own mode on a keyless binding answered READY with no field): a binding with
-/// no credential of its own FAILS in own mode, with the reason, and still serves passthrough.
+/// Owner-signed 2026-10-30 (OWNER-QUEUE.md): "sigv4 with no credential is a passthrough-only
+/// binding and is allowed; a malformed credential is still refused at open." So `open_outbound`
+/// with NO credential answers a READY handle; own-mode `fields` on it FAILS with the reason (was:
+/// READY with no field); passthrough with a good caller credential signs; and a malformed own
+/// credential is refused at open, never bound.
 #[test]
 fn a_keyless_binding_fails_in_own_mode_but_still_serves_passthrough() {
     let s = SigV4::new(1);
     let handle = open(&s, None);
+    assert!(
+        <SigV4 as busbar_contract::abi::sdk::auth_outbound::OutboundPlugin>::outbound_ready(
+            &s, handle
+        ),
+        "the keyless binding is a READY handle"
+    );
     assert_eq!(
         fields_said(&s, handle, MODE_OWN, ""),
         (
@@ -113,6 +122,16 @@ fn a_keyless_binding_fails_in_own_mode_but_still_serves_passthrough() {
     assert_eq!(
         fields(&s, handle, MODE_PASSTHROUGH, "AKIDCALLER:CALLERSECRET"),
         (Outcome::Ready, true)
+    );
+    let refused = style::open_binding(
+        style::SIGV4,
+        Some(b"not-a-valid-key"),
+        Some(SETTINGS.as_bytes()),
+    )
+    .expect_err("a malformed own credential is refused at open");
+    assert_eq!(
+        refused.iter().map(style::Refusal::line).collect::<Vec<_>>(),
+        ["credential: expected ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]"]
     );
 }
 

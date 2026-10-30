@@ -341,3 +341,45 @@ fn a_refused_binding_is_logged_once_without_the_credential() {
     );
     assert!(!logged[0].contains("AKIDNOCOLONSECRET"), "{logged:?}");
 }
+
+/// Lead ruling 2026-10-30: a key core forwards from its shared provider/style schema does not fail
+/// the bind; it is logged once, at WARN, as ignored (`settings.<key>: not used by the sigv4 style;
+/// ignored`). A key in neither schema is still refused by name.
+#[test]
+fn a_key_core_forwards_is_ignored_with_one_warn_at_the_bind() {
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let bound = tracing::subscriber::with_default(cap.clone(), || {
+        open(
+            SIGV4,
+            Some("A:S"),
+            r#"{"service":"s","region":"r","scope":"x","token_url":"https://t"}"#,
+        )
+    });
+    assert!(bound.is_ok(), "a forwarded key does not fail the bind");
+    let warned = cap.messages();
+    assert_eq!(warned.len(), 2, "{warned:?}");
+    assert!(
+        warned
+            .iter()
+            .any(|l| l.contains("settings.scope: not used by the sigv4 style; ignored")),
+        "{warned:?}"
+    );
+    assert!(
+        warned
+            .iter()
+            .any(|l| l.contains("settings.token_url: not used by the sigv4 style; ignored")),
+        "{warned:?}"
+    );
+    assert!(
+        warned.iter().all(|l| l.contains("module=sigv4")),
+        "{warned:?}"
+    );
+    assert_eq!(
+        lines(open(
+            SIGV4,
+            Some("A:S"),
+            r#"{"service":"s","region":"r","scope":"x","regoin":"y"}"#
+        )),
+        ["settings: unknown key `regoin`"]
+    );
+}

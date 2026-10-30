@@ -10,8 +10,9 @@
 //! read past (older configs carry it): the content type a signature covers is the one the request
 //! is sent with (the style declares `STYLE_NEEDS_HEADERS` and signs the sent value), never a
 //! setting. `region_unread` is the kernel's warning for a region it defaulted at seal, logged with
-//! each signature. Any other key is refused by name
-//! (``settings: unknown key `<k>` ``), never ignored.
+//! each signature. The keys core forwards from its shared provider schema (`token_url`,
+//! `token_uri`, `scope`, `subject`) are ignored with one WARN each at the bind. Any other key is
+//! refused by name (``settings: unknown key `<k>` ``), never ignored.
 //!
 //! The credential: `ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]`, checked here,
 //! at open (`SigningCredential::parse`): one that is not UTF-8, has no `:`, has an empty access
@@ -86,12 +87,28 @@ fn text(m: &Map<String, Value>, key: &str) -> Result<Option<String>, Refusal> {
 /// dialect's default (see [`SigV4Params::region_unread`]).
 const KNOWN_KEYS: [&str; 4] = ["service", "region", "region_unread", "content_type"];
 
-/// One refusal per key the style settings name that this plugin does not read.
+/// The keys core forwards from its shared provider/style schema (its `StyleParams`) to every
+/// style's instance open and bind. They mean nothing to sigv4 and are ignored, never refused
+/// (lead ruling 2026-10-30): a 1.5.5 config carrying one on a sigv4 provider booted.
+const FORWARDED_KEYS: [&str; 4] = ["token_url", "token_uri", "scope", "subject"];
+
+/// One refusal per key the style settings name that this plugin does not read and core does not
+/// forward from its shared schema.
 pub(crate) fn unknown_keys(m: &Map<String, Value>) -> Vec<Refusal> {
     m.keys()
-        .filter(|k| !KNOWN_KEYS.contains(&k.as_str()))
+        .filter(|k| !KNOWN_KEYS.contains(&k.as_str()) && !FORWARDED_KEYS.contains(&k.as_str()))
         .map(|k| Refusal::Settings(format!("unknown key `{k}`")))
         .collect()
+}
+
+/// One WARN per forwarded key the bind ignores.
+fn warn_ignored(m: &Map<String, Value>) {
+    for key in m.keys().filter(|k| FORWARDED_KEYS.contains(&k.as_str())) {
+        tracing::warn!(
+            module = "sigv4",
+            "settings.{key}: not used by the sigv4 style; ignored"
+        );
+    }
 }
 
 fn sigv4_params(m: &Map<String, Value>) -> Result<SigV4Params, Refusal> {
@@ -146,6 +163,7 @@ fn bind(
     if !unknown.is_empty() {
         return Err(unknown);
     }
+    warn_ignored(&m);
     let params = sigv4_params(&m).map_err(|r| vec![r])?;
     let Some(credential) = credential else {
         // A passthrough-only binding (the contract's `None`): it signs only a caller's credential.

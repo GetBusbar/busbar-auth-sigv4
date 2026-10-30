@@ -86,7 +86,7 @@ fn text(m: &Map<String, Value>, key: &str) -> Result<Option<String>, Refusal> {
 const KNOWN_KEYS: [&str; 4] = ["service", "region", "region_unread", "content_type"];
 
 /// One refusal per key the style settings name that this plugin does not read.
-fn unknown_keys(m: &Map<String, Value>) -> Vec<Refusal> {
+pub(crate) fn unknown_keys(m: &Map<String, Value>) -> Vec<Refusal> {
     m.keys()
         .filter(|k| !KNOWN_KEYS.contains(&k.as_str()))
         .map(|k| Refusal::Settings(format!("unknown key `{k}`")))

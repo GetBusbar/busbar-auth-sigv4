@@ -206,9 +206,25 @@ pub(crate) fn now_epoch() -> u64 {
         .unwrap_or(0)
 }
 
-/// The refusal of the plugin's own settings: none are read; present settings must be a JSON
-/// object (`life::settings_object`: none lent reads as empty, and takes none).
-const SETTINGS_NOT_OBJECT: &str = "busbar-auth-sigv4 settings must be a JSON object";
+/// The plugin-level settings `validate`, `open` and `refresh` answer alike: a JSON object (none
+/// lent reads as `{}`) naming only the style's own keys (the host opens the instance over the
+/// binding's settings). Every other key is refused by name, one `settings: ...` line each.
+fn plugin_settings(settings: &[u8]) -> Result<(), Refusal> {
+    let m = life::settings_object(settings)?;
+    let lines: Vec<String> = style::unknown_keys(&m)
+        .iter()
+        .map(style::Refusal::line)
+        .collect();
+    if lines.is_empty() {
+        Ok(())
+    } else {
+        Err(Refusal::failed(lines.join("\n")))
+    }
+}
+
+/// `VerifyPlugin::open`'s static refusal (the combined door opens through `OutboundPlugin::open`,
+/// which names each key).
+const SETTINGS_REFUSED: &str = "settings: not a JSON object of the sigv4 style's keys";
 
 /// The refusal `open_outbound` answers for a bind that names no style.
 const NO_STYLE: &str = "settings: no outbound auth style was named";
@@ -249,22 +265,13 @@ fn sign_facts<'a>(view: &FieldsView<'a>, hash: &'a str) -> Option<SignFacts<'a>>
 }
 
 impl OutboundPlugin for SigV4 {
-    /// `validate`: present settings must be a JSON object (FAILED with the reason, as `open` and
-    /// `refresh` answer the same settings).
+    /// `validate`: what `open` and `refresh` refuse ([`plugin_settings`]), FAILED.
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
-        if life::settings_object(settings).is_ok() {
-            Ok(())
-        } else {
-            Err(Refusal::failed(SETTINGS_NOT_OBJECT))
-        }
+        plugin_settings(settings)
     }
 
     fn open(settings: &[u8], _: &[&[u8]], generation: u64) -> Result<Self, Refusal> {
-        if life::settings_object(settings).is_err() {
-            // Settings `open` refuses are FAILED with the reason (the lifecycle's rule, and the
-            // inbound conformance script's).
-            return Err(Refusal::failed(SETTINGS_NOT_OBJECT));
-        }
+        plugin_settings(settings)?;
         Ok(SigV4::new(generation))
     }
 
@@ -327,9 +334,7 @@ impl OutboundPlugin for SigV4 {
 
     /// The new generation.
     fn refresh(&self, settings: &[u8], _: &[&[u8]], generation: u64) -> Result<(), Refusal> {
-        if life::settings_object(settings).is_err() {
-            return Err(Refusal::failed(SETTINGS_NOT_OBJECT));
-        }
+        plugin_settings(settings)?;
         self.set_generation(generation);
         Ok(())
     }
@@ -372,9 +377,7 @@ impl SecretSource for &VerifyOp {
 impl VerifyPlugin for SigV4 {
     /// The kit opens the one instance through [`OutboundPlugin::open`]; this builds the same.
     fn open(settings: &[u8], _: &[&[u8]]) -> Result<Self, &'static str> {
-        if life::settings_object(settings).is_err() {
-            return Err(SETTINGS_NOT_OBJECT);
-        }
+        plugin_settings(settings).map_err(|_| SETTINGS_REFUSED)?;
         Ok(SigV4::new(0))
     }
 

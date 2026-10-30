@@ -694,7 +694,7 @@ fn script(p: &Plugin<Auth>, host: Option<(&Dispatcher, &Creds)>) -> Vec<String> 
 }
 
 const EXPECTED: &[&str] = &[
-    "validate [1] Failed busbar-auth-sigv4 settings must be a JSON object",
+    "validate [1] Failed settings: must be a JSON object",
     "validate Ready",
     "open Ready",
     "open_outbound sigv4 Ready ",

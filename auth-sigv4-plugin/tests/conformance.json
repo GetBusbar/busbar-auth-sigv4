@@ -3,7 +3,8 @@
     "bad_settings": [
       "[1]",
       "\"not-an-object\"",
-      "{ not json"
+      "{ not json",
+      "{\"regoin\": \"us-east-1\"}"
     ],
     "host_credentials": [
       {

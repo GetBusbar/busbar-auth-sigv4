@@ -25,6 +25,7 @@
 //! sentence — `provider '<p>' <style> credential (from <src>) is invalid: <text>`, or
 //! `provider '<p>' <text>`. No line ever carries the credential's bytes.
 
+use busbar_contract::abi::sdk::auth_kit::json_error;
 use serde_json::{Map, Value};
 
 use crate::signing::{SigV4Binding, SigV4Params, SigningCredential};
@@ -62,9 +63,9 @@ fn object(settings: Option<&[u8]>) -> Result<Map<String, Value>, Refusal> {
         Ok(_) => Err(Refusal::Settings(
             "outbound auth settings must be a JSON object".to_string(),
         )),
-        Err(e) => Err(Refusal::Settings(format!(
-            "outbound auth settings are not JSON: {e}"
-        ))),
+        Err(e) => Err(Refusal::Settings(json_error(
+            "outbound auth settings are not JSON",
+        )(e))),
     }
 }
 

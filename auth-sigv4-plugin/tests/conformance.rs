@@ -756,6 +756,9 @@ const EXPECTED: &[&str] = &[
 /// The plugin's own log, folded into the host's: each inbound REJECT names its reason (module
 /// `sigv4`, at info), the AccessKeyId where one parsed, never the signature or the secret.
 const EXPECTED_FOLDS: &[&str] = &[
+    "diag 4294967295 sev=0 busbar_auth_sigv4::style: sigv4 outbound binding refused module=\"sigv4\" reason=\"settings: outbound auth style `bearer` is not served by this plugin\"",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::style: sigv4 outbound binding refused module=\"sigv4\" reason=\"settings: outbound auth style `kerberos` is not served by this plugin\"",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::instance: sigv4 request not signed: FAILED module=\"sigv4\" reason=\"sigv4: this binding holds no credential of its own (passthrough-only); the request is not sent unsigned\"",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"unparseable SigV4 authorization\"",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature mismatch or credential not live\" access_key_id=BBAKNOBODY",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature mismatch or credential not live\" access_key_id=BBAKNOBODY",
@@ -965,7 +968,8 @@ fn fields_signs_the_walked_requests_query_and_method_through_the_door() {
 /// OWNER RULING (was: the credential opened, its fields call answered READY with no field and
 /// reported the signer's WARN line, diag id `auth.sigv4-session-token-invalid-bytes`): a credential
 /// whose session token holds a byte no header value may carry is refused at `open_outbound`,
-/// FAILED with the finding and never the token, and nothing is noted beside it.
+/// FAILED with the finding and never the token; the plugin's log names the refusal once, at
+/// `info` (S5), never the token.
 #[test]
 fn an_unsendable_session_token_is_refused_at_open_through_the_door() {
     let creds = Arc::new(Creds::default());
@@ -983,9 +987,15 @@ fn an_unsendable_session_token_is_refused_at_open_through_the_door() {
         "open_outbound sigv4 Failed credential: the session token holds a byte no header value \
          may carry"
     );
-    assert!(
-        std::mem::take(&mut *folds.0.lock().unwrap()).is_empty(),
-        "nothing is noted beside the refusal"
+    let noted = std::mem::take(&mut *folds.0.lock().unwrap());
+    assert_eq!(
+        noted,
+        [
+            "diag 4294967295 sev=0 busbar_auth_sigv4::style: sigv4 outbound binding refused \
+          module=\"sigv4\" reason=\"credential: the session token holds a byte no header value \
+          may carry\""
+        ],
+        "one info line names the refusal, never the token"
     );
 }
 

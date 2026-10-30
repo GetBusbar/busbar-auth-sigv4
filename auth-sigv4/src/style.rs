@@ -114,6 +114,28 @@ pub fn open_binding(
     credential: Option<&[u8]>,
     settings: Option<&[u8]>,
 ) -> Result<SigV4Binding, Vec<Refusal>> {
+    let bound = bind(style, credential, settings);
+    if let Err(refusals) = &bound {
+        let reason = refusals
+            .iter()
+            .map(Refusal::line)
+            .collect::<Vec<_>>()
+            .join("; ");
+        tracing::info!(
+            module = "sigv4",
+            reason = reason.as_str(),
+            "sigv4 outbound binding refused"
+        );
+    }
+    bound
+}
+
+/// [`open_binding`]'s findings, unlogged.
+fn bind(
+    style: &str,
+    credential: Option<&[u8]>,
+    settings: Option<&[u8]>,
+) -> Result<SigV4Binding, Vec<Refusal>> {
     if style != SIGV4 {
         return Err(vec![Refusal::Settings(format!(
             "outbound auth style `{style}` is not served by this plugin"

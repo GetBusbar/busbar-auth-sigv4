@@ -25,6 +25,7 @@
 //! sentence — `provider '<p>' <style> credential (from <src>) is invalid: <text>`, or
 //! `provider '<p>' <text>`. No line ever carries the credential's bytes.
 
+use busbar_contract::abi::sdk::auth_kit::json_error;
 use serde_json::{Map, Value};
 
 use crate::signing::{SigV4Binding, SigV4Params, SigningCredential};
@@ -62,9 +63,9 @@ fn object(settings: Option<&[u8]>) -> Result<Map<String, Value>, Refusal> {
         Ok(_) => Err(Refusal::Settings(
             "outbound auth settings must be a JSON object".to_string(),
         )),
-        Err(e) => Err(Refusal::Settings(format!(
-            "outbound auth settings are not JSON: {e}"
-        ))),
+        Err(e) => Err(Refusal::Settings(json_error(
+            "outbound auth settings are not JSON",
+        )(e))),
     }
 }
 
@@ -86,7 +87,7 @@ fn text(m: &Map<String, Value>, key: &str) -> Result<Option<String>, Refusal> {
 const KNOWN_KEYS: [&str; 4] = ["service", "region", "region_unread", "content_type"];
 
 /// One refusal per key the style settings name that this plugin does not read.
-fn unknown_keys(m: &Map<String, Value>) -> Vec<Refusal> {
+pub(crate) fn unknown_keys(m: &Map<String, Value>) -> Vec<Refusal> {
     m.keys()
         .filter(|k| !KNOWN_KEYS.contains(&k.as_str()))
         .map(|k| Refusal::Settings(format!("unknown key `{k}`")))
@@ -109,6 +110,28 @@ fn sigv4_params(m: &Map<String, Value>) -> Result<SigV4Params, Refusal> {
 /// Every finding that refuses the binding: the settings first (an unknown key, then a missing or
 /// invalid param), then each finding of the credential.
 pub fn open_binding(
+    style: &str,
+    credential: Option<&[u8]>,
+    settings: Option<&[u8]>,
+) -> Result<SigV4Binding, Vec<Refusal>> {
+    let bound = bind(style, credential, settings);
+    if let Err(refusals) = &bound {
+        let reason = refusals
+            .iter()
+            .map(Refusal::line)
+            .collect::<Vec<_>>()
+            .join("; ");
+        tracing::info!(
+            module = "sigv4",
+            reason = reason.as_str(),
+            "sigv4 outbound binding refused"
+        );
+    }
+    bound
+}
+
+/// [`open_binding`]'s findings, unlogged.
+fn bind(
     style: &str,
     credential: Option<&[u8]>,
     settings: Option<&[u8]>,

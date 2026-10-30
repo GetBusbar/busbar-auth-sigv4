@@ -299,3 +299,45 @@ fn an_unknown_setting_other_than_region_unread_is_still_refused() {
     )
     .is_ok());
 }
+
+/// S1/SZ-P13: style settings that do not parse answer the auth kit's `json_error` line (the class
+/// of failure and where), never the decoder's own text, whose input may carry a pasted secret.
+#[test]
+fn style_settings_that_do_not_parse_withhold_the_decoders_text() {
+    assert_eq!(
+        lines(open(SIGV4, Some("A:S"), r#"{"service": "wJalrXUtnFEMI"#)),
+        [
+            "settings: outbound auth settings are not JSON: it ends before the JSON does (line 1, \
+          column 26; the decoder's text is withheld)"
+        ]
+    );
+}
+
+/// S5: a refused binding is logged once at `info` (module `sigv4`, each line), never with the
+/// credential's bytes.
+#[test]
+fn a_refused_binding_is_logged_once_without_the_credential() {
+    let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
+    tracing::subscriber::with_default(cap.clone(), || {
+        assert!(open(
+            SIGV4,
+            Some("AKIDNOCOLONSECRET"),
+            r#"{"service":"s","region":"r"}"#
+        )
+        .is_err());
+        assert!(open(
+            SIGV4,
+            Some("AKID:SECRETOK"),
+            r#"{"service":"s","region":"r"}"#
+        )
+        .is_ok());
+    });
+    let logged = cap.messages();
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert!(logged[0].contains("module=sigv4"), "{logged:?}");
+    assert!(
+        logged[0].contains("credential: expected ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]"),
+        "{logged:?}"
+    );
+    assert!(!logged[0].contains("AKIDNOCOLONSECRET"), "{logged:?}");
+}

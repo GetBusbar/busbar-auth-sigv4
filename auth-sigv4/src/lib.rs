@@ -84,8 +84,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use busbar_contract::abi::auth::{
     AuthTail, StyleDecl, CAP_INBOUND, CAP_OUTBOUND, FACT_INBOUND_ALL_HEADERS,
-    FACT_READS_CREDENTIALS, LOGIN_KIND_NONE, POINT_HEAD_BODY, STYLE_CALLER_CREDENTIAL,
-    STYLE_NEEDS_HEADERS,
+    FACT_READS_CREDENTIALS, FIELD_SENSITIVE, LOGIN_KIND_NONE, POINT_HEAD_BODY,
+    STYLE_CALLER_CREDENTIAL, STYLE_NEEDS_HEADERS,
 };
 use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::mechanism::door::{
@@ -110,10 +110,18 @@ use crate::inbound::{Judgement, Read, SecretSource};
 use crate::instance::{SigV4, Signed, Who};
 use crate::signing::SignFacts;
 
-/// The flags every field this plugin writes carries: NONE. Credential headers go out
-/// indexable, and an h2 encoder that honoured `FIELD_SENSITIVE` would send them never-indexed,
-/// which is different bytes on the wire.
-const FIELD_FLAGS: u32 = 0;
+/// The fields that carry credential material: `FIELD_SENSITIVE` (an h2 encoder sends them
+/// never-indexed; lead-signed 2026-10-30). The date and the payload hash carry none.
+const SENSITIVE_FIELDS: [&str; 2] = ["authorization", "x-amz-security-token"];
+
+/// The flags field `name` is written with.
+fn field_flags(name: &str) -> u32 {
+    if SENSITIVE_FIELDS.contains(&name) {
+        FIELD_SENSITIVE
+    } else {
+        0
+    }
+}
 
 /// The one style this plugin serves: it signs the body, so it needs the `HeadBody` point (THE
 /// DESIGN, "Auth points and guest lists") and hashes the body itself; it signs the content type
@@ -206,9 +214,25 @@ pub(crate) fn now_epoch() -> u64 {
         .unwrap_or(0)
 }
 
-/// The refusal of the plugin's own settings: none are read; present settings must be a JSON
-/// object (`life::settings_object`: none lent reads as empty, and takes none).
-const SETTINGS_NOT_OBJECT: &str = "busbar-auth-sigv4 settings must be a JSON object";
+/// The plugin-level settings `validate`, `open` and `refresh` answer alike: a JSON object (none
+/// lent reads as `{}`) naming only the style's own keys (the host opens the instance over the
+/// binding's settings). Every other key is refused by name, one `settings: ...` line each.
+fn plugin_settings(settings: &[u8]) -> Result<(), Refusal> {
+    let m = life::settings_object(settings)?;
+    let lines: Vec<String> = style::unknown_keys(&m)
+        .iter()
+        .map(style::Refusal::line)
+        .collect();
+    if lines.is_empty() {
+        Ok(())
+    } else {
+        Err(Refusal::failed(lines.join("\n")))
+    }
+}
+
+/// `VerifyPlugin::open`'s static refusal (the combined door opens through `OutboundPlugin::open`,
+/// which names each key).
+const SETTINGS_REFUSED: &str = "settings: not a JSON object of the sigv4 style's keys";
 
 /// The refusal `open_outbound` answers for a bind that names no style.
 const NO_STYLE: &str = "settings: no outbound auth style was named";
@@ -249,22 +273,13 @@ fn sign_facts<'a>(view: &FieldsView<'a>, hash: &'a str) -> Option<SignFacts<'a>>
 }
 
 impl OutboundPlugin for SigV4 {
-    /// `validate`: present settings must be a JSON object (FAILED with the reason, as `open` and
-    /// `refresh` answer the same settings).
+    /// `validate`: what `open` and `refresh` refuse ([`plugin_settings`]), FAILED.
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
-        if life::settings_object(settings).is_ok() {
-            Ok(())
-        } else {
-            Err(Refusal::failed(SETTINGS_NOT_OBJECT))
-        }
+        plugin_settings(settings)
     }
 
     fn open(settings: &[u8], _: &[&[u8]], generation: u64) -> Result<Self, Refusal> {
-        if life::settings_object(settings).is_err() {
-            // Settings `open` refuses are FAILED with the reason (the lifecycle's rule, and the
-            // inbound conformance script's).
-            return Err(Refusal::failed(SETTINGS_NOT_OBJECT));
-        }
+        plugin_settings(settings)?;
         Ok(SigV4::new(generation))
     }
 
@@ -310,7 +325,7 @@ impl OutboundPlugin for SigV4 {
                 Some(Signed::Failed(reason)) => FieldsAnswer::Failed(reason),
                 Some(Signed::Fields(fields)) => {
                     for (name, value) in &fields {
-                        out.push(name.as_bytes(), value.as_bytes(), FIELD_FLAGS);
+                        out.push(name.as_bytes(), value.as_bytes(), field_flags(name));
                     }
                     FieldsAnswer::Ready
                 }
@@ -327,9 +342,7 @@ impl OutboundPlugin for SigV4 {
 
     /// The new generation.
     fn refresh(&self, settings: &[u8], _: &[&[u8]], generation: u64) -> Result<(), Refusal> {
-        if life::settings_object(settings).is_err() {
-            return Err(Refusal::failed(SETTINGS_NOT_OBJECT));
-        }
+        plugin_settings(settings)?;
         self.set_generation(generation);
         Ok(())
     }
@@ -372,9 +385,7 @@ impl SecretSource for &VerifyOp {
 impl VerifyPlugin for SigV4 {
     /// The kit opens the one instance through [`OutboundPlugin::open`]; this builds the same.
     fn open(settings: &[u8], _: &[&[u8]]) -> Result<Self, &'static str> {
-        if life::settings_object(settings).is_err() {
-            return Err(SETTINGS_NOT_OBJECT);
-        }
+        plugin_settings(settings).map_err(|_| SETTINGS_REFUSED)?;
         Ok(SigV4::new(0))
     }
 

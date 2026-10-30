@@ -99,6 +99,23 @@ impl SigV4 {
         who: Who<'_>,
         facts: Option<SignFacts<'_>>,
     ) -> Option<Signed> {
+        let signed = self.sign_unlogged(handle, who, facts);
+        let reason = match &signed {
+            Some(Signed::Failed(reason)) => reason.as_ref(),
+            Some(Signed::NoFacts) => "the host lent no method, host or path",
+            _ => return signed,
+        };
+        tracing::info!(module = "sigv4", reason, "sigv4 request not signed: FAILED");
+        signed
+    }
+
+    /// [`Self::sign`]'s answer, unlogged.
+    fn sign_unlogged(
+        &self,
+        handle: u64,
+        who: Who<'_>,
+        facts: Option<SignFacts<'_>>,
+    ) -> Option<Signed> {
         let binding = self.binding(handle)?;
         let Some(facts) = facts else {
             return Some(Signed::NoFacts);

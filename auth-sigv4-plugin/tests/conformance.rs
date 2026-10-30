@@ -7,9 +7,9 @@
 //!
 //! ## The RED arms stay in the file
 //!
-//! * [`red_a_sensitive_field_flag_is_not_the_1_5_5_bytes`]: the shape TODO item 583 asks for
-//!   loads and passes the kind's checks, yet its transcript diverges from the pinned one (Q4: the
-//!   1.5.5 bytes win).
+//! * [`red_a_writer_that_flags_every_field_is_not_the_pinned_bytes`]: the credential fields
+//!   (`authorization`, `x-amz-security-token`) are FIELD_SENSITIVE and the rest are not; a writer
+//!   that flags every field loads and passes the kind's checks, yet its transcript diverges.
 //! * [`red_a_writer_that_ignores_the_host_capacity_faults`]: a `fields` that writes past the host's
 //!   field capacity is FAULT at the loader, never a truncated header.
 //!
@@ -694,7 +694,7 @@ fn script(p: &Plugin<Auth>, host: Option<(&Dispatcher, &Creds)>) -> Vec<String> 
 }
 
 const EXPECTED: &[&str] = &[
-    "validate [1] Failed busbar-auth-sigv4 settings must be a JSON object",
+    "validate [1] Failed settings: must be a JSON object",
     "validate Ready",
     "open Ready",
     "open_outbound sigv4 Ready ",
@@ -705,18 +705,18 @@ const EXPECTED: &[&str] = &[
      plugin",
     "fields Ready  authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/\
      svc/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;\
-     x-amz-security-token, Signature=SIGNATURE [flags=0] ; x-amz-date: 20150830T123600Z [flags=0] ; \
+     x-amz-security-token, Signature=SIGNATURE [flags=1] ; x-amz-date: 20150830T123600Z [flags=0] ; \
      x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 \
-     [flags=0] ; x-amz-security-token: TOKEN [flags=0]",
+     [flags=0] ; x-amz-security-token: TOKEN [flags=1]",
     "fields Failed  short(needed_fields=4 needed_bytes=385) -> recall Ready authorization: \
      AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/svc/aws4_request, \
      SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token, \
-     Signature=SIGNATURE [flags=0] ; x-amz-date: 20150830T123600Z [flags=0] ; \
+     Signature=SIGNATURE [flags=1] ; x-amz-date: 20150830T123600Z [flags=0] ; \
      x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 \
-     [flags=0] ; x-amz-security-token: TOKEN [flags=0]",
+     [flags=0] ; x-amz-security-token: TOKEN [flags=1]",
     "fields Ready  authorization: AWS4-HMAC-SHA256 Credential=AKIDCALLER/20150830/us-east-1/svc/\
      aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, \
-     Signature=SIGNATURE [flags=0] ; x-amz-date: 20150830T123600Z [flags=0] ; \
+     Signature=SIGNATURE [flags=1] ; x-amz-date: 20150830T123600Z [flags=0] ; \
      x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 \
      [flags=0]",
     "fields Failed sigv4: this binding holds no credential of its own (passthrough-only); the \
@@ -724,9 +724,9 @@ const EXPECTED: &[&str] = &[
     "fields Refused ",
     "fields Ready  authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/\
      svc/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;\
-     x-amz-security-token, Signature=SIGNATURE [flags=0] ; x-amz-date: 20150830T123600Z [flags=0] ; \
+     x-amz-security-token, Signature=SIGNATURE [flags=1] ; x-amz-date: 20150830T123600Z [flags=0] ; \
      x-amz-content-sha256: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a \
-     [flags=0] ; x-amz-security-token: TOKEN [flags=0]",
+     [flags=0] ; x-amz-security-token: TOKEN [flags=1]",
     "ready Ready 1",
     "ready Ready 1",
     "tick Ready next>1000=true",
@@ -756,6 +756,9 @@ const EXPECTED: &[&str] = &[
 /// The plugin's own log, folded into the host's: each inbound REJECT names its reason (module
 /// `sigv4`, at info), the AccessKeyId where one parsed, never the signature or the secret.
 const EXPECTED_FOLDS: &[&str] = &[
+    "diag 4294967295 sev=0 busbar_auth_sigv4::style: sigv4 outbound binding refused module=\"sigv4\" reason=\"settings: outbound auth style `bearer` is not served by this plugin\"",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::style: sigv4 outbound binding refused module=\"sigv4\" reason=\"settings: outbound auth style `kerberos` is not served by this plugin\"",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::instance: sigv4 request not signed: FAILED module=\"sigv4\" reason=\"sigv4: this binding holds no credential of its own (passthrough-only); the request is not sent unsigned\"",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"unparseable SigV4 authorization\"",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature mismatch or credential not live\" access_key_id=BBAKNOBODY",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature mismatch or credential not live\" access_key_id=BBAKNOBODY",
@@ -862,7 +865,7 @@ extern "C" fn sensitive_door() -> &'static Door {
 }
 
 #[test]
-fn red_a_sensitive_field_flag_is_not_the_1_5_5_bytes() {
+fn red_a_writer_that_flags_every_field_is_not_the_pinned_bytes() {
     // The same host as the green test, so the flag is the transcript's only difference.
     let creds = Arc::new(Creds::default());
     let d = Dispatcher::with_services(DispatchConfig::default(), creds.clone());
@@ -871,10 +874,11 @@ fn red_a_sensitive_field_flag_is_not_the_1_5_5_bytes() {
     let t = mask_signature(script(&red, Some((&d, &creds))));
     assert_ne!(
         t, EXPECTED,
-        "a sensitive flag must not pass as the 1.5.5 bytes"
+        "a flag on a field that carries no credential must not pass as the pinned bytes"
     );
     assert!(
-        t.iter().any(|l| l.contains("[flags=1]")),
+        t.iter()
+            .any(|l| l.contains("x-amz-date: 20150830T123600Z [flags=1]")),
         "the kind's check admits the flag; only the pinned transcript refuses it"
     );
 }
@@ -964,7 +968,8 @@ fn fields_signs_the_walked_requests_query_and_method_through_the_door() {
 /// OWNER RULING (was: the credential opened, its fields call answered READY with no field and
 /// reported the signer's WARN line, diag id `auth.sigv4-session-token-invalid-bytes`): a credential
 /// whose session token holds a byte no header value may carry is refused at `open_outbound`,
-/// FAILED with the finding and never the token, and nothing is noted beside it.
+/// FAILED with the finding and never the token; the plugin's log names the refusal once, at
+/// `info` (S5), never the token.
 #[test]
 fn an_unsendable_session_token_is_refused_at_open_through_the_door() {
     let creds = Arc::new(Creds::default());
@@ -982,9 +987,15 @@ fn an_unsendable_session_token_is_refused_at_open_through_the_door() {
         "open_outbound sigv4 Failed credential: the session token holds a byte no header value \
          may carry"
     );
-    assert!(
-        std::mem::take(&mut *folds.0.lock().unwrap()).is_empty(),
-        "nothing is noted beside the refusal"
+    let noted = std::mem::take(&mut *folds.0.lock().unwrap());
+    assert_eq!(
+        noted,
+        [
+            "diag 4294967295 sev=0 busbar_auth_sigv4::style: sigv4 outbound binding refused \
+          module=\"sigv4\" reason=\"credential: the session token holds a byte no header value \
+          may carry\""
+        ],
+        "one info line names the refusal, never the token"
     );
 }
 

@@ -540,3 +540,37 @@ fn no_length_line_is_ever_signed() {
         );
     }
 }
+
+/// S5: a `fields` call that FAILS is logged once at `info` (module `sigv4`, its reason), never
+/// with the caller's credential bytes; a call that signs logs nothing.
+#[test]
+fn a_failed_fields_call_is_logged_once_without_the_credential() {
+    let s = SigV4::new(1);
+    let h = open(&s, None);
+    let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
+    tracing::subscriber::with_default(cap.clone(), || {
+        fields(&s, h, MODE_PASSTHROUGH, "AKIDLOGGED:SECRETLOGGED:TOK\r\nEN");
+        fields(&s, h, MODE_OWN, "");
+        fields(&s, h, MODE_PASSTHROUGH, "AKIDCLEAN:SECRETCLEAN");
+    });
+    let logged = cap.messages();
+    assert_eq!(logged.len(), 2, "{logged:?}");
+    assert!(
+        logged.iter().all(|l| l.contains("module=sigv4")),
+        "{logged:?}"
+    );
+    assert!(
+        logged[0].contains("caller credential: the session token holds a byte"),
+        "{logged:?}"
+    );
+    assert!(
+        logged[1].contains("holds no credential of its own"),
+        "{logged:?}"
+    );
+    for secret in ["AKIDLOGGED", "SECRETLOGGED", "SECRETCLEAN"] {
+        assert!(
+            !logged.join("\n").contains(secret),
+            "{secret} leaked: {logged:?}"
+        );
+    }
+}

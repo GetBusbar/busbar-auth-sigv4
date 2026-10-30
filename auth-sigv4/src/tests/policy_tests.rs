@@ -105,3 +105,61 @@ fn validate_fails_settings_that_are_not_an_object() {
         .expect_err("an array is not the settings object");
     assert_eq!(refusal.outcome(), Outcome::Failed);
 }
+
+/// The plugin-level settings `validate`, `open` and `refresh` read, the one rule for all three.
+fn plugin_level(
+    settings: &[u8],
+) -> [Option<(busbar_contract::abi::mechanism::call::Outcome, String)>; 3] {
+    use crate::instance::SigV4;
+    use busbar_contract::abi::sdk::auth_outbound::OutboundPlugin;
+    let said = |r: busbar_contract::abi::sdk::life::Refusal| {
+        (r.outcome(), r.text().unwrap_or_default().to_string())
+    };
+    let opened = SigV4::new(1);
+    [
+        <SigV4 as OutboundPlugin>::validate(settings)
+            .err()
+            .map(said),
+        <SigV4 as OutboundPlugin>::open(settings, &[], 1)
+            .err()
+            .map(said),
+        <SigV4 as OutboundPlugin>::refresh(&opened, settings, &[], 2)
+            .err()
+            .map(said),
+    ]
+}
+
+/// S2: a plugin-level key this plugin does not read is refused BY NAME, FAILED, in the contract's
+/// `settings: ...` line form, one line per key, alike at `validate`, `open` and `refresh`; the
+/// keys the instance is opened over (the style's own) still open.
+#[test]
+fn an_unknown_plugin_level_key_is_refused_by_name_at_validate_open_and_refresh() {
+    use busbar_contract::abi::mechanism::call::Outcome;
+    let want = Some((
+        Outcome::Failed,
+        "settings: unknown key `regoin`\nsettings: unknown key `scope`".to_string(),
+    ));
+    assert_eq!(
+        plugin_level(br#"{"regoin":"x","scope":"y"}"#),
+        [want.clone(), want.clone(), want]
+    );
+    for ok in [
+        &b""[..],
+        b"{}",
+        br#"{"service":"bedrock","region":"us-east-1","region_unread":"w","content_type":"a/b"}"#,
+    ] {
+        assert_eq!(plugin_level(ok), [None, None, None]);
+    }
+}
+
+/// S2: settings that are not a JSON object answer the contract's own line (`settings: must be a
+/// JSON object`), FAILED, at all three.
+#[test]
+fn plugin_level_settings_that_are_not_an_object_answer_the_settings_line() {
+    use busbar_contract::abi::mechanism::call::Outcome;
+    let want = Some((
+        Outcome::Failed,
+        "settings: must be a JSON object".to_string(),
+    ));
+    assert_eq!(plugin_level(b"[]"), [want.clone(), want.clone(), want]);
+}

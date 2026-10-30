@@ -1410,3 +1410,20 @@ fn a_bad_signature_reject_is_logged_without_the_signature() {
     );
     assert!(!logged.contains(SECRET), "the secret leaked: {logged:?}");
 }
+
+/// S1/S5: a parsed `Authorization`'s `Debug` names the scope and the signed headers, never the
+/// signature (no log, panic or error may carry one).
+#[test]
+fn a_parsed_authorization_debug_withholds_the_signature() {
+    let parsed = parse_authorization_header(
+        "AWS4-HMAC-SHA256 Credential=AKID/20150830/us-east-1/svc/aws4_request, \
+         SignedHeaders=host;x-amz-date, Signature=deadbeefcafe0123",
+    )
+    .expect("parses");
+    let printed = format!("{parsed:?}");
+    assert!(!printed.contains("deadbeefcafe0123"), "{printed}");
+    assert!(
+        printed.contains("AKID") && printed.contains("host;x-amz-date"),
+        "{printed}"
+    );
+}

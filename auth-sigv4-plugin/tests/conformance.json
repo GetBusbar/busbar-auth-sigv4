@@ -3,7 +3,8 @@
     "bad_settings": [
       "[1]",
       "\"not-an-object\"",
-      "{ not json"
+      "{ not json",
+      "{\"regoin\": \"us-east-1\"}"
     ],
     "host_credentials": [
       {
@@ -168,7 +169,8 @@
         "expect_fields": [
           [
             "authorization",
-            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/svc/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token, Signature=2d863231c4a4f0c3d932f6ffd1454792ca0b9cce22813ee70e20165c673c8dc2"
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/svc/aws4_request, SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token, Signature=2d863231c4a4f0c3d932f6ffd1454792ca0b9cce22813ee70e20165c673c8dc2",
+            1
           ],
           [
             "x-amz-date",
@@ -180,7 +182,8 @@
           ],
           [
             "x-amz-security-token",
-            "TOKEN"
+            "TOKEN",
+            1
           ]
         ]
       }

@@ -137,10 +137,10 @@ fn an_unknown_plugin_level_key_is_refused_by_name_at_validate_open_and_refresh()
     use busbar_contract::abi::mechanism::call::Outcome;
     let want = Some((
         Outcome::Failed,
-        "settings: unknown key `regoin`\nsettings: unknown key `scope`".to_string(),
+        "settings: unknown key `regoin`\nsettings: unknown key `serivce`".to_string(),
     ));
     assert_eq!(
-        plugin_level(br#"{"regoin":"x","scope":"y"}"#),
+        plugin_level(br#"{"regoin":"x","serivce":"y"}"#),
         [want.clone(), want.clone(), want]
     );
     for ok in [

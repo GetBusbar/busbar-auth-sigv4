@@ -1120,3 +1120,82 @@ fn a_query_that_is_not_utf8_fails_the_fields_call() {
         "fields Failed sigv4 cannot sign: the query is not UTF-8"
     );
 }
+
+/// L3 (audit round 1 @57f7ef5, lead-confirmed; the AWS SigV4 rule that every `x-amz-*` header
+/// sent is signed): an `x-amz-*` line the head already carries (an AWS JSON protocol's
+/// `x-amz-target`, an S3 `x-amz-meta-*`) is signed, its value canonicalized; the date, payload
+/// hash and token the signer writes are SET over any the head carries. Was: left unsigned, so AWS
+/// rejected the request.
+#[test]
+fn every_x_amz_line_the_head_carries_is_signed() {
+    let (_, p, handle) = open_signing("AKIDEXAMPLE:SECRET");
+    let sent = [
+        NamedValue {
+            name: s("content-type"),
+            value: blob("application/x-amz-json-1.1", BLOB_OCTETS, 0),
+        },
+        NamedValue {
+            name: s("X-Amz-Target"),
+            value: blob("AmazonSSM.GetParameter", BLOB_OCTETS, 0),
+        },
+        NamedValue {
+            name: s("x-amz-meta-note"),
+            value: blob("  a   b ", BLOB_OCTETS, 0),
+        },
+        NamedValue {
+            name: s("x-amz-date"),
+            value: blob("19700101T000000Z", BLOB_OCTETS, 0),
+        },
+        NamedValue {
+            name: s("x-amzn-trace-id"),
+            value: blob("Root=1", BLOB_OCTETS, 0),
+        },
+    ];
+    let mut b = Buffers::new(1024, 4);
+    let mut f: Frame<FieldsIn, FieldsOut> = Frame::new(z(), z());
+    f.input.head = in_head();
+    f.out.head = out_head();
+    f.input.handle = handle;
+    f.input.mode = MODE_OWN;
+    f.input.request = facts();
+    (f.input.headers, f.input.headers_len) = (sent.as_ptr(), sent.len());
+    f.input.point = POINT_HEAD_BODY;
+    f.input.body = blob("{}", BLOB_OCTETS, 0);
+    (f.input.field_buf, f.input.field_buf_cap) = (b.buf.as_mut_ptr(), b.buf.len());
+    (f.input.fields, f.input.fields_cap) = (b.spans.as_mut_ptr(), b.spans.len() as u32);
+    let c = p.call(slot::FIELDS, &mut f);
+    assert_eq!(c.outcome, Outcome::Ready, "{}", err(&c.error));
+    let hash = sha256_hex(b"{}");
+    let (signature, signed_headers) = busbar_auth_sigv4::inbound::sign_v4(
+        "SECRET",
+        "us-east-1",
+        "svc",
+        "POST",
+        "/model/m/converse",
+        "",
+        &[
+            ("content-type", "application/x-amz-json-1.1"),
+            ("host", "runtime.signer.example"),
+            ("x-amz-content-sha256", hash.as_str()),
+            ("x-amz-date", "20150830T123600Z"),
+            ("x-amz-meta-note", "a b"),
+            ("x-amz-target", "AmazonSSM.GetParameter"),
+        ],
+        &hash,
+        "20150830T123600Z",
+        "20150830",
+    );
+    assert_eq!(
+        signed_headers,
+        "content-type;host;x-amz-content-sha256;x-amz-date;x-amz-meta-note;x-amz-target"
+    );
+    let written = b.read(f.out.fields_len);
+    assert!(
+        written.starts_with(&format!(
+            "authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/svc/\
+             aws4_request, SignedHeaders={signed_headers}, Signature={signature} [flags=1] ; \
+             x-amz-date: 20150830T123600Z [flags=0]"
+        )),
+        "{written}"
+    );
+}

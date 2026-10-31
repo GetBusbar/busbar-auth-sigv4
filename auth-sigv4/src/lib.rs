@@ -215,11 +215,13 @@ pub(crate) fn now_epoch() -> u64 {
 
 /// The plugin-level settings `validate`, `open` and `refresh` answer alike: a JSON object (none
 /// lent reads as `{}`) naming only the style's own keys (the host opens the instance over the
-/// binding's settings). Every other key is refused by name, one `settings: ...` line each.
+/// binding's settings). Every other key is refused by name, one `settings: ...` line each, and a
+/// `service` or `region` present is checked as the bind checks it (`settings.<key>: ...`).
 fn plugin_settings(settings: &[u8]) -> Result<(), Refusal> {
     let m = life::settings_object(settings)?;
     let lines: Vec<String> = style::unknown_keys(&m)
         .iter()
+        .chain(style::scope_findings(&m).iter())
         .map(style::Refusal::line)
         .collect();
     if lines.is_empty() {

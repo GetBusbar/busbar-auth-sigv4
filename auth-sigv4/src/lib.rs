@@ -205,12 +205,12 @@ pub mod compiled_in {
 }
 
 /// Wall-clock seconds since the epoch (1970-01-01 UTC) — the clock `tick`'s day-key pre-derivation
-/// reads against.
-pub(crate) fn now_epoch() -> u64 {
+/// reads against; `None` when the clock reads before the epoch (no day to derive a key for).
+pub(crate) fn now_epoch() -> Option<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
+        .ok()
         .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// The plugin-level settings `validate`, `open` and `refresh` answer alike: a JSON object (none

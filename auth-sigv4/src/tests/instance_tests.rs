@@ -542,7 +542,7 @@ fn tick_holds_todays_day_key_on_each_open_binding() {
     let binding = s.binding(handle).expect("the binding is held");
     assert!(binding.held().is_empty(), "nothing derived before a tick");
     s.tick(1_000);
-    let (_, today) = crate::sigv4::format_amz_time(crate::now_epoch());
+    let (_, today) = crate::sigv4::format_amz_time(crate::now_epoch().expect("the clock reads"));
     // Tomorrow's key rides too when the clock is within the hour of midnight.
     assert!(
         binding.held().contains(&today),

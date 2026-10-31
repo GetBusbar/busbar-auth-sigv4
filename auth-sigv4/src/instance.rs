@@ -10,7 +10,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use crate::signing::{Field, SigV4Binding, SignFacts, SigningCredential};
@@ -53,6 +53,8 @@ pub struct SigV4 {
     next_handle: AtomicU64,
     /// Each handle: its generation and its binding (kept until retire).
     handles: RwLock<HashMap<u64, Handle>>,
+    /// Whether `tick` has warned that the wall clock cannot be read (once per instance).
+    clock_warned: AtomicBool,
 }
 
 impl SigV4 {
@@ -62,6 +64,7 @@ impl SigV4 {
             generation: AtomicU64::new(generation),
             next_handle: AtomicU64::new(1),
             handles: RwLock::new(HashMap::new()),
+            clock_warned: AtomicBool::new(false),
         }
     }
 
@@ -165,6 +168,23 @@ impl SigV4 {
     /// would end it for good (`TickOut::next_tick_ns`), leaving a later binding's day keys to be
     /// derived on the request path (a daily signing key is derived ahead of time).
     pub(crate) fn tick(&self, now_ns: u64) -> u64 {
+        self.tick_at(now_ns, crate::now_epoch())
+    }
+
+    /// [`Self::tick`] at wall-clock `now` (seconds since the epoch; `None`: the clock cannot be
+    /// read, so no key is derived, never 1970's, and the first such tick warns).
+    pub(crate) fn tick_at(&self, now_ns: u64, now: Option<u64>) -> u64 {
+        let next = now_ns.saturating_add(PREDERIVE_TICK_NS);
+        let Some(now) = now else {
+            if !self.clock_warned.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    module = "sigv4",
+                    "the wall clock reads before the epoch: the SigV4 day keys are not \
+                     pre-derived (each request derives its own)"
+                );
+            }
+            return next;
+        };
         let bindings: Vec<Arc<SigV4Binding>> = self
             .handles
             .read()
@@ -172,11 +192,10 @@ impl SigV4 {
             .values()
             .map(|(_, b)| b.clone())
             .collect();
-        let now = crate::now_epoch();
         for b in &bindings {
             b.prederive(now);
         }
-        now_ns.saturating_add(PREDERIVE_TICK_NS)
+        next
     }
 }
 

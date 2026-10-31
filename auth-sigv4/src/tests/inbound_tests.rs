@@ -997,7 +997,7 @@ fn a_signed_body_that_matches_its_hash_is_admitted() {
 }
 
 #[test]
-fn an_escaped_query_param_is_signed_as_sent_never_reencoded() {
+fn an_already_canonical_escaped_query_param_is_judged_unchanged() {
     let s = sign(SECRET, AKID, Some("p=a%2Fb"), b"", None);
     assert_eq!(
         run(&s.lines, Some("p=a%2Fb"), Some(b""), &mut Fake::default()),

@@ -487,37 +487,14 @@ pub fn verify_inbound_sigv4<H: AsRef<str>>(
     }
 }
 
-/// Canonicalize the request query string for SigV4: split into key=value pairs, sort by (encoded)
-/// key then (encoded) value, and join with `&`. An empty/absent query yields `""`. A bare key
-/// (`?foo`) canonicalizes to `foo=` (AWS signs a missing value as empty).
-///
-/// Deliberately does NOT run each key/value through an AWS URI-encoder. `query` here is the RAW
-/// wire query string — already percent-encoded exactly once by the client, since a compliant SigV4
-/// client uses the SAME single URI-encoding pass to build both the CanonicalQueryString it signs AND
-/// the query string it puts on the wire. Re-encoding would double-encode it (a client's correct
-/// `a%2Fb` becomes `a%252Fb`), so every request with a query parameter needing escaping would fail
-/// verification. Sorting is done on the RAW (already-encoded) bytes, which is equivalent to sorting
-/// on the encoded key/value per the AWS spec.
+/// Canonicalize the received query string for SigV4, the AWS rule and the outbound signer's
+/// ([`crate::sigv4::canonical_query`], shared): each `name=value` pair (a bare name has the empty
+/// value) has its `%XX` escapes decoded once and every byte re-encoded over the unreserved set with
+/// uppercase hex, the pairs sorted by encoded name then value and joined with `&`; `""` for none.
+/// A client's already-canonical query is unchanged (the encoding is idempotent over the canonical
+/// form), and one sent with a reserved byte raw or a lowercase escape verifies as AWS recomputes it.
 pub fn canonical_query_string(query: Option<&str>) -> String {
-    let Some(q) = query.filter(|q| !q.is_empty()) else {
-        return String::new();
-    };
-    let mut pairs: Vec<(&str, &str)> = q
-        .split('&')
-        .filter(|p| !p.is_empty())
-        .map(|pair| pair.split_once('=').unwrap_or((pair, "")))
-        .collect();
-    pairs.sort();
-    let mut out = String::with_capacity(q.len() + pairs.len());
-    for (i, (k, v)) in pairs.into_iter().enumerate() {
-        if i > 0 {
-            out.push('&');
-        }
-        out.push_str(k);
-        out.push('=');
-        out.push_str(v);
-    }
-    out
+    crate::sigv4::canonical_query(query)
 }
 
 /// A header value as the kernel's `HeaderValue::to_str` read it: the text when every byte is

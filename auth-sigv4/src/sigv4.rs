@@ -126,7 +126,8 @@ fn canonical_query_component(raw: &str) -> String {
 /// value in canonical form ([`canonical_query_component`]), sorted by name then value, joined with
 /// `&`; `""` for none. The server recomputes it from what it receives the same way, so a reserved
 /// byte sent raw (`:`, `/`), a lowercase escape or an escaped unreserved byte signs as AWS checks
-/// it. (The inbound check keeps its own builder: a client's query is already canonical there.)
+/// it. The inbound check recomputes a client's canonical query with it too
+/// ([`crate::inbound::canonical_query_string`]).
 pub fn canonical_query(query: Option<&str>) -> String {
     let Some(q) = query.filter(|q| !q.is_empty()) else {
         return String::new();

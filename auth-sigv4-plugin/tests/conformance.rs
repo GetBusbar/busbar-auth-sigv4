@@ -1097,3 +1097,26 @@ fn an_unserved_secret_read_rejects_and_logs_the_service_error() {
         "{folds:#?}"
     );
 }
+
+/// The `fields` line `request` answers on a fresh own-credential handle, its body lent (`{}`).
+fn fields_answer(request: RequestFacts) -> String {
+    let (_, p, handle) = open_signing("AKIDEXAMPLE:SECRET");
+    fields_for(&p, handle, MODE_OWN, z(), (1024, 4), Some("{}"), request)
+}
+
+/// V6 (audit round 1 @57f7ef5, lead-confirmed): a query the host lends that is not UTF-8 cannot be
+/// signed as it is sent: the call FAILS with the reason. Was: signed as no query at all, so the
+/// request went out with a signature AWS rejects.
+#[test]
+fn a_query_that_is_not_utf8_fails_the_fields_call() {
+    const QUERY: &[u8] = b"a=\xff";
+    let mut request = facts();
+    request.query = AbiStr {
+        ptr: QUERY.as_ptr(),
+        len: QUERY.len(),
+    };
+    assert_eq!(
+        fields_answer(request),
+        "fields Failed sigv4 cannot sign: the query is not UTF-8"
+    );
+}

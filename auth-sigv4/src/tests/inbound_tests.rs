@@ -337,7 +337,7 @@ fn the_aws_suite_repeated_and_trimmed_header_vectors_verify() {
     let amzdate = "20150830T123600Z";
     let now = parse_amz_date(amzdate).unwrap();
     let empty = sha256_hex(b"");
-    let cases: [(&str, &str, Vec<(&str, &str)>); 3] = [
+    let cases = [
         (
             "get-header-key-duplicate",
             "c9d5ea9f3f72853aea855b47ea873832890dbdd183b4468f858259531a5138ea",
@@ -1668,7 +1668,7 @@ fn each_verification_reject_is_logged_with_its_own_reason_word() {
     let s = sign(SECRET, AKID, None, b"", None);
     let (tomorrow, _) = format_amz_time(NOW + 86_400);
     let auth = s.lines[0].1.clone();
-    let cases: [(&str, Vec<(String, String)>, u64); 6] = [
+    let cases = [
         ("expired", s.lines.clone(), NOW + CLOCK_SKEW_SECS + 60),
         (
             "missing-date",

@@ -185,3 +185,33 @@ fn a_key_core_forwards_from_its_shared_schema_opens_the_instance() {
         [want.clone(), want.clone(), want]
     );
 }
+
+/// L5 (audit round 1 @57f7ef5, lead-confirmed; S2: `validate` refuses what `open` would): a
+/// `service` or `region` present in the plugin-level settings is checked as the bind checks it (a
+/// string, trimmed, 1 to 64 of `[a-z0-9-]`) at `validate`, `open` and `refresh` alike. Was: any
+/// type or shape accepted there.
+#[test]
+fn a_present_service_or_region_is_checked_at_validate_open_and_refresh() {
+    use busbar_contract::abi::mechanism::call::Outcome;
+    let failed = |text: &str| Some((Outcome::Failed, text.to_string()));
+    let service = failed("settings.service: not an AWS service name (1 to 64 of a-z, 0-9 and -)");
+    assert_eq!(
+        plugin_level(br#"{"service":"Bedrock"}"#),
+        [service.clone(), service.clone(), service]
+    );
+    let region = failed("settings.region: not an AWS region (1 to 64 of a-z, 0-9 and -)");
+    assert_eq!(
+        plugin_level(br#"{"region":"us east 1"}"#),
+        [region.clone(), region.clone(), region]
+    );
+    let typed = failed("settings: outbound auth setting `service` is invalid: expected a string");
+    assert_eq!(
+        plugin_level(br#"{"service":5}"#),
+        [typed.clone(), typed.clone(), typed]
+    );
+    assert_eq!(
+        plugin_level(br#"{"service":" s3 ","region":"eu-west-1"}"#),
+        [None, None, None],
+        "a well-shaped pair, padded, opens"
+    );
+}

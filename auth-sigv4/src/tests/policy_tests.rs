@@ -4,16 +4,28 @@
 //! THE CRATE'S OWN RULES, read off its production sources, and the HMAC the signer and the
 //! inbound check share, proven against RFC 4231 and against ring's.
 
-/// Every production source of the crate (the test modules are not production).
-const SOURCES: [(&str, &str); 7] = [
-    ("lib.rs", include_str!("../lib.rs")),
-    ("held.rs", include_str!("../held.rs")),
-    ("inbound.rs", include_str!("../inbound.rs")),
-    ("instance.rs", include_str!("../instance.rs")),
-    ("signing.rs", include_str!("../signing.rs")),
-    ("sigv4.rs", include_str!("../sigv4.rs")),
-    ("style.rs", include_str!("../style.rs")),
-];
+/// Every production source of the crate: every `.rs` file directly under `src/`, read at test time
+/// (T3, audit round 1: a new source file is covered without editing a list; the test modules
+/// under `src/tests/` are not production).
+fn sources() -> Vec<(String, String)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut out: Vec<(String, String)> = std::fs::read_dir(&dir)
+        .expect("the crate's src directory reads")
+        .map(|e| e.expect("a src entry").path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "rs"))
+        .map(|p| {
+            let text = std::fs::read_to_string(&p).expect("a source reads");
+            (p.file_name().unwrap().to_string_lossy().into_owned(), text)
+        })
+        .collect();
+    out.sort();
+    assert!(
+        out.iter().any(|(f, _)| f == "lib.rs") && out.len() >= 7,
+        "the scan found the crate's sources: {:?}",
+        out.iter().map(|(f, _)| f).collect::<Vec<_>>()
+    );
+    out
+}
 
 /// RED (BUSBAR-1.6.0.md THE DESIGN §2: "A plugin holds no process-global state: what it keeps is
 /// per-instance ... The one owner-approved per-thread slot is the door's log-capture slot,
@@ -21,7 +33,7 @@ const SOURCES: [(&str, &str); 7] = [
 #[test]
 fn no_per_thread_static_holds_reply_storage() {
     let marker = concat!("thread", "_local!");
-    for (file, text) in SOURCES {
+    for (file, text) in sources() {
         assert!(
             !text.contains(marker),
             "{file} declares a per-thread static: reply storage is the instance's"
@@ -34,7 +46,7 @@ fn no_per_thread_static_holds_reply_storage() {
 /// outer pad states ring drops unwiped.
 #[test]
 fn hmac_key_state_is_never_rings_unwiped_key() {
-    for (file, text) in SOURCES {
+    for (file, text) in sources() {
         assert!(
             !text.contains(concat!("hmac", "::Key")) && !text.contains(concat!("ring_", "hmac")),
             "{file} keys an HMAC on ring's unwiped `hmac::Key`"

@@ -97,15 +97,43 @@ const S3: &str = "s3";
 /// The CANONICAL URI a request scoped to `service` is signed over, from its path as sent (already
 /// percent-encoded once): for `s3`, the path encoded ONCE — each `%XX` escape decoded and every
 /// byte re-encoded over the unreserved set and `/` with uppercase hex (an escaped `/` stays `%2F`,
-/// a separator never a key byte); for every other service, the path as sent encoded once more
-/// ([`uri_encode_path`], AWS's double encoding). The outbound signer and the inbound check both
-/// derive it here.
+/// a separator never a key byte), never normalized; for every other service, the path as sent
+/// NORMALIZED ([`normalize_path`]) then encoded once more ([`uri_encode_path`], AWS's double
+/// encoding). The outbound signer and the inbound check both derive it here.
 pub fn canonical_uri(path: &str, service: &str) -> String {
     if service == S3 {
         encode_path_once(path)
     } else {
-        uri_encode_path(path)
+        uri_encode_path(&normalize_path(path))
     }
+}
+
+/// `path` normalized as AWS normalizes a non-S3 canonical URI: empty and `.` segments dropped (so
+/// `//` collapses), each `..` removing the segment before it (never above the root), the result
+/// rooted at `/` and keeping a trailing `/` when the path ends in one (or in `.` / `..`). An empty
+/// path is `/`.
+fn normalize_path(path: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                kept.pop();
+            }
+            s => kept.push(s),
+        }
+    }
+    let last = path.rsplit('/').next().unwrap_or("");
+    let trailing = path.contains('/') && matches!(last, "" | "." | "..");
+    let mut out = String::with_capacity(path.len() + 1);
+    for s in &kept {
+        out.push('/');
+        out.push_str(s);
+    }
+    if out.is_empty() || trailing {
+        out.push('/');
+    }
+    out
 }
 
 /// `path` in its single-encoded canonical form: every `%XX` escape decoded (an escaped `/` kept

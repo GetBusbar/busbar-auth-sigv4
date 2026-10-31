@@ -258,3 +258,83 @@ fn the_hmac_answers_rfc_4231() {
         "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
     );
 }
+
+/// THE AWS SIGV4 TEST SUITE (aws-sig-v4-test-suite: credential AKIDEXAMPLE /
+/// wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY, us-east-1, service `service`, 20150830T123600Z, the
+/// signed set `host;x-amz-date`, an empty body): each request, path and query exactly as the suite
+/// sends them, canonicalized by [`canonical_uri`] and [`canonical_query`] and signed, answers AWS's
+/// published signature.
+#[test]
+fn the_aws_suite_requests_sign_to_the_published_signatures() {
+    const SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+    let headers = [
+        ("host".to_string(), "example.amazonaws.com".to_string()),
+        ("x-amz-date".to_string(), "20150830T123600Z".to_string()),
+    ];
+    let empty = sha256_hex(b"");
+    const VANILLA: &str = "5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31";
+    for (name, path, query, signature) in [
+        ("get-vanilla", "/", None, VANILLA),
+        ("get-slash", "//", None, VANILLA),
+        ("get-relative", "/example/..", None, VANILLA),
+        ("get-relative-relative", "/example1/example2/../..", None, VANILLA),
+        ("get-slash-dot-slash", "/./", None, VANILLA),
+        (
+            "get-slashes",
+            "//example//",
+            None,
+            "9a624bd73a37c9a373b5312afbebe7a714a789de108f0bdfe846570885f57e84",
+        ),
+        (
+            "get-space",
+            "/example space/",
+            None,
+            "652487583200325589f1fba4c7e578f72c47cb61beeca81406b39ddec1366741",
+        ),
+        (
+            "get-utf8",
+            "/\u{1234}",
+            None,
+            "8318018e0b0f223aa2bbf98705b62bb787dc9c0e678f255a891fd03141be5d85",
+        ),
+        (
+            "get-unreserved",
+            "/-._~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+            None,
+            "07ef7494c76fa4850883e2b006601f940f8a34d404d0cfa977f52a65bbf5f24f",
+        ),
+        (
+            "get-vanilla-query-order-key-case",
+            "/",
+            Some("Param2=value2&Param1=value1"),
+            "b97d918cfa904a5beff61c982a1b6f458b799221646efd99d3219ec94cdf2500",
+        ),
+        (
+            "get-vanilla-query-order-key",
+            "/",
+            Some("Param1=value2&Param1=Value1"),
+            "eedbc4e291e521cf13422ffca22be7d2eb8146eecf653089df300a15b2382bd1",
+        ),
+        (
+            "get-vanilla-utf8-query",
+            "/",
+            Some("\u{1234}=bar"),
+            "2cdec8eed098649ff3a119c94853b13c643bcf08f8b0a1d91e12c9027818dd04",
+        ),
+    ] {
+        let (got, signed) = sign_v4(
+            SECRET,
+            "us-east-1",
+            "service",
+            "GET",
+            &canonical_uri(path, "service"),
+            &canonical_query(query),
+            &headers,
+            &empty,
+            "20150830T123600Z",
+            "20150830",
+        );
+        assert_eq!(signed, "host;x-amz-date", "{name}");
+        assert_eq!(got, signature, "{name}");
+    }
+}

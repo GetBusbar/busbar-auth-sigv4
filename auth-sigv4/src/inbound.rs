@@ -6,11 +6,11 @@
 //! the dummy-secret timing equivalence for an unknown AccessKeyId.
 //!
 //! The pieces: the `Authorization` parse, the `x-amz-date` window, and the canonical signing the
-//! check recomputes ([`sign_v4`], which keeps a quoted header value's interior spaces verbatim,
-//! unlike the outbound signer); the structural gate before buffering the body; and the credential
+//! check recomputes ([`sign_v4`], which trims and collapses ASCII space runs in every signed
+//! value, quoted or not, as the outbound signer does); the structural gate before buffering the body; and the credential
 //! check (the signed-header prefilter, `UNSIGNED-PAYLOAD` refused, the body hash against the signed
 //! `x-amz-content-sha256` in constant time, the dummy-secret rule). The HMAC chain, the key
-//! derivation and the algorithm tokens are the outbound signer's ([`crate::sigv4`]), shared.
+//! derivation and the algorithm tokens are the outbound signer's (`crate::sigv4`), shared.
 //!
 //! The AccessKeyId is looked up through the host's `records.secret` service
 //! ([`SecretSource`]), which answers a fixed dummy secret, not live, for an id it does not hold, in
@@ -366,7 +366,7 @@ fn parse_amz_date(amzdate: &str) -> Option<u64> {
     let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146_097 + doe - 719_468;
-    let epoch = days * 86_400 + hour * 3_600 + min * 60 + sec;
+    let epoch = days * crate::sigv4::SECS_PER_DAY as i64 + hour * 3_600 + min * 60 + sec;
     if epoch < 0 {
         return None;
     }
@@ -374,7 +374,7 @@ fn parse_amz_date(amzdate: &str) -> Option<u64> {
 }
 
 /// The fully-assembled inputs for verifying ONE inbound SigV4 request. `canonical_uri` MUST already
-/// be URI-encoded the SAME way the signer encodes it ([`canonical_uri`]); `canonical_querystring`
+/// be URI-encoded the SAME way the signer encodes it (`crate::sigv4::canonical_uri`); `canonical_querystring`
 /// MUST be [`canonical_query_string`]'s (or empty). `headers` carries the ACTUAL request header
 /// values for (at least) every name in the parsed `SignedHeaders` list; extra headers are ignored
 /// (only the signed ones enter the canonical request).
@@ -502,7 +502,7 @@ pub fn verify_inbound_sigv4<H: AsRef<str>>(
 }
 
 /// Canonicalize the received query string for SigV4, the AWS rule and the outbound signer's
-/// ([`crate::sigv4::canonical_query`], shared): each `name=value` pair (a bare name has the empty
+/// (`crate::sigv4::canonical_query`, shared): each `name=value` pair (a bare name has the empty
 /// value) has its `%XX` escapes decoded once and every byte re-encoded over the unreserved set with
 /// uppercase hex, the pairs sorted by encoded name then value and joined with `&`; `""` for none.
 /// A client's already-canonical query is unchanged (the encoding is idempotent over the canonical

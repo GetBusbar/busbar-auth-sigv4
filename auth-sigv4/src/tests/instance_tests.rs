@@ -708,7 +708,11 @@ fn a_clock_that_cannot_be_read_skips_the_prederive_and_warns_once() {
         next
     });
     assert!(next > 1_000, "the schedule goes on");
-    assert!(binding.held().is_empty(), "no key derived: {:?}", binding.held());
+    assert!(
+        binding.held().is_empty(),
+        "no key derived: {:?}",
+        binding.held()
+    );
     let warned = cap.messages();
     assert_eq!(warned.len(), 1, "{warned:?}");
     assert!(warned[0].contains("module=sigv4"), "{warned:?}");
@@ -733,7 +737,10 @@ fn a_fields_call_on_an_unknown_or_retired_handle_is_logged() {
         logged[0].contains("module=sigv4") && logged[0].contains("handle=999"),
         "{logged:?}"
     );
-    assert!(logged[1].contains(&format!("handle={handle}")), "{logged:?}");
+    assert!(
+        logged[1].contains(&format!("handle={handle}")),
+        "{logged:?}"
+    );
 }
 
 /// L9 (audit round 1 @57f7ef5, lead-confirmed; the lock rule, as auth-header's F6): `keep` reads
@@ -766,7 +773,10 @@ fn a_handle_kept_while_the_generation_moves_takes_the_new_generation() {
     drop(guard);
     let handle = kept.join().unwrap();
     s.retire(1);
-    assert!(s.binding(handle).is_some(), "kept after the move: generation 2's");
+    assert!(
+        s.binding(handle).is_some(),
+        "kept after the move: generation 2's"
+    );
     s.retire(2);
     assert!(s.binding(handle).is_none());
 }
@@ -781,7 +791,13 @@ fn keep_refresh_retire_are_ordered() {
     s.refresh(b"{}", &[], 2).unwrap();
     let b = open(&s, Some("AKIDEXAMPLE:SECRET"));
     s.retire(1);
-    let held: Vec<u64> = s.handles.read().unwrap().values().map(|(g, _)| *g).collect();
+    let held: Vec<u64> = s
+        .handles
+        .read()
+        .unwrap()
+        .values()
+        .map(|(g, _)| *g)
+        .collect();
     assert_eq!(held, [2]);
     assert!(s.binding(a).is_none() && s.binding(b).is_some());
 }

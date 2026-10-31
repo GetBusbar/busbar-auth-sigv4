@@ -6,22 +6,25 @@
 //! signature chain is verified against AWS's own published worked example (GET iam ListUsers,
 //! 2015-08-30) in the tests.
 //!
-//! * The daily key: [`sign_v4`] is split into [`signing_key`] (the HMAC chain over date, region,
+//! * The daily key: signing is split into [`signing_key`] (the HMAC chain over date, region,
 //!   service) and [`sign_v4_with_key`] (the per-request part), so a caller holding the day's key
-//!   signs without re-deriving it. [`sign_v4`] is the two composed.
+//!   signs without re-deriving it. The tests' `sign_v4` is the two composed.
 //! * The secret is zeroised: the `AWS4<secret>` key material, every derived key, and the HMAC's own key state (the padded
 //!   key blocks and the chaining state after each) are [`Zeroizing`] buffers, wiped on drop. A
 //!   library HMAC keeps its key's inner and outer pad states in a value it frees unwiped, so the
 //!   contract's wiped HMAC holds them.
 //!
-//! The signer's chain is shared with the INBOUND check ([`crate::inbound`]): it recomputes a client's signature through [`hmac`], [`signing_key`] and [`sha256_hex`],
-//! and derives the canonical URI with [`uri_encode_path`], keeping its own canonical signing (a
-//! quoted header value's interior spaces are kept verbatim there).
+//! The signer's chain is shared with the INBOUND check ([`crate::inbound`]): it recomputes a
+//! client's signature through [`hmac`], [`signing_key`] and [`sha256_hex`], and derives the
+//! canonical URI and query with [`canonical_uri`] and [`canonical_query`]; it keeps its own
+//! canonical-request builder, with the same header-value rule (ASCII space runs trimmed and
+//! collapsed, quoted or not).
 
 use ring::digest;
 use zeroize::{Zeroize, Zeroizing};
 
-const SECS_PER_DAY: u64 = 86_400;
+/// The seconds in a day: the one constant the date arithmetic and the day-key schedule share.
+pub(crate) const SECS_PER_DAY: u64 = 86_400;
 const SECS_PER_HOUR: u64 = 3_600;
 
 /// The SigV4 algorithm token that appears in the `Authorization` header and the string-to-sign.
@@ -249,7 +252,7 @@ pub fn format_amz_time(epoch_secs: u64) -> (String, String) {
     )
 }
 
-/// Canonicalize a (non-quoted) signed-header value per AWS SigV4: trim leading/trailing ASCII
+/// Canonicalize a signed-header value (quoted or not) per AWS SigV4: trim leading/trailing ASCII
 /// spaces (0x20) and collapse each run of sequential ASCII spaces to a single space. Only the ASCII
 /// space character is treated as whitespace — tabs, NBSP, newlines and every other Unicode
 /// whitespace codepoint pass through verbatim, because AWS does the same.
@@ -304,7 +307,7 @@ pub fn sign_v4(
     )
 }
 
-/// [`sign_v4`] under an already-derived [`signing_key`] for the request's date, region and service:
+/// `sign_v4` (the tests' composition) under an already-derived [`signing_key`] for the request's date, region and service:
 /// the signature hex + the `SignedHeaders` string for a request. `headers` is the
 /// full set of headers to sign (names case-insensitive); they are lowercased + sorted internally.
 /// `canonical_uri` must already be URI-encoded; `canonical_querystring` sorted + encoded (or

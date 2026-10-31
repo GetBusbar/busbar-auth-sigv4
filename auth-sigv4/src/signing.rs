@@ -24,9 +24,8 @@ use zeroize::Zeroizing;
 
 use crate::held::Held;
 use crate::sigv4;
+use crate::sigv4::SECS_PER_DAY;
 
-/// The seconds in a day.
-const DAY_SECS: u64 = 86_400;
 /// How long before UTC midnight `tick` derives the next day's key.
 const PREDERIVE_AHEAD_SECS: u64 = 3_600;
 
@@ -260,8 +259,8 @@ impl SigV4Binding {
     pub fn prederive(&self, now_epoch: u64) {
         let (_, today) = sigv4::format_amz_time(now_epoch);
         self.derive(&today);
-        if DAY_SECS - now_epoch % DAY_SECS <= PREDERIVE_AHEAD_SECS {
-            let (_, tomorrow) = sigv4::format_amz_time(now_epoch + DAY_SECS);
+        if SECS_PER_DAY - now_epoch % SECS_PER_DAY <= PREDERIVE_AHEAD_SECS {
+            let (_, tomorrow) = sigv4::format_amz_time(now_epoch + SECS_PER_DAY);
             self.derive(&tomorrow);
         }
     }

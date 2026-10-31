@@ -1803,8 +1803,9 @@ fn a_stored_secret_that_is_not_utf8_rejects_with_one_warn() {
         ..Fake::default()
     };
     let all = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
-    let judged =
-        tracing::subscriber::with_default(all.clone(), || run(&s.lines, None, Some(b""), &mut fake));
+    let judged = tracing::subscriber::with_default(all.clone(), || {
+        run(&s.lines, None, Some(b""), &mut fake)
+    });
     assert_eq!(judged, Judgement::Reject);
     let logged = all.messages();
     assert_eq!(logged.len(), 1, "logged once: {logged:?}");
@@ -1813,8 +1814,6 @@ fn a_stored_secret_that_is_not_utf8_rejects_with_one_warn() {
         "{logged:?}"
     );
     let warns = busbar_test_kit::warn_capture::WarnCapture::default();
-    tracing::subscriber::with_default(warns.clone(), || {
-        run(&s.lines, None, Some(b""), &mut fake)
-    });
+    tracing::subscriber::with_default(warns.clone(), || run(&s.lines, None, Some(b""), &mut fake));
     assert_eq!(warns.messages().len(), 1, "at WARN: {:?}", warns.messages());
 }

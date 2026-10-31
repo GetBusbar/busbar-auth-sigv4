@@ -967,6 +967,7 @@ fn run(
             .collect(),
         body,
         now: NOW,
+        authority: b"",
     };
     judge(&req, fake)
 }
@@ -1088,6 +1089,7 @@ fn an_expired_signature_rejects() {
             .collect(),
         body: Some(b""),
         now: NOW + CLOCK_SKEW_SECS + 60,
+        authority: b"",
     };
     assert_eq!(judge(&req, &mut Fake::default()), Judgement::Reject);
 }
@@ -1207,6 +1209,7 @@ fn a_tampered_path_query_or_method_rejects() {
             .collect(),
         body: Some(b""),
         now: NOW,
+        authority: b"",
     };
     assert_eq!(judge(&req, &mut Fake::default()), Judgement::Reject);
     let req = Request {
@@ -1297,6 +1300,7 @@ fn a_path_with_a_reserved_byte_is_judged_over_its_double_encoded_canonical_uri()
             .collect(),
         body: Some(b""),
         now: NOW,
+        authority: b"",
     };
     assert_eq!(
         judge(&req(wire), &mut Fake::default()),
@@ -1347,6 +1351,7 @@ fn judge_path(service: &str, canonical_uri: &str, wire: &str) -> Judgement {
             .collect(),
         body: Some(b""),
         now: NOW,
+        authority: b"",
     };
     judge(&req, &mut Fake::default())
 }
@@ -1596,6 +1601,7 @@ fn a_requests_debug_names_its_lines_but_prints_no_value() {
         ],
         body: Some(b"BODYSECRET"),
         now: NOW,
+        authority: b"",
     };
     let printed = format!("{req:?}");
     for secret in ["SECRETTOK", "SIGSECRET", "BODYSECRET"] {

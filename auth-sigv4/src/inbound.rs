@@ -524,6 +524,9 @@ pub struct Request<'a> {
     pub body: Option<&'a [u8]>,
     /// Wall-clock seconds, read once by the host for this call.
     pub now: u64,
+    /// The request's authority (`host[:port]`), as the host lends it: an HTTP/2 request carries
+    /// its host here (`:authority`), never as a `host` line. Empty = none lent.
+    pub authority: &'a [u8],
 }
 
 impl std::fmt::Debug for Request<'_> {
@@ -540,6 +543,7 @@ impl std::fmt::Debug for Request<'_> {
             .field("lines", &names)
             .field("body_len", &self.body.map(<[u8]>::len))
             .field("now", &self.now)
+            .field("authority", &String::from_utf8_lossy(self.authority))
             .finish()
     }
 }
@@ -682,7 +686,7 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
             .map(str::trim)
             .any(|h| !h.is_empty() && h.eq_ignore_ascii_case(name))
     };
-    let headers: Vec<(&str, &str)> = req
+    let mut headers: Vec<(&str, &str)> = req
         .lines
         .iter()
         .filter_map(|(name, value)| {
@@ -690,6 +694,13 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
             header_str(value).map(|v| (name, v))
         })
         .collect();
+    // An HTTP/2 request carries its host as `:authority`, never a `host` line: with no `host` line,
+    // the signed `host` is the request's authority as the host lends it.
+    if signed("host") && !req.has("host") {
+        if let Some(authority) = header_str(req.authority).filter(|a| !a.is_empty()) {
+            headers.push(("host", authority));
+        }
+    }
     let signed_value = |name: &str| {
         headers
             .iter()

@@ -399,6 +399,7 @@ impl VerifyPlugin for SigV4 {
             lines: view.lines().collect(),
             body: view.body(),
             now: view.timestamp(),
+            authority: view.authority(),
         };
         let mut source = op;
         let verdict = match inbound::judge(&request, &mut source) {

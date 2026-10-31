@@ -534,21 +534,22 @@ fn outbound_ready_is_false_for_an_unknown_or_retired_handle() {
 }
 
 /// `tick` pre-derives each live binding's key for today, so the first request of the day finds it
-/// held rather than deriving it on the request path.
+/// held rather than deriving it on the request path; within the hour before UTC midnight, tomorrow's
+/// too. The wall-clock time is passed explicitly (N, audit round 1: never the test's own clock, so
+/// the answer does not depend on when the test runs).
 #[test]
 fn tick_holds_todays_day_key_on_each_open_binding() {
+    // 2015-08-30 12:36:00 UTC, and 23:30:00 UTC the same day.
+    const NOON: u64 = 1_440_938_160;
+    const LATE: u64 = 1_440_977_400;
     let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     let binding = s.binding(handle).expect("the binding is held");
     assert!(binding.held().is_empty(), "nothing derived before a tick");
-    s.tick(1_000);
-    let (_, today) = crate::sigv4::format_amz_time(crate::now_epoch().expect("the clock reads"));
-    // Tomorrow's key rides too when the clock is within the hour of midnight.
-    assert!(
-        binding.held().contains(&today),
-        "tick held {:?}, not {today}",
-        binding.held()
-    );
+    s.tick_at(1_000, Some(NOON));
+    assert_eq!(binding.held(), ["20150830"]);
+    s.tick_at(2_000, Some(LATE));
+    assert_eq!(binding.held(), ["20150830", "20150831"]);
 }
 
 /// A service that opens with a multi-byte character is no AWS service name: since L2 (audit round

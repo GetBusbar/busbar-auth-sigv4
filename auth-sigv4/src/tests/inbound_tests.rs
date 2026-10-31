@@ -1791,3 +1791,30 @@ fn a_non_s3_request_is_judged_over_its_normalized_path() {
         "S3 is never normalized"
     );
 }
+
+/// L8 (audit round 1 @57f7ef5, lead-confirmed): a stored secret that is not UTF-8 is an operator
+/// data fault, not a client's: the reject (still the one opaque 401, verified against the dummy in
+/// equal time) is logged once at WARN naming it, never silently.
+#[test]
+fn a_stored_secret_that_is_not_utf8_rejects_with_one_warn() {
+    let s = sign(DUMMY_SECRET, AKID, None, b"", None);
+    let mut fake = Fake {
+        raw: Some(vec![0xff, 0xfe]),
+        ..Fake::default()
+    };
+    let all = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
+    let judged =
+        tracing::subscriber::with_default(all.clone(), || run(&s.lines, None, Some(b""), &mut fake));
+    assert_eq!(judged, Judgement::Reject);
+    let logged = all.messages();
+    assert_eq!(logged.len(), 1, "logged once: {logged:?}");
+    assert!(
+        logged[0].contains("module=sigv4") && logged[0].contains("reason=secret-not-utf8"),
+        "{logged:?}"
+    );
+    let warns = busbar_test_kit::warn_capture::WarnCapture::default();
+    tracing::subscriber::with_default(warns.clone(), || {
+        run(&s.lines, None, Some(b""), &mut fake)
+    });
+    assert_eq!(warns.messages().len(), 1, "at WARN: {:?}", warns.messages());
+}

@@ -188,11 +188,13 @@ fn facts() -> RequestFacts {
     }
 }
 
+/// One `fields` call at `HeadBody`, lending the empty body (the host lends the body at `HeadBody`,
+/// an empty one included).
 fn fields(p: &Plugin<Auth>, handle: u64, mode: u32, caller: Blob, cap: (usize, usize)) -> String {
-    fields_over(p, handle, mode, caller, cap, None)
+    fields_over(p, handle, mode, caller, cap, Some(""))
 }
 
-/// One `fields` call at `HeadBody`, lending `body` (none lent = the empty body).
+/// One `fields` call at `HeadBody`, lending `body` (`None`: the host lent none).
 fn fields_over(
     p: &Plugin<Auth>,
     handle: u64,
@@ -940,7 +942,7 @@ fn fields_signs_the_walked_requests_query_and_method_through_the_door() {
         if let Some(q) = query {
             request.query = s(q);
         }
-        fields_for(&p, handle, MODE_OWN, z(), (1024, 4), None, request)
+        fields_for(&p, handle, MODE_OWN, z(), (1024, 4), Some(""), request)
     };
     let get_with_query = sign("GET", Some("a=1&b=2"));
     assert!(
@@ -1198,4 +1200,85 @@ fn every_x_amz_line_the_head_carries_is_signed() {
         )),
         "{written}"
     );
+}
+
+/// The `fields` line a fresh own-credential handle answers for `request`, sent with `sent`, the
+/// body `body` lent (`None`: none).
+fn fields_raw(request: RequestFacts, sent: &[NamedValue], body: Option<&'static [u8]>) -> String {
+    let (_, p, handle) = open_signing("AKIDEXAMPLE:SECRET");
+    let mut b = Buffers::new(1024, 4);
+    let mut f: Frame<FieldsIn, FieldsOut> = Frame::new(z(), z());
+    f.input.head = in_head();
+    f.out.head = out_head();
+    f.input.handle = handle;
+    f.input.mode = MODE_OWN;
+    f.input.request = request;
+    (f.input.headers, f.input.headers_len) = (sent.as_ptr(), sent.len());
+    f.input.point = POINT_HEAD_BODY;
+    f.input.body = body.map_or(z(), |b| Blob {
+        ptr: b.as_ptr(),
+        len: b.len(),
+        fmt: BLOB_OCTETS,
+        flags: 0,
+    });
+    (f.input.field_buf, f.input.field_buf_cap) = (b.buf.as_mut_ptr(), b.buf.len());
+    (f.input.fields, f.input.fields_cap) = (b.spans.as_mut_ptr(), b.spans.len() as u32);
+    let c = p.call(slot::FIELDS, &mut f);
+    format!("fields {:?} {}", c.outcome, err(&c.error))
+}
+
+/// L4 (audit round 1 @57f7ef5, lead-confirmed): each request fact that cannot be signed FAILS the
+/// call with its own reason: an absent and a non-UTF-8 method, authority or path each say which;
+/// a sent `content-type` that is not UTF-8 is not treated as absent (it is sent, so it must be
+/// signed); and a body the host did not lend at `HeadBody` is not signed as the empty body.
+#[test]
+fn each_request_fact_that_cannot_be_signed_fails_with_its_own_reason() {
+    const BAD: &[u8] = b"\xff";
+    let bad = AbiStr {
+        ptr: BAD.as_ptr(),
+        len: BAD.len(),
+    };
+    let json = [NamedValue {
+        name: s("content-type"),
+        value: blob("application/json", BLOB_OCTETS, 0),
+    }];
+    let failed = |why: &str| format!("fields Failed sigv4 cannot sign: {why}");
+    let with = |field: usize, value: AbiStr| {
+        let mut r = facts();
+        match field {
+            0 => r.method = value,
+            1 => r.authority = value,
+            _ => r.canonical_path = value,
+        }
+        r
+    };
+    let cases = [
+        (with(0, s("")), "the host lent no method"),
+        (with(0, bad), "the method is not UTF-8"),
+        (with(1, s("")), "the host lent no authority"),
+        (with(1, bad), "the authority is not UTF-8"),
+        (with(2, s("")), "the host lent no path"),
+        (with(2, bad), "the path is not UTF-8"),
+    ];
+    for (request, why) in cases {
+        assert_eq!(fields_raw(request, &json, Some(b"{}")), failed(why), "{why}");
+    }
+    let bad_type = [NamedValue {
+        name: s("Content-Type"),
+        value: Blob {
+            ptr: BAD.as_ptr(),
+            len: BAD.len(),
+            fmt: BLOB_OCTETS,
+            flags: 0,
+        },
+    }];
+    assert_eq!(
+        fields_raw(facts(), &bad_type, Some(b"{}")),
+        failed("the content-type value is not UTF-8")
+    );
+    assert_eq!(
+        fields_raw(facts(), &json, None),
+        failed("the host lent no body")
+    );
+    assert!(fields_raw(facts(), &json, Some(b"")).starts_with("fields Ready"));
 }

@@ -1074,3 +1074,26 @@ fn a_fields_call_with_nothing_to_sign_with_fails_with_its_reason() {
         assert_eq!(line, format!("fields Failed {reason}"), "{caller:?}");
     }
 }
+
+/// V5 (audit round 1 @57f7ef5, lead-confirmed; S5): a host that cannot answer `records.secret`
+/// (here: it serves no such service) rejects with the one opaque 401, and the plugin's own log
+/// names the cause and the service's error at warn, never discarded.
+#[test]
+fn an_unserved_secret_read_rejects_and_logs_the_service_error() {
+    let d = Dispatcher::new(DispatchConfig::default());
+    let folds = Arc::new(Folds::default());
+    let p = linked(&folds, &d);
+    let mut o: Frame<OpenIn, OpenOut> = Frame::new(z(), z());
+    o.input.head = in_head();
+    o.out.head = out_head();
+    assert_eq!(p.call(life::OPEN, &mut o).outcome, Outcome::Ready);
+    let body = br#"{"messages":[]}"#;
+    let verdict = verify_submitted(&p, &d, &mut Inbound::signed(LIVE_SECRET, AKID, body, body));
+    assert!(verdict.starts_with("Ready Reject"), "{verdict}");
+    let folds = std::mem::take(&mut *folds.0.lock().unwrap());
+    assert!(
+        folds.iter().any(|l| l.contains("reason=\"credential-unavailable\"")
+            && l.contains("service_error=\"unserved\"")),
+        "{folds:#?}"
+    );
+}

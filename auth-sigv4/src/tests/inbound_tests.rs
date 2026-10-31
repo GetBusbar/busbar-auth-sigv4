@@ -1611,6 +1611,91 @@ fn a_requests_debug_names_its_lines_but_prints_no_value() {
     assert!(printed.contains("POST"), "{printed}");
 }
 
+/// The info lines `judge` logs over `lines` at `now`, and its judgement.
+fn logged_judging(lines: &[(String, String)], now: u64) -> (Judgement, String) {
+    let req = Request {
+        method: b"POST",
+        path: PATH.as_bytes(),
+        query: None,
+        lines: lines
+            .iter()
+            .map(|(n, v)| (n.as_bytes(), v.as_bytes()))
+            .collect(),
+        body: Some(b""),
+        now,
+        authority: b"",
+    };
+    let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
+    let judged =
+        tracing::subscriber::with_default(cap.clone(), || judge(&req, &mut Fake::default()));
+    (judged, cap.messages().join("\n"))
+}
+
+/// `lines` with the value of every line named `name` replaced by `value`.
+fn with_line(lines: &[(String, String)], name: &str, value: &str) -> Vec<(String, String)> {
+    lines
+        .iter()
+        .map(|(n, v)| {
+            if n == name {
+                (n.clone(), value.to_string())
+            } else {
+                (n.clone(), v.clone())
+            }
+        })
+        .collect()
+}
+
+/// V5 (audit round 1 @57f7ef5, lead-confirmed; S5): every verification reject is logged at info
+/// with ONE reason word for its cause, never a generic one; the client still gets the one opaque
+/// 401. A bad signature and an unknown AccessKeyId (verified against the dummy) share `signature`.
+#[test]
+fn each_verification_reject_is_logged_with_its_own_reason_word() {
+    let s = sign(SECRET, AKID, None, b"", None);
+    let (tomorrow, _) = format_amz_time(NOW + 86_400);
+    let auth = s.lines[0].1.clone();
+    let cases: [(&str, Vec<(String, String)>, u64); 6] = [
+        ("expired", s.lines.clone(), NOW + CLOCK_SKEW_SECS + 60),
+        (
+            "missing-date",
+            with_line(&s.lines, X_AMZ_DATE, "not-a-date"),
+            NOW,
+        ),
+        (
+            "malformed",
+            with_line(&s.lines, X_AMZ_DATE, &tomorrow),
+            NOW + 86_400,
+        ),
+        (
+            "signed-headers",
+            with_line(
+                &s.lines,
+                "authorization",
+                &auth.replace("SignedHeaders=host;", "SignedHeaders="),
+            ),
+            NOW,
+        ),
+        (
+            "signature",
+            sign("not-the-secret", AKID, None, b"", None).lines,
+            NOW,
+        ),
+        (
+            "signature",
+            sign(SECRET, "BBAKNOBODY0000000000", None, b"", None).lines,
+            NOW,
+        ),
+    ];
+    for (word, lines, now) in cases {
+        let (judged, logged) = logged_judging(&lines, now);
+        assert_eq!(judged, Judgement::Reject, "{word}");
+        assert_eq!(logged.lines().count(), 1, "logged once: {logged}");
+        assert!(
+            logged.contains(&format!("reason={word} ")) || logged.ends_with(&format!("reason={word}")),
+            "{word}: {logged}"
+        );
+    }
+}
+
 /// A rejected SigV4 request is logged (module `sigv4`, its reason), never with the signature or
 /// the secret; the client still gets the one opaque 401.
 #[test]

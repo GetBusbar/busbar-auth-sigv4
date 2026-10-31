@@ -1736,3 +1736,19 @@ fn a_parsed_authorization_debug_withholds_the_signature() {
         "{printed}"
     );
 }
+
+/// V7 (audit round 1 @57f7ef5, lead-confirmed): the AccessKeyId is the client's own text. The log
+/// carries it escaped (a tab or a quote cannot forge a field) and capped at 128 characters (AWS key
+/// ids are 16 to 128), never verbatim and uncapped.
+#[test]
+fn a_logged_access_key_id_is_escaped_and_capped() {
+    let akid = format!("AKID\t\"x\"{}", "A".repeat(300));
+    let s = sign(SECRET, &akid, None, b"", None);
+    let (judged, logged) = logged_judging(&s.lines, NOW);
+    assert_eq!(judged, Judgement::Reject);
+    assert!(logged.contains("access_key_id="), "{logged}");
+    assert!(!logged.contains('\t'), "a raw tab: {logged}");
+    assert!(logged.contains("AKID\\t\\\"x\\\""), "escaped: {logged}");
+    assert!(!logged.contains(&"A".repeat(129)), "capped: {logged}");
+    assert!(logged.contains(&"A".repeat(100)), "the head is kept: {logged}");
+}

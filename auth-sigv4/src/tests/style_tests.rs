@@ -383,3 +383,43 @@ fn a_key_core_forwards_is_ignored_with_one_warn_at_the_bind() {
         ["settings: unknown key `regoin`"]
     );
 }
+
+/// L2 (audit round 1 @57f7ef5, lead-confirmed): the service and region are checked ONCE, at open,
+/// not per request: each is trimmed and must be 1 to 64 of `[a-z0-9-]` (the shape of every AWS
+/// service name and region), else the bind is refused naming the setting (`settings.<key>:`, the
+/// contract's instance-relative form, S2). Was: stored untrimmed, and only a byte no header may
+/// carry failed, per request.
+#[test]
+fn the_service_and_region_are_trimmed_and_checked_at_open() {
+    let trimmed = open(
+        SIGV4,
+        Some("A:S"),
+        r#"{"service":" bedrock ","region":"us-east-1 "}"#,
+    )
+    .expect("a padded service and region open, trimmed");
+    assert_eq!(trimmed.params().service, "bedrock");
+    assert_eq!(trimmed.params().region, "us-east-1");
+    const SERVICE: &str = "settings.service: not an AWS service name (1 to 64 of a-z, 0-9 and -)";
+    const REGION: &str = "settings.region: not an AWS region (1 to 64 of a-z, 0-9 and -)";
+    let long = "a".repeat(65);
+    for (settings, want) in [
+        (
+            r#"{"service":"Bedrock","region":"us-east-1"}"#.to_string(),
+            vec![SERVICE],
+        ),
+        (
+            r#"{"service":"bedrock","region":"us east 1"}"#.to_string(),
+            vec![REGION],
+        ),
+        (
+            format!(r#"{{"service":"{long}","region":"eu-west-1"}}"#),
+            vec![SERVICE],
+        ),
+        (
+            r#"{"service":"s3/x","region":"us-east-1;x"}"#.to_string(),
+            vec![SERVICE, REGION],
+        ),
+    ] {
+        assert_eq!(lines(open(SIGV4, Some("A:S"), &settings)), want, "{settings}");
+    }
+}

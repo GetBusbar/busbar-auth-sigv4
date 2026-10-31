@@ -91,23 +91,67 @@ pub fn uri_encode_path(path: &str) -> String {
     out
 }
 
+/// The one service whose canonical URI is the path encoded once, never normalized.
+const S3: &str = "s3";
+
+/// The CANONICAL URI a request scoped to `service` is signed over, from its path as sent (already
+/// percent-encoded once): for `s3`, the path encoded ONCE — each `%XX` escape decoded and every
+/// byte re-encoded over the unreserved set and `/` with uppercase hex (an escaped `/` stays `%2F`,
+/// a separator never a key byte); for every other service, the path as sent encoded once more
+/// ([`uri_encode_path`], AWS's double encoding). The outbound signer and the inbound check both
+/// derive it here.
+pub fn canonical_uri(path: &str, service: &str) -> String {
+    if service == S3 {
+        encode_path_once(path)
+    } else {
+        uri_encode_path(path)
+    }
+}
+
+/// `path` in its single-encoded canonical form: every `%XX` escape decoded (an escaped `/` kept
+/// escaped) and every byte encoded over the unreserved set and `/`. Idempotent over the canonical
+/// form.
+fn encode_path_once(path: &str) -> String {
+    let b = path.as_bytes();
+    let mut out = String::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match escaped_byte(b, i) {
+            Some(byte) => {
+                push_encoded(&mut out, byte, byte != b'/');
+                i += 3;
+            }
+            None => {
+                push_encoded(&mut out, b[i], true);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The byte a `%XX` escape at `b[i]` stands for; `None` when `b[i]` opens no escape (a `%` not
+/// followed by two hex digits is a literal `%`).
+fn escaped_byte(b: &[u8], i: usize) -> Option<u8> {
+    let hex = |c: u8| (c as char).to_digit(16);
+    if b[i] == b'%' && i + 2 < b.len() {
+        hex(b[i + 1])
+            .zip(hex(b[i + 2]))
+            .map(|(high, low)| ((high << 4) | low) as u8)
+    } else {
+        None
+    }
+}
+
 /// One query name or value in SigV4's canonical form: its `%XX` escapes decoded once (a `%` that
 /// does not open two hex digits is a literal `%`), then every byte URI-encoded over the unreserved
 /// set with uppercase hex. Idempotent over the canonical form.
 fn canonical_query_component(raw: &str) -> String {
     let b = raw.as_bytes();
-    let hex = |c: u8| (c as char).to_digit(16);
     let mut out = String::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        let escaped = if b[i] == b'%' && i + 2 < b.len() {
-            hex(b[i + 1])
-                .zip(hex(b[i + 2]))
-                .map(|(high, low)| ((high << 4) | low) as u8)
-        } else {
-            None
-        };
-        match escaped {
+        match escaped_byte(b, i) {
             Some(byte) => {
                 push_encoded(&mut out, byte, false);
                 i += 3;

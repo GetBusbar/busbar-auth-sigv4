@@ -9,7 +9,7 @@
 //! never admits, a pending or unavailable read).
 
 use super::*;
-use crate::sigv4::format_amz_time;
+use crate::sigv4::{format_amz_time, uri_encode_path};
 
 // ====================== ingress_sigv4_tests.rs, ported ======================
 

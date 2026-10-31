@@ -32,7 +32,7 @@ use zeroize::Zeroizing;
 use busbar_contract::constant_time_eq;
 
 use crate::sigv4::{
-    hmac, sha256_hex, signing_key, uri_encode_path, SIGNATURE_TERMINATION, SIGV4_ALGORITHM,
+    canonical_uri, hmac, sha256_hex, signing_key, SIGNATURE_TERMINATION, SIGV4_ALGORITHM,
 };
 
 /// The canonical lowercase name of the `x-amz-date` header.
@@ -360,7 +360,7 @@ fn parse_amz_date(amzdate: &str) -> Option<u64> {
 }
 
 /// The fully-assembled inputs for verifying ONE inbound SigV4 request. `canonical_uri` MUST already
-/// be URI-encoded the SAME way the signer encodes it ([`uri_encode_path`]); `canonical_querystring`
+/// be URI-encoded the SAME way the signer encodes it ([`canonical_uri`]); `canonical_querystring`
 /// MUST be [`canonical_query_string`]'s (or empty). `headers` carries the ACTUAL request header
 /// values for (at least) every name in the parsed `SignedHeaders` list; extra headers are ignored
 /// (only the signed ones enter the canonical request).
@@ -737,7 +737,9 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
     };
     // `Uri::path` never answers an empty path: it reads `/` for one.
     let path = if path.is_empty() { "/" } else { path };
-    let canonical_uri = uri_encode_path(path);
+    // The credential scope names the service: `s3` signs its path encoded once, every other
+    // service twice.
+    let canonical_uri = canonical_uri(path, &parsed.service);
     let canonical_qs = canonical_query_string(query);
     let inbound = InboundRequest {
         method,

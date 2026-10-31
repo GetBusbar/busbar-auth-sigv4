@@ -13,8 +13,8 @@
 //! request, so there is nothing to hold ahead of time.
 //!
 //! The request it signs: the method, the query and the content type are the walked request's own,
-//! as the host lends them; the canonical URI is the wire path URI-encoded once more (SigV4's non-S3
-//! rule).
+//! as the host lends them; the canonical URI is [`sigv4::canonical_uri`]'s for the configured
+//! service (the wire path encoded once more, or for `s3` encoded once).
 
 use std::sync::RwLock;
 
@@ -302,7 +302,7 @@ impl SigV4Binding {
                 t.reveal().as_str().to_owned(),
             );
         }
-        let canonical_uri = sigv4::uri_encode_path(facts.path);
+        let canonical_uri = sigv4::canonical_uri(facts.path, service);
         let canonical_query = sigv4::canonical_query(facts.query);
         self.derive(&datestamp);
         let sign_with = |key: &[u8]| {

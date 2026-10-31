@@ -713,3 +713,25 @@ fn a_clock_that_cannot_be_read_skips_the_prederive_and_warns_once() {
     assert_eq!(warned.len(), 1, "{warned:?}");
     assert!(warned[0].contains("module=sigv4"), "{warned:?}");
 }
+
+/// L7 (audit round 1 @57f7ef5, lead-confirmed; S5): a `fields` call on a handle this generation
+/// does not hold (never opened, or retired) answers REFUSED and logs one info line naming the
+/// handle, never silently.
+#[test]
+fn a_fields_call_on_an_unknown_or_retired_handle_is_logged() {
+    let s = SigV4::new(1);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    s.retire(1);
+    let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
+    tracing::subscriber::with_default(cap.clone(), || {
+        assert_eq!(fields(&s, 999, MODE_OWN, ""), (Outcome::Refused, false));
+        assert_eq!(fields(&s, handle, MODE_OWN, ""), (Outcome::Refused, false));
+    });
+    let logged = cap.messages();
+    assert_eq!(logged.len(), 2, "{logged:?}");
+    assert!(
+        logged[0].contains("module=sigv4") && logged[0].contains("handle=999"),
+        "{logged:?}"
+    );
+    assert!(logged[1].contains(&format!("handle={handle}")), "{logged:?}");
+}

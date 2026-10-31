@@ -656,6 +656,19 @@ pub enum Judgement {
     Pending,
 }
 
+/// The longest AccessKeyId AWS issues: a logged id is capped here.
+const ACCESS_KEY_ID_LOG_CAP: usize = 128;
+
+/// The client's AccessKeyId as the log carries it: its first [`ACCESS_KEY_ID_LOG_CAP`] characters,
+/// escaped (`char::escape_debug`), so a tab, a quote or a megabyte of text in the header cannot
+/// forge a field or flood the log.
+fn shown_id(id: &str) -> String {
+    id.chars()
+        .take(ACCESS_KEY_ID_LOG_CAP)
+        .flat_map(char::escape_debug)
+        .collect()
+}
+
 /// A REJECT, its reason logged at `info` in the plugin's own log (module `sigv4`): an end-user
 /// decline. The client still gets the one opaque 401; no signature, secret or token is logged.
 fn reject(reason: &'static str) -> Judgement {
@@ -788,7 +801,7 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
                 module = "sigv4",
                 reason = "credential-unavailable",
                 service_error,
-                access_key_id = %parsed.access_key_id,
+                access_key_id = %shown_id(&parsed.access_key_id),
                 "sigv4 inbound request rejected: the host's records.secret did not answer"
             );
             return Judgement::Reject;
@@ -816,7 +829,7 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
         tracing::info!(
             module = "sigv4",
             reason,
-            access_key_id = %parsed.access_key_id,
+            access_key_id = %shown_id(&parsed.access_key_id),
             "sigv4 inbound request rejected"
         );
         Judgement::Reject

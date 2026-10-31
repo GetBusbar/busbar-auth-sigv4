@@ -761,18 +761,98 @@ fn test_verify_inbound_sigv4_missing_date_rejected() {
 
 // ====================== the kernel's wiring tests, over `judge` ======================
 
+/// V2 (audit round 1 @57f7ef5, lead-confirmed; the AWS SigV4 spec, owner delegation 2026-10-30):
+/// the inbound canonical query is each name and value DECODED and re-encoded over the unreserved
+/// set with uppercase hex, sorted by encoded name then value (the outbound signer's
+/// `canonical_query`, shared). Was: the raw wire query sorted, never re-encoded, so a client whose
+/// wire query carried a reserved byte raw (`/`, `:`) or a lowercase escape never verified.
 #[test]
-fn test_canonical_query_string_sorts_but_does_not_reencode() {
+fn test_canonical_query_string_decodes_and_reencodes_each_name_and_value() {
     assert_eq!(canonical_query_string(None), "");
     assert_eq!(canonical_query_string(Some("")), "");
     assert_eq!(canonical_query_string(Some("b=2&a=1")), "a=1&b=2");
     assert_eq!(canonical_query_string(Some("flag")), "flag=");
     assert_eq!(canonical_query_string(Some("p=a%2Fb")), "p=a%2Fb");
-    assert_eq!(canonical_query_string(Some("p=a/b")), "p=a/b");
+    assert_eq!(canonical_query_string(Some("p=a%2fb")), "p=a%2Fb");
+    assert_eq!(canonical_query_string(Some("p=a/b:c")), "p=a%2Fb%3Ac");
+    assert_eq!(canonical_query_string(Some("k=%7E")), "k=~");
     // Empty pairs drop; equal keys sort by value.
     assert_eq!(
         canonical_query_string(Some("&b=2&&a=2&a=1&")),
         "a=1&a=2&b=2"
+    );
+    // The AWS SigV4 test suite's canonical query strings.
+    assert_eq!(
+        canonical_query_string(Some("Param2=value2&Param1=value1")),
+        "Param1=value1&Param2=value2",
+        "get-vanilla-query-order-key-case"
+    );
+    assert_eq!(
+        canonical_query_string(Some("Param1=value2&Param1=Value1")),
+        "Param1=Value1&Param1=value2",
+        "get-vanilla-query-order-key"
+    );
+    assert_eq!(
+        canonical_query_string(Some("\u{1234}=bar")),
+        "%E1%88%B4=bar",
+        "get-vanilla-utf8-query"
+    );
+}
+
+/// The AWS SigV4 test suite's `get-vanilla-query-order-key-case` (`GET
+/// /?Param2=value2&Param1=value1`) and `get-vanilla-utf8-query` (`GET /?ሴ=bar`) verify at AWS's
+/// published signatures over the query exactly as the suite sends it.
+#[test]
+fn the_aws_suite_query_vectors_verify_over_the_received_query() {
+    const SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+    let amzdate = "20150830T123600Z";
+    let now = parse_amz_date(amzdate).unwrap();
+    let empty = sha256_hex(b"");
+    let wire = vec![
+        ("Host".to_string(), "example.amazonaws.com".to_string()),
+        ("X-Amz-Date".to_string(), amzdate.to_string()),
+    ];
+    for (name, query, signature) in [
+        (
+            "get-vanilla-query-order-key-case",
+            "Param2=value2&Param1=value1",
+            "b97d918cfa904a5beff61c982a1b6f458b799221646efd99d3219ec94cdf2500",
+        ),
+        (
+            "get-vanilla-utf8-query",
+            "\u{1234}=bar",
+            "2cdec8eed098649ff3a119c94853b13c643bcf08f8b0a1d91e12c9027818dd04",
+        ),
+    ] {
+        let parsed = ParsedAuthHeader {
+            access_key_id: "AKIDEXAMPLE".to_string(),
+            datestamp: "20150830".to_string(),
+            region: "us-east-1".to_string(),
+            service: "service".to_string(),
+            signed_headers: "host;x-amz-date".to_string(),
+            signature: signature.to_string(),
+        };
+        let canonical = canonical_query_string(Some(query));
+        let req = InboundRequest {
+            method: "GET",
+            canonical_uri: "/",
+            canonical_querystring: &canonical,
+            headers: &wire,
+            payload_hash: &empty,
+            amzdate,
+        };
+        assert_eq!(verify_inbound_sigv4(&parsed, &req, SECRET, now), Ok(()), "{name}");
+    }
+}
+
+/// A client signs the canonical query (`p=a%2Fb%3Ac`) and its wire carries the reserved bytes raw
+/// (`p=a/b:c`), as a URL library may send them: the judge recomputes the canonical form and admits.
+#[test]
+fn a_query_sent_with_reserved_bytes_raw_is_judged_over_its_canonical_form() {
+    let s = sign(SECRET, AKID, Some("p=a%2Fb%3Ac"), b"", None);
+    assert_eq!(
+        run(&s.lines, Some("p=a/b:c"), Some(b""), &mut Fake::default()),
+        Judgement::Identity(AKID.to_string())
     );
 }
 

@@ -62,6 +62,10 @@ pub struct SignFacts<'a> {
     pub query: Option<&'a str>,
     /// The `content-type` the request is sent with; `None` = none is sent, and none is signed.
     pub content_type: Option<&'a str>,
+    /// Every `x-amz-*` line the request is sent with (name, value), in order: each is signed
+    /// (AWS signs every `x-amz-*` header sent), but for the date, the payload hash and (when the
+    /// credential carries one) the session token, which the signer SETS over any sent.
+    pub amz_headers: &'a [(&'a str, &'a str)],
     /// Lowercase hex SHA-256 of the body.
     pub payload_hash: &'a str,
     /// Seconds since the epoch (1970-01-01 UTC).
@@ -286,13 +290,22 @@ impl SigV4Binding {
         let service = self.params.service.as_str();
         let (amzdate, datestamp) = sigv4::format_amz_time(facts.timestamp_epoch);
         let payload_hash = facts.payload_hash.to_string();
-        // The signed set: the content type the request is sent with (none sent, none signed) and
-        // the host, then SET, never appended, the fields it writes.
-        let mut headers: Vec<(String, String)> = Vec::with_capacity(5);
+        // The signed set: the content type the request is sent with (none sent, none signed), the
+        // host and every `x-amz-*` line sent, then SET, never appended, the fields it writes.
+        let mut headers: Vec<(String, String)> = Vec::with_capacity(5 + facts.amz_headers.len());
         if let Some(content_type) = facts.content_type {
             headers.push(("content-type".to_string(), content_type.to_string()));
         }
         headers.push(("host".to_string(), facts.host.to_string()));
+        for (name, value) in facts.amz_headers {
+            let set_here = name.eq_ignore_ascii_case("x-amz-date")
+                || name.eq_ignore_ascii_case("x-amz-content-sha256")
+                || (cred.session_token.is_some()
+                    && name.eq_ignore_ascii_case("x-amz-security-token"));
+            if !set_here {
+                headers.push(((*name).to_string(), (*value).to_string()));
+            }
+        }
         set_header(&mut headers, "x-amz-date", amzdate.clone());
         set_header(&mut headers, "x-amz-content-sha256", payload_hash.clone());
         if let Some(t) = &cred.session_token {

@@ -77,6 +77,7 @@ fn a_keyless_binding_opens_but_refuses_to_sign_in_own_mode() {
         content_type: None,
         payload_hash: &hash,
         timestamp_epoch: 1,
+        amz_headers: &[],
     };
     assert_eq!(binding.sign(&facts), Err(crate::signing::NO_OWN_CREDENTIAL));
 }
@@ -233,6 +234,7 @@ fn warned_signing(binding: &SigV4Binding, host: &str, times: usize) -> Vec<Strin
         content_type: Some("application/json"),
         payload_hash: &hash,
         timestamp_epoch: 1_440_938_160,
+        amz_headers: &[],
     };
     let cap = busbar_test_kit::warn_capture::WarnCapture::default();
     tracing::subscriber::with_default(cap.clone(), || {

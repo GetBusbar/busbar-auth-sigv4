@@ -259,10 +259,33 @@ pub(crate) fn sent_content_type<'a>(
         .and_then(|(_, v)| std::str::from_utf8(v).ok())
 }
 
-/// The SigV4 facts of a `fields` call: the walked request's method, host, path, query and sent
-/// content type (SigV4 signs the real method and query of the
+/// The reason `fields` answers FAILED with when an `x-amz-*` line the request is sent with is not
+/// UTF-8: AWS signs every one, and this one cannot be.
+const AMZ_NOT_UTF8: &str = "sigv4 cannot sign: an x-amz-* line's value is not UTF-8";
+
+/// Every `x-amz-*` line in the header envelope the host lent `fields`, in order (all of them are
+/// signed); `Err` when one is not text.
+fn sent_amz_headers<'a>(view: &FieldsView<'a>) -> Result<Vec<(&'a str, &'a str)>, &'static str> {
+    let mut out = Vec::new();
+    for (name, value) in view.headers() {
+        if name.len() > 6 && name[..6].eq_ignore_ascii_case(b"x-amz-") {
+            match (std::str::from_utf8(name), std::str::from_utf8(value)) {
+                (Ok(n), Ok(v)) => out.push((n, v)),
+                _ => return Err(AMZ_NOT_UTF8),
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The SigV4 facts of a `fields` call: the walked request's method, host, path, query, sent
+/// content type and sent `x-amz-*` lines (SigV4 signs the real method and query of the
 /// walked request); `Err` names why the facts the host lent cannot be signed.
-fn sign_facts<'a>(view: &FieldsView<'a>, hash: &'a str) -> Result<SignFacts<'a>, &'static str> {
+fn sign_facts<'a>(
+    view: &FieldsView<'a>,
+    amz_headers: &'a [(&'a str, &'a str)],
+    hash: &'a str,
+) -> Result<SignFacts<'a>, &'static str> {
     let query = match view.query().map(std::str::from_utf8) {
         None => None,
         Some(Ok(q)) => Some(q).filter(|q| !q.is_empty()),
@@ -274,6 +297,7 @@ fn sign_facts<'a>(view: &FieldsView<'a>, hash: &'a str) -> Result<SignFacts<'a>,
         path: fact(view.path()).ok_or(NO_FACTS)?,
         query,
         content_type: sent_content_type(view.headers()),
+        amz_headers,
         payload_hash: hash,
         timestamp_epoch: view.timestamp(),
     })
@@ -321,12 +345,19 @@ impl OutboundPlugin for SigV4 {
     ) -> Poll<FieldsAnswer> {
         // The payload hash over the body the host lent at `HeadBody`; none lent is the empty body.
         let hash = crate::sigv4::sha256_hex(view.body().unwrap_or_default());
+        let amz = sent_amz_headers(view);
         let who = match view.mode() {
             Mode::Own => Who::Own,
             Mode::Passthrough => Who::Caller(view.caller_credential()),
         };
         Poll::Ready(
-            match self.sign(view.handle(), who, sign_facts(view, &hash)) {
+            match self.sign(
+                view.handle(),
+                who,
+                amz.as_deref()
+                    .map_err(|e| *e)
+                    .and_then(|amz| sign_facts(view, amz, &hash)),
+            ) {
                 None => FieldsAnswer::Refused,
                 Some(Signed::Failed(reason)) => FieldsAnswer::Failed(reason),
                 Some(Signed::Fields(fields)) => {

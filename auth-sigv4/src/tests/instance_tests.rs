@@ -50,6 +50,7 @@ fn fields_said(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, boo
         content_type: None,
         payload_hash: &hash,
         timestamp_epoch: 1_440_938_160,
+        amz_headers: &[],
     };
     answered(s.sign(handle, who(mode, caller), Ok(facts)))
 }
@@ -186,6 +187,7 @@ fn an_unsendable_or_malformed_credential_is_refused_at_open_or_fails_its_request
                 content_type: None,
                 payload_hash: &sha256_hex(b""),
                 timestamp_epoch: 1,
+                amz_headers: &[],
             })
         )),
         (
@@ -244,6 +246,7 @@ fn authorization(s: &SigV4, handle: u64, walked: &Walked) -> String {
         content_type: crate::sent_content_type(headers),
         payload_hash: &hash,
         timestamp_epoch: 1_440_938_160,
+        amz_headers: &[],
     };
     authorization_of(s.sign(handle, Who::Own, Ok(facts)))
 }
@@ -359,6 +362,7 @@ fn an_s3_binding_signs_the_path_encoded_once() {
             content_type: None,
             payload_hash: &hash,
             timestamp_epoch: 1_440_938_160,
+            amz_headers: &[],
         };
         let headers = [
             ("host".to_string(), "bucket.s3.amazonaws.com".to_string()),
@@ -497,6 +501,7 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
             content_type: crate::sent_content_type(head.iter().copied()),
             payload_hash: &hash,
             timestamp_epoch: 1_440_938_160,
+            amz_headers: &[],
         };
         authorization_of(s.sign(handle, Who::Own, Ok(facts)))
     };
@@ -602,6 +607,7 @@ fn no_length_line_is_ever_signed() {
             content_type: crate::sent_content_type(head.iter().copied()),
             payload_hash: &hash,
             timestamp_epoch: 1_440_938_160,
+            amz_headers: &[],
         };
         let authorization = authorization_of(s.sign(handle, Who::Own, Ok(facts)));
         let signed = authorization

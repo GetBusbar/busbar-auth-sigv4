@@ -1606,7 +1606,7 @@ fn a_requests_debug_names_its_lines_but_prints_no_value() {
     let req = Request {
         method: b"POST",
         path: PATH.as_bytes(),
-        query: Some(b"a=1"),
+        query: Some(b"X-Amz-Credential=AKID&X-Amz-Signature=QUERYSECRET"),
         lines: vec![
             (
                 &b"authorization"[..],
@@ -1619,7 +1619,7 @@ fn a_requests_debug_names_its_lines_but_prints_no_value() {
         authority: b"",
     };
     let printed = format!("{req:?}");
-    for secret in ["SECRETTOK", "SIGSECRET", "BODYSECRET"] {
+    for secret in ["SECRETTOK", "SIGSECRET", "BODYSECRET", "QUERYSECRET"] {
         assert!(!printed.contains(secret), "{secret} leaked: {printed}");
     }
     assert!(printed.contains("x-amz-security-token"), "{printed}");

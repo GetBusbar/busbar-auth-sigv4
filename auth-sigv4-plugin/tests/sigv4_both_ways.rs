@@ -62,7 +62,13 @@ fn sigv4_is_verified_inbound_and_signed_outbound() {
     let upstream = Upstream::spawn();
     let exe = busbar_exe();
     let data_port = free_port();
-    let admin_port = free_port();
+    let mut admin_port = free_port();
+    // Two ports asked for one after the other may come back equal (each is released at once): the
+    // data and admin listeners need two.
+    while admin_port == data_port {
+        admin_port = free_port();
+    }
+    assert_ne!(data_port, admin_port, "two distinct free ports");
     write_configs(&exe, &dir, data_port, admin_port, upstream.port);
 
     let log_path = dir.join("out.log");

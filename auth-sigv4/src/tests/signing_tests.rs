@@ -37,6 +37,7 @@ fn facts<'a>(hash: &'a str) -> SignFacts<'a> {
         content_type: Some("application/json"),
         payload_hash: hash,
         timestamp_epoch: 1_440_938_160,
+        amz_headers: &[],
     }
 }
 

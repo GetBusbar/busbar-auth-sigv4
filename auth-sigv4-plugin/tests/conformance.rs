@@ -188,11 +188,13 @@ fn facts() -> RequestFacts {
     }
 }
 
+/// One `fields` call at `HeadBody`, lending the empty body (the host lends the body at `HeadBody`,
+/// an empty one included).
 fn fields(p: &Plugin<Auth>, handle: u64, mode: u32, caller: Blob, cap: (usize, usize)) -> String {
-    fields_over(p, handle, mode, caller, cap, None)
+    fields_over(p, handle, mode, caller, cap, Some(""))
 }
 
-/// One `fields` call at `HeadBody`, lending `body` (none lent = the empty body).
+/// One `fields` call at `HeadBody`, lending `body` (`None`: the host lent none).
 fn fields_over(
     p: &Plugin<Auth>,
     handle: u64,
@@ -759,12 +761,14 @@ const EXPECTED_FOLDS: &[&str] = &[
     "diag 4294967295 sev=0 busbar_auth_sigv4::style: sigv4 outbound binding refused module=\"sigv4\" reason=\"settings: outbound auth style `bearer` is not served by this plugin\"",
     "diag 4294967295 sev=0 busbar_auth_sigv4::style: sigv4 outbound binding refused module=\"sigv4\" reason=\"settings: outbound auth style `kerberos` is not served by this plugin\"",
     "diag 4294967295 sev=0 busbar_auth_sigv4::instance: sigv4 request not signed: FAILED module=\"sigv4\" reason=\"sigv4: this binding holds no credential of its own (passthrough-only); the request is not sent unsigned\"",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::instance: sigv4 request not signed: REFUSED, no such handle (never opened, or retired) module=\"sigv4\" handle=999",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"unparseable SigV4 authorization\"",
-    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature mismatch or credential not live\" access_key_id=BBAKNOBODY",
-    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature mismatch or credential not live\" access_key_id=BBAKNOBODY",
-    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature mismatch or credential not live\" access_key_id=BBAKCONFORMANCE000002",
-    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature mismatch or credential not live\" access_key_id=BBAKCONFORMANCE000001",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature\" access_key_id=BBAKNOBODY",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature\" access_key_id=BBAKNOBODY",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature\" access_key_id=BBAKCONFORMANCE000002",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature\" access_key_id=BBAKCONFORMANCE000001",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"payload hash mismatch\"",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::instance: sigv4 request not signed: REFUSED, no such handle (never opened, or retired) module=\"sigv4\" handle=1",
 ];
 
 /// The SigV4 signature depends on nothing but its inputs; it is replaced by a marker so the
@@ -940,7 +944,7 @@ fn fields_signs_the_walked_requests_query_and_method_through_the_door() {
         if let Some(q) = query {
             request.query = s(q);
         }
-        fields_for(&p, handle, MODE_OWN, z(), (1024, 4), None, request)
+        fields_for(&p, handle, MODE_OWN, z(), (1024, 4), Some(""), request)
     };
     let get_with_query = sign("GET", Some("a=1&b=2"));
     assert!(
@@ -1073,4 +1077,216 @@ fn a_fields_call_with_nothing_to_sign_with_fails_with_its_reason() {
         let line = fields(&p, keyless, MODE_PASSTHROUGH, secret(caller), (1024, 4));
         assert_eq!(line, format!("fields Failed {reason}"), "{caller:?}");
     }
+}
+
+/// V5 (audit round 1 @57f7ef5, lead-confirmed; S5): a host that cannot answer `records.secret`
+/// (here: the dispatcher binds no credential store, so it declines the call) rejects with the one opaque 401, and the plugin's own log
+/// names the cause and the service's error at warn, never discarded.
+#[test]
+fn an_unserved_secret_read_rejects_and_logs_the_service_error() {
+    let d = Dispatcher::new(DispatchConfig::default());
+    let folds = Arc::new(Folds::default());
+    let p = linked(&folds, &d);
+    let mut o: Frame<OpenIn, OpenOut> = Frame::new(z(), z());
+    o.input.head = in_head();
+    o.out.head = out_head();
+    assert_eq!(p.call(life::OPEN, &mut o).outcome, Outcome::Ready);
+    let body = br#"{"messages":[]}"#;
+    let verdict = verify_submitted(&p, &d, &mut Inbound::signed(LIVE_SECRET, AKID, body, body));
+    assert!(verdict.starts_with("Ready Reject"), "{verdict}");
+    let folds = std::mem::take(&mut *folds.0.lock().unwrap());
+    assert!(
+        folds
+            .iter()
+            .any(|l| l.contains("reason=\"credential-unavailable\"")
+                && l.contains("service_error=\"declined\"")),
+        "{folds:#?}"
+    );
+}
+
+/// The `fields` line `request` answers on a fresh own-credential handle, its body lent (`{}`).
+fn fields_answer(request: RequestFacts) -> String {
+    let (_, p, handle) = open_signing("AKIDEXAMPLE:SECRET");
+    fields_for(&p, handle, MODE_OWN, z(), (1024, 4), Some("{}"), request)
+}
+
+/// V6 (audit round 1 @57f7ef5, lead-confirmed): a query the host lends that is not UTF-8 cannot be
+/// signed as it is sent: the call FAILS with the reason. Was: signed as no query at all, so the
+/// request went out with a signature AWS rejects.
+#[test]
+fn a_query_that_is_not_utf8_fails_the_fields_call() {
+    const QUERY: &[u8] = b"a=\xff";
+    let mut request = facts();
+    request.query = AbiStr {
+        ptr: QUERY.as_ptr(),
+        len: QUERY.len(),
+    };
+    assert_eq!(
+        fields_answer(request),
+        "fields Failed sigv4 cannot sign: the query is not UTF-8"
+    );
+}
+
+/// L3 (audit round 1 @57f7ef5, lead-confirmed; the AWS SigV4 rule that every `x-amz-*` header
+/// sent is signed): an `x-amz-*` line the head already carries (an AWS JSON protocol's
+/// `x-amz-target`, an S3 `x-amz-meta-*`) is signed, its value canonicalized; the date, payload
+/// hash and token the signer writes are SET over any the head carries. Was: left unsigned, so AWS
+/// rejected the request.
+#[test]
+fn every_x_amz_line_the_head_carries_is_signed() {
+    let (_, p, handle) = open_signing("AKIDEXAMPLE:SECRET");
+    let sent = [
+        NamedValue {
+            name: s("content-type"),
+            value: blob("application/x-amz-json-1.1", BLOB_OCTETS, 0),
+        },
+        NamedValue {
+            name: s("X-Amz-Target"),
+            value: blob("AmazonSSM.GetParameter", BLOB_OCTETS, 0),
+        },
+        NamedValue {
+            name: s("x-amz-meta-note"),
+            value: blob("  a   b ", BLOB_OCTETS, 0),
+        },
+        NamedValue {
+            name: s("x-amz-date"),
+            value: blob("19700101T000000Z", BLOB_OCTETS, 0),
+        },
+        NamedValue {
+            name: s("x-amzn-trace-id"),
+            value: blob("Root=1", BLOB_OCTETS, 0),
+        },
+    ];
+    let mut b = Buffers::new(1024, 4);
+    let mut f: Frame<FieldsIn, FieldsOut> = Frame::new(z(), z());
+    f.input.head = in_head();
+    f.out.head = out_head();
+    f.input.handle = handle;
+    f.input.mode = MODE_OWN;
+    f.input.request = facts();
+    (f.input.headers, f.input.headers_len) = (sent.as_ptr(), sent.len());
+    f.input.point = POINT_HEAD_BODY;
+    f.input.body = blob("{}", BLOB_OCTETS, 0);
+    (f.input.field_buf, f.input.field_buf_cap) = (b.buf.as_mut_ptr(), b.buf.len());
+    (f.input.fields, f.input.fields_cap) = (b.spans.as_mut_ptr(), b.spans.len() as u32);
+    let c = p.call(slot::FIELDS, &mut f);
+    assert_eq!(c.outcome, Outcome::Ready, "{}", err(&c.error));
+    let hash = sha256_hex(b"{}");
+    let (signature, signed_headers) = busbar_auth_sigv4::inbound::sign_v4(
+        "SECRET",
+        "us-east-1",
+        "svc",
+        "POST",
+        "/model/m/converse",
+        "",
+        &[
+            ("content-type", "application/x-amz-json-1.1"),
+            ("host", "runtime.signer.example"),
+            ("x-amz-content-sha256", hash.as_str()),
+            ("x-amz-date", "20150830T123600Z"),
+            ("x-amz-meta-note", "a b"),
+            ("x-amz-target", "AmazonSSM.GetParameter"),
+        ],
+        &hash,
+        "20150830T123600Z",
+        "20150830",
+    );
+    assert_eq!(
+        signed_headers,
+        "content-type;host;x-amz-content-sha256;x-amz-date;x-amz-meta-note;x-amz-target"
+    );
+    let written = b.read(f.out.fields_len);
+    assert!(
+        written.starts_with(&format!(
+            "authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/svc/\
+             aws4_request, SignedHeaders={signed_headers}, Signature={signature} [flags=1] ; \
+             x-amz-date: 20150830T123600Z [flags=0]"
+        )),
+        "{written}"
+    );
+}
+
+/// The `fields` line a fresh own-credential handle answers for `request`, sent with `sent`, the
+/// body `body` lent (`None`: none).
+fn fields_raw(request: RequestFacts, sent: &[NamedValue], body: Option<&'static [u8]>) -> String {
+    let (_, p, handle) = open_signing("AKIDEXAMPLE:SECRET");
+    let mut b = Buffers::new(1024, 4);
+    let mut f: Frame<FieldsIn, FieldsOut> = Frame::new(z(), z());
+    f.input.head = in_head();
+    f.out.head = out_head();
+    f.input.handle = handle;
+    f.input.mode = MODE_OWN;
+    f.input.request = request;
+    (f.input.headers, f.input.headers_len) = (sent.as_ptr(), sent.len());
+    f.input.point = POINT_HEAD_BODY;
+    f.input.body = body.map_or(z(), |b| Blob {
+        ptr: b.as_ptr(),
+        len: b.len(),
+        fmt: BLOB_OCTETS,
+        flags: 0,
+    });
+    (f.input.field_buf, f.input.field_buf_cap) = (b.buf.as_mut_ptr(), b.buf.len());
+    (f.input.fields, f.input.fields_cap) = (b.spans.as_mut_ptr(), b.spans.len() as u32);
+    let c = p.call(slot::FIELDS, &mut f);
+    format!("fields {:?} {}", c.outcome, err(&c.error))
+}
+
+/// L4 (audit round 1 @57f7ef5, lead-confirmed): each request fact that cannot be signed FAILS the
+/// call with its own reason: an absent and a non-UTF-8 method, authority or path each say which;
+/// a sent `content-type` that is not UTF-8 is not treated as absent (it is sent, so it must be
+/// signed); and a body the host did not lend at `HeadBody` is not signed as the empty body.
+#[test]
+fn each_request_fact_that_cannot_be_signed_fails_with_its_own_reason() {
+    const BAD: &[u8] = b"\xff";
+    let bad = AbiStr {
+        ptr: BAD.as_ptr(),
+        len: BAD.len(),
+    };
+    let json = [NamedValue {
+        name: s("content-type"),
+        value: blob("application/json", BLOB_OCTETS, 0),
+    }];
+    let failed = |why: &str| format!("fields Failed sigv4 cannot sign: {why}");
+    let with = |field: usize, value: AbiStr| {
+        let mut r = facts();
+        match field {
+            0 => r.method = value,
+            1 => r.authority = value,
+            _ => r.canonical_path = value,
+        }
+        r
+    };
+    let cases = [
+        (with(0, s("")), "the host lent no method"),
+        (with(0, bad), "the method is not UTF-8"),
+        (with(1, s("")), "the host lent no authority"),
+        (with(1, bad), "the authority is not UTF-8"),
+        (with(2, s("")), "the host lent no path"),
+        (with(2, bad), "the path is not UTF-8"),
+    ];
+    for (request, why) in cases {
+        assert_eq!(
+            fields_raw(request, &json, Some(b"{}")),
+            failed(why),
+            "{why}"
+        );
+    }
+    let bad_type = [NamedValue {
+        name: s("Content-Type"),
+        value: Blob {
+            ptr: BAD.as_ptr(),
+            len: BAD.len(),
+            fmt: BLOB_OCTETS,
+            flags: 0,
+        },
+    }];
+    assert_eq!(
+        fields_raw(facts(), &bad_type, Some(b"{}")),
+        failed("the content-type value is not UTF-8")
+    );
+    assert_eq!(
+        fields_raw(facts(), &json, None),
+        failed("the host lent no body")
+    );
+    assert!(fields_raw(facts(), &json, Some(b"")).starts_with("fields Ready"));
 }

@@ -72,6 +72,8 @@ type Handle = (u32, u32, u32);
 #[derive(Default)]
 struct FakeHost {
     pend_first: bool,
+    /// Once set, the live credential answers not live (revoked between two calls).
+    revoked: std::sync::atomic::AtomicBool,
     pended: Mutex<HashSet<Handle>>,
     reads: Mutex<Vec<(Handle, String, String)>>,
 }
@@ -117,6 +119,7 @@ extern "C" fn fake_records_secret(
     }
     let long = long_secret();
     let (secret, live) = match id.as_str() {
+        AKID if host.revoked.load(std::sync::atomic::Ordering::SeqCst) => (SECRET, SECRET_NOT_LIVE),
         AKID => (SECRET, SECRET_LIVE),
         DEAD_AKID => (DEAD_SECRET, SECRET_NOT_LIVE),
         LONG_AKID => (long.as_str(), SECRET_LIVE),
@@ -470,6 +473,19 @@ fn a_signed_request_over_the_live_credential_identifies_its_access_key_id() {
     );
 }
 
+/// V4 (audit round 1 @57f7ef5, lead-confirmed): an HTTP/2 request carries its host as
+/// `:authority`, never a `host` line. The signed `host` is then the request's authority as the
+/// host lends it: admitted. Was: a signed `host` with no line rejected every h2 SigV4 client.
+#[test]
+fn a_signed_host_with_no_host_line_is_the_requests_authority() {
+    let o = open();
+    let mut req = signed(SECRET, AKID, b"");
+    req.lines.retain(|(n, _)| n != "host");
+    let a = verify(&o, &req, TICKET, 0, 256);
+    assert_eq!(a.out.verdict, VERDICT_IDENTITY);
+    assert_eq!(a.subject.as_deref(), Some(AKID));
+}
+
 /// The door lends the received method and raw query to the check: a GET signed over a query is
 /// admitted, and the same request received with another query or as a POST is not.
 #[test]
@@ -639,8 +655,16 @@ fn a_short_identity_buffer_answers_short_and_the_recall_judges_again() {
         (AKID.len() + "authorization".len()) as u64,
         "the subject and the named line"
     );
+    // The host revokes the credential between the short answer and its re-call.
+    o.host
+        .revoked
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let again = verify(&o, &req, TICKET, 0, 256);
-    assert_eq!(again.subject.as_deref(), Some(AKID));
+    assert_eq!(
+        (again.out.verdict, again.subject.as_deref()),
+        (VERDICT_REJECT, None),
+        "revoked in between: the re-call judges again and rejects"
+    );
     let handles: Vec<Handle> = reads(&o).iter().map(|r| r.0).collect();
     assert_eq!(
         handles,

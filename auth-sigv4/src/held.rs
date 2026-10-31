@@ -108,5 +108,42 @@ mod tests {
         assert_eq!(a, a.clone());
         assert_ne!(a, Held::new(String::from("other")));
         assert_ne!(a, Held::new(String::from("sam")));
+        assert_ne!(Held::new(String::new()), Held::new(String::from("x")));
+        assert_eq!(Held::new(vec![1_u8, 2]), Held::new(vec![1_u8, 2]));
+    }
+
+    /// A value whose wipe is observable: `zeroize` raises a shared flag.
+    struct Probe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl zeroize::Zeroize for Probe {
+        fn zeroize(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// T4 (audit round 1): dropping a `Held` wipes the value it holds, and only on drop.
+    #[test]
+    fn dropping_a_held_value_zeroizes_it() {
+        let wiped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let held = Held::new(Probe(wiped.clone()));
+        let _ = format!("{held:?} {held}");
+        assert!(
+            !wiped.load(std::sync::atomic::Ordering::SeqCst),
+            "not before drop"
+        );
+        drop(held);
+        assert!(
+            wiped.load(std::sync::atomic::Ordering::SeqCst),
+            "wiped on drop"
+        );
+    }
+
+    /// T4: a clone is its own copy: dropping it wipes the clone, never the original.
+    #[test]
+    fn a_clone_is_wiped_on_its_own_drop() {
+        let a = Held::new(String::from("sk-live-plaintext"));
+        drop(a.clone());
+        assert_eq!(a.reveal(), "sk-live-plaintext");
+        assert_eq!(format!("{:?}", Held::<String>::default()), "[REDACTED]");
     }
 }

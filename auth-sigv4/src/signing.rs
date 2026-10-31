@@ -13,8 +13,8 @@
 //! request, so there is nothing to hold ahead of time.
 //!
 //! The request it signs: the method, the query and the content type are the walked request's own,
-//! as the host lends them; the canonical URI is the wire path URI-encoded once more (SigV4's non-S3
-//! rule).
+//! as the host lends them; the canonical URI is [`sigv4::canonical_uri`]'s for the configured
+//! service (the wire path encoded once more, or for `s3` encoded once).
 
 use std::sync::RwLock;
 
@@ -24,9 +24,8 @@ use zeroize::Zeroizing;
 
 use crate::held::Held;
 use crate::sigv4;
+use crate::sigv4::SECS_PER_DAY;
 
-/// The seconds in a day.
-const DAY_SECS: u64 = 86_400;
 /// How long before UTC midnight `tick` derives the next day's key.
 const PREDERIVE_AHEAD_SECS: u64 = 3_600;
 
@@ -62,6 +61,10 @@ pub struct SignFacts<'a> {
     pub query: Option<&'a str>,
     /// The `content-type` the request is sent with; `None` = none is sent, and none is signed.
     pub content_type: Option<&'a str>,
+    /// Every `x-amz-*` line the request is sent with (name, value), in order: each is signed
+    /// (AWS signs every `x-amz-*` header sent), but for the date, the payload hash and (when the
+    /// credential carries one) the session token, which the signer SETS over any sent.
+    pub amz_headers: &'a [(&'a str, &'a str)],
     /// Lowercase hex SHA-256 of the body.
     pub payload_hash: &'a str,
     /// Seconds since the epoch (1970-01-01 UTC).
@@ -256,8 +259,8 @@ impl SigV4Binding {
     pub fn prederive(&self, now_epoch: u64) {
         let (_, today) = sigv4::format_amz_time(now_epoch);
         self.derive(&today);
-        if DAY_SECS - now_epoch % DAY_SECS <= PREDERIVE_AHEAD_SECS {
-            let (_, tomorrow) = sigv4::format_amz_time(now_epoch + DAY_SECS);
+        if SECS_PER_DAY - now_epoch % SECS_PER_DAY <= PREDERIVE_AHEAD_SECS {
+            let (_, tomorrow) = sigv4::format_amz_time(now_epoch + SECS_PER_DAY);
             self.derive(&tomorrow);
         }
     }
@@ -286,13 +289,22 @@ impl SigV4Binding {
         let service = self.params.service.as_str();
         let (amzdate, datestamp) = sigv4::format_amz_time(facts.timestamp_epoch);
         let payload_hash = facts.payload_hash.to_string();
-        // The signed set: the content type the request is sent with (none sent, none signed) and
-        // the host, then SET, never appended, the fields it writes.
-        let mut headers: Vec<(String, String)> = Vec::with_capacity(5);
+        // The signed set: the content type the request is sent with (none sent, none signed), the
+        // host and every `x-amz-*` line sent, then SET, never appended, the fields it writes.
+        let mut headers: Vec<(String, String)> = Vec::with_capacity(5 + facts.amz_headers.len());
         if let Some(content_type) = facts.content_type {
             headers.push(("content-type".to_string(), content_type.to_string()));
         }
         headers.push(("host".to_string(), facts.host.to_string()));
+        for (name, value) in facts.amz_headers {
+            let set_here = name.eq_ignore_ascii_case("x-amz-date")
+                || name.eq_ignore_ascii_case("x-amz-content-sha256")
+                || (cred.session_token.is_some()
+                    && name.eq_ignore_ascii_case("x-amz-security-token"));
+            if !set_here {
+                headers.push(((*name).to_string(), (*value).to_string()));
+            }
+        }
         set_header(&mut headers, "x-amz-date", amzdate.clone());
         set_header(&mut headers, "x-amz-content-sha256", payload_hash.clone());
         if let Some(t) = &cred.session_token {
@@ -302,7 +314,7 @@ impl SigV4Binding {
                 t.reveal().as_str().to_owned(),
             );
         }
-        let canonical_uri = sigv4::uri_encode_path(facts.path);
+        let canonical_uri = sigv4::canonical_uri(facts.path, service);
         let canonical_query = sigv4::canonical_query(facts.query);
         self.derive(&datestamp);
         let sign_with = |key: &[u8]| {

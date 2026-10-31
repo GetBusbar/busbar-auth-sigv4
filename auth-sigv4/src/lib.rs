@@ -77,7 +77,6 @@ mod signing;
 mod sigv4;
 mod style;
 
-use std::borrow::Cow;
 use std::mem::size_of;
 use std::task::Poll;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -104,7 +103,7 @@ use busbar_contract::abi::sdk::conn::Host;
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::Op;
 use busbar_contract::abi::sdk::life::{self, Refusal};
-use busbar_contract::abi::sdk::services::CredentialSecret;
+use busbar_contract::abi::sdk::services::{CredentialSecret, ServiceError};
 
 use crate::inbound::{Judgement, Read, SecretSource};
 use crate::instance::{SigV4, Signed, Who};
@@ -206,21 +205,23 @@ pub mod compiled_in {
 }
 
 /// Wall-clock seconds since the epoch (1970-01-01 UTC) — the clock `tick`'s day-key pre-derivation
-/// reads against.
-pub(crate) fn now_epoch() -> u64 {
+/// reads against; `None` when the clock reads before the epoch (no day to derive a key for).
+pub(crate) fn now_epoch() -> Option<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
+        .ok()
         .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// The plugin-level settings `validate`, `open` and `refresh` answer alike: a JSON object (none
 /// lent reads as `{}`) naming only the style's own keys (the host opens the instance over the
-/// binding's settings). Every other key is refused by name, one `settings: ...` line each.
+/// binding's settings). Every other key is refused by name, one `settings: ...` line each, and a
+/// `service` or `region` present is checked as the bind checks it (`settings.<key>: ...`).
 fn plugin_settings(settings: &[u8]) -> Result<(), Refusal> {
     let m = life::settings_object(settings)?;
     let lines: Vec<String> = style::unknown_keys(&m)
         .iter()
+        .chain(style::scope_findings(&m).iter())
         .map(style::Refusal::line)
         .collect();
     if lines.is_empty() {
@@ -237,39 +238,96 @@ const SETTINGS_REFUSED: &str = "settings: not a JSON object of the sigv4 style's
 /// The refusal `open_outbound` answers for a bind that names no style.
 const NO_STYLE: &str = "settings: no outbound auth style was named";
 
-/// The reason `fields` answers FAILED with when the host lent no method, host or path to sign.
-const NO_FACTS: &str = "sigv4 cannot sign: the host lent no method, host or path";
+/// The reasons `fields` answers FAILED with when a request fact the host lent cannot be signed,
+/// one per fact and fault: the request is never sent unsigned, nor signed over facts it is not
+/// sent with.
+const NO_METHOD: &str = "sigv4 cannot sign: the host lent no method";
+const METHOD_NOT_UTF8: &str = "sigv4 cannot sign: the method is not UTF-8";
+const NO_AUTHORITY: &str = "sigv4 cannot sign: the host lent no authority";
+const AUTHORITY_NOT_UTF8: &str = "sigv4 cannot sign: the authority is not UTF-8";
+const NO_PATH: &str = "sigv4 cannot sign: the host lent no path";
+const PATH_NOT_UTF8: &str = "sigv4 cannot sign: the path is not UTF-8";
+const QUERY_NOT_UTF8: &str = "sigv4 cannot sign: the query is not UTF-8";
+const CONTENT_TYPE_NOT_UTF8: &str = "sigv4 cannot sign: the content-type value is not UTF-8";
+const NO_BODY: &str = "sigv4 cannot sign: the host lent no body";
 
-/// A request fact as text: UTF-8 and not empty; `None` when the host lent none.
-fn fact(b: &[u8]) -> Option<&str> {
-    std::str::from_utf8(b).ok().filter(|s| !s.is_empty())
+/// A request fact as text: `absent` when the host lent none (empty), `not_utf8` when it is not
+/// text.
+fn fact<'a>(
+    b: &'a [u8],
+    absent: &'static str,
+    not_utf8: &'static str,
+) -> Result<&'a str, &'static str> {
+    if b.is_empty() {
+        return Err(absent);
+    }
+    std::str::from_utf8(b).map_err(|_| not_utf8)
 }
 
 /// The value of the first `content-type` line (ASCII case-insensitive) in the header envelope the
-/// host lent `fields` (the style declares `STYLE_NEEDS_HEADERS`); `None` when none is sent, or its
-/// value is not text.
+/// host lent `fields` (the style declares `STYLE_NEEDS_HEADERS`); `None` when none is sent.
+///
+/// # Errors
+///
+/// [`CONTENT_TYPE_NOT_UTF8`] when the value sent is not text: it is sent, so it cannot go unsigned.
 pub(crate) fn sent_content_type<'a>(
     headers: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
-) -> Option<&'a str> {
+) -> Result<Option<&'a str>, &'static str> {
     headers
         .into_iter()
         .find(|(n, _)| n.eq_ignore_ascii_case(b"content-type"))
-        .and_then(|(_, v)| std::str::from_utf8(v).ok())
+        .map(|(_, v)| std::str::from_utf8(v).map_err(|_| CONTENT_TYPE_NOT_UTF8))
+        .transpose()
 }
 
-/// The SigV4 facts of a `fields` call: the walked request's method, host, path, query and sent
-/// content type (SigV4 signs the real method and query of the
-/// walked request); `None` when the host sent no method, host or path.
-fn sign_facts<'a>(view: &FieldsView<'a>, hash: &'a str) -> Option<SignFacts<'a>> {
-    Some(SignFacts {
-        method: fact(view.method())?,
-        host: fact(view.authority())?,
-        path: fact(view.path())?,
-        query: view.query().and_then(fact),
-        content_type: sent_content_type(view.headers()),
+/// The reason `fields` answers FAILED with when an `x-amz-*` line the request is sent with is not
+/// UTF-8: AWS signs every one, and this one cannot be.
+const AMZ_NOT_UTF8: &str = "sigv4 cannot sign: an x-amz-* line's value is not UTF-8";
+
+/// Every `x-amz-*` line in the header envelope the host lent `fields`, in order (all of them are
+/// signed); `Err` when one is not text.
+fn sent_amz_headers<'a>(view: &FieldsView<'a>) -> Result<Vec<(&'a str, &'a str)>, &'static str> {
+    let mut out = Vec::new();
+    for (name, value) in view.headers() {
+        if name.len() > 6 && name[..6].eq_ignore_ascii_case(b"x-amz-") {
+            match (std::str::from_utf8(name), std::str::from_utf8(value)) {
+                (Ok(n), Ok(v)) => out.push((n, v)),
+                _ => return Err(AMZ_NOT_UTF8),
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The SigV4 facts of a `fields` call: the walked request's method, host, path, query, sent
+/// content type and sent `x-amz-*` lines (SigV4 signs the real method and query of the
+/// walked request); `Err` names why the facts the host lent cannot be signed.
+fn sign_facts<'a>(
+    view: &FieldsView<'a>,
+    amz_headers: &'a [(&'a str, &'a str)],
+    hash: &'a str,
+) -> Result<SignFacts<'a>, &'static str> {
+    let query = match view.query().map(std::str::from_utf8) {
+        None => None,
+        Some(Ok(q)) => Some(q).filter(|q| !q.is_empty()),
+        Some(Err(_)) => return Err(QUERY_NOT_UTF8),
+    };
+    let facts = SignFacts {
+        method: fact(view.method(), NO_METHOD, METHOD_NOT_UTF8)?,
+        host: fact(view.authority(), NO_AUTHORITY, AUTHORITY_NOT_UTF8)?,
+        path: fact(view.path(), NO_PATH, PATH_NOT_UTF8)?,
+        query,
+        content_type: sent_content_type(view.headers())?,
+        amz_headers,
         payload_hash: hash,
         timestamp_epoch: view.timestamp(),
-    })
+    };
+    // The host lends the body at `HeadBody`, an empty one included: none lent cannot be bound to a
+    // payload hash, and is never signed as the empty body.
+    if view.body().is_none() {
+        return Err(NO_BODY);
+    }
+    Ok(facts)
 }
 
 impl OutboundPlugin for SigV4 {
@@ -312,16 +370,23 @@ impl OutboundPlugin for SigV4 {
         out: &mut FieldsWriter<'_>,
         _: &Op<'_>,
     ) -> Poll<FieldsAnswer> {
-        // The payload hash over the body the host lent at `HeadBody`; none lent is the empty body.
+        // The payload hash over the body the host lent at `HeadBody` (none lent FAILS, in
+        // `sign_facts`).
         let hash = crate::sigv4::sha256_hex(view.body().unwrap_or_default());
+        let amz = sent_amz_headers(view);
         let who = match view.mode() {
             Mode::Own => Who::Own,
             Mode::Passthrough => Who::Caller(view.caller_credential()),
         };
         Poll::Ready(
-            match self.sign(view.handle(), who, sign_facts(view, &hash)) {
+            match self.sign(
+                view.handle(),
+                who,
+                amz.as_deref()
+                    .map_err(|e| *e)
+                    .and_then(|amz| sign_facts(view, amz, &hash)),
+            ) {
                 None => FieldsAnswer::Refused,
-                Some(Signed::NoFacts) => FieldsAnswer::Failed(Cow::Borrowed(NO_FACTS)),
                 Some(Signed::Failed(reason)) => FieldsAnswer::Failed(reason),
                 Some(Signed::Fields(fields)) => {
                     for (name, value) in &fields {
@@ -377,7 +442,12 @@ impl SecretSource for &VerifyOp {
                 let live = secret.live();
                 Read::Secret { secret, live }
             }
-            Poll::Ready(Err(_)) => Read::Unavailable,
+            Poll::Ready(Err(e)) => Read::Unavailable(match e {
+                ServiceError::Unserved => "unserved",
+                ServiceError::Declined(_) => "declined",
+                ServiceError::Broken => "broken",
+                ServiceError::Short { .. } => "short",
+            }),
         }
     }
 }
@@ -399,6 +469,7 @@ impl VerifyPlugin for SigV4 {
             lines: view.lines().collect(),
             body: view.body(),
             now: view.timestamp(),
+            authority: view.authority(),
         };
         let mut source = op;
         let verdict = match inbound::judge(&request, &mut source) {

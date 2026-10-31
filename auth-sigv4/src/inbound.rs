@@ -6,11 +6,11 @@
 //! the dummy-secret timing equivalence for an unknown AccessKeyId.
 //!
 //! The pieces: the `Authorization` parse, the `x-amz-date` window, and the canonical signing the
-//! check recomputes ([`sign_v4`], which keeps a quoted header value's interior spaces verbatim,
-//! unlike the outbound signer); the structural gate before buffering the body; and the credential
+//! check recomputes ([`sign_v4`], which trims and collapses ASCII space runs in every signed
+//! value, quoted or not, as the outbound signer does); the structural gate before buffering the body; and the credential
 //! check (the signed-header prefilter, `UNSIGNED-PAYLOAD` refused, the body hash against the signed
 //! `x-amz-content-sha256` in constant time, the dummy-secret rule). The HMAC chain, the key
-//! derivation and the algorithm tokens are the outbound signer's ([`crate::sigv4`]), shared.
+//! derivation and the algorithm tokens are the outbound signer's (`crate::sigv4`), shared.
 //!
 //! The AccessKeyId is looked up through the host's `records.secret` service
 //! ([`SecretSource`]), which answers a fixed dummy secret, not live, for an id it does not hold, in
@@ -32,7 +32,7 @@ use zeroize::Zeroizing;
 use busbar_contract::constant_time_eq;
 
 use crate::sigv4::{
-    hmac, sha256_hex, signing_key, uri_encode_path, SIGNATURE_TERMINATION, SIGV4_ALGORITHM,
+    canonical_uri, hmac, sha256_hex, signing_key, SIGNATURE_TERMINATION, SIGV4_ALGORITHM,
 };
 
 /// The canonical lowercase name of the `x-amz-date` header.
@@ -207,6 +207,20 @@ pub enum VerifyError {
     SignatureMismatch,
 }
 
+impl VerifyError {
+    /// The one reason word the plugin's log names this cause by (never sent to the client).
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::MissingAuthorization | Self::MalformedAuthorization => "malformed",
+            Self::MissingDate => "missing-date",
+            Self::Expired => "expired",
+            Self::SignedHeadersMismatch => "signed-headers",
+            Self::SignatureMismatch => "signature",
+        }
+    }
+}
+
 /// The parsed components of an inbound SigV4 `Authorization` header. Its `Debug` withholds the
 /// signature (a log line never carries one).
 #[derive(Clone, PartialEq, Eq)]
@@ -352,7 +366,7 @@ fn parse_amz_date(amzdate: &str) -> Option<u64> {
     let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146_097 + doe - 719_468;
-    let epoch = days * 86_400 + hour * 3_600 + min * 60 + sec;
+    let epoch = days * crate::sigv4::SECS_PER_DAY as i64 + hour * 3_600 + min * 60 + sec;
     if epoch < 0 {
         return None;
     }
@@ -360,7 +374,7 @@ fn parse_amz_date(amzdate: &str) -> Option<u64> {
 }
 
 /// The fully-assembled inputs for verifying ONE inbound SigV4 request. `canonical_uri` MUST already
-/// be URI-encoded the SAME way the signer encodes it ([`uri_encode_path`]); `canonical_querystring`
+/// be URI-encoded the SAME way the signer encodes it (`crate::sigv4::canonical_uri`); `canonical_querystring`
 /// MUST be [`canonical_query_string`]'s (or empty). `headers` carries the ACTUAL request header
 /// values for (at least) every name in the parsed `SignedHeaders` list; extra headers are ignored
 /// (only the signed ones enter the canonical request).
@@ -436,23 +450,32 @@ pub fn verify_inbound_sigv4<H: AsRef<str>>(
         }
         prev = Some(name);
     }
-    // Each signed name takes the FIRST matching request header's value (case-insensitive); a signed name the request does not
-    // carry cannot be reconstructed. `sign_v4` canonicalizes the value.
-    // Every signed name is already lowercase ASCII-wise (checked above), so it is its own lowered
-    // name.
-    let mut selected: Vec<(&str, &str)> = Vec::with_capacity(signed.len());
+    // Each signed name takes EVERY matching request header's value (case-insensitive), each
+    // canonicalized (trimmed, space runs collapsed), joined with `,` in the order received: the
+    // AWS SigV4 rule, and the outbound signer's (`crate::sigv4::sign_v4_with_key`). A signed name
+    // the request does not carry cannot be reconstructed. Every signed name is already lowercase
+    // ASCII-wise (checked above), so it is its own lowered name.
+    let mut selected: Vec<(&str, Cow<'_, str>)> = Vec::with_capacity(signed.len());
     for name in &signed {
-        let Some((_, value)) = req
+        let mut values = req
             .headers
             .iter()
-            .find(|(k, _)| k.as_ref().eq_ignore_ascii_case(name))
-        else {
+            .filter(|(k, _)| k.as_ref().eq_ignore_ascii_case(name))
+            .map(|(_, v)| canonicalize_header_value(v.as_ref()));
+        let Some(first) = values.next() else {
             return Err(VerifyError::SignedHeadersMismatch);
         };
-        selected.push((*name, value.as_ref()));
+        let mut value = first;
+        for more in values {
+            let joined = value.to_mut();
+            joined.push(',');
+            joined.push_str(&more);
+        }
+        selected.push((*name, value));
     }
 
     // (4) Recompute — same canonicalization, byte-for-byte.
+    let selected: Vec<(&str, &str)> = selected.iter().map(|(k, v)| (*k, v.as_ref())).collect();
     let (computed_sig, computed_signed_headers) = sign_v4(
         secret,
         &parsed.region,
@@ -478,37 +501,14 @@ pub fn verify_inbound_sigv4<H: AsRef<str>>(
     }
 }
 
-/// Canonicalize the request query string for SigV4: split into key=value pairs, sort by (encoded)
-/// key then (encoded) value, and join with `&`. An empty/absent query yields `""`. A bare key
-/// (`?foo`) canonicalizes to `foo=` (AWS signs a missing value as empty).
-///
-/// Deliberately does NOT run each key/value through an AWS URI-encoder. `query` here is the RAW
-/// wire query string — already percent-encoded exactly once by the client, since a compliant SigV4
-/// client uses the SAME single URI-encoding pass to build both the CanonicalQueryString it signs AND
-/// the query string it puts on the wire. Re-encoding would double-encode it (a client's correct
-/// `a%2Fb` becomes `a%252Fb`), so every request with a query parameter needing escaping would fail
-/// verification. Sorting is done on the RAW (already-encoded) bytes, which is equivalent to sorting
-/// on the encoded key/value per the AWS spec.
+/// Canonicalize the received query string for SigV4, the AWS rule and the outbound signer's
+/// (`crate::sigv4::canonical_query`, shared): each `name=value` pair (a bare name has the empty
+/// value) has its `%XX` escapes decoded once and every byte re-encoded over the unreserved set with
+/// uppercase hex, the pairs sorted by encoded name then value and joined with `&`; `""` for none.
+/// A client's already-canonical query is unchanged (the encoding is idempotent over the canonical
+/// form), and one sent with a reserved byte raw or a lowercase escape verifies as AWS recomputes it.
 pub fn canonical_query_string(query: Option<&str>) -> String {
-    let Some(q) = query.filter(|q| !q.is_empty()) else {
-        return String::new();
-    };
-    let mut pairs: Vec<(&str, &str)> = q
-        .split('&')
-        .filter(|p| !p.is_empty())
-        .map(|pair| pair.split_once('=').unwrap_or((pair, "")))
-        .collect();
-    pairs.sort();
-    let mut out = String::with_capacity(q.len() + pairs.len());
-    for (i, (k, v)) in pairs.into_iter().enumerate() {
-        if i > 0 {
-            out.push('&');
-        }
-        out.push_str(k);
-        out.push('=');
-        out.push_str(v);
-    }
-    out
+    crate::sigv4::canonical_query(query)
 }
 
 /// A header value as the kernel's `HeaderValue::to_str` read it: the text when every byte is
@@ -538,6 +538,9 @@ pub struct Request<'a> {
     pub body: Option<&'a [u8]>,
     /// Wall-clock seconds, read once by the host for this call.
     pub now: u64,
+    /// The request's authority (`host[:port]`), as the host lends it: an HTTP/2 request carries
+    /// its host here (`:authority`), never as a `host` line. Empty = none lent.
+    pub authority: &'a [u8],
 }
 
 impl std::fmt::Debug for Request<'_> {
@@ -554,6 +557,7 @@ impl std::fmt::Debug for Request<'_> {
             .field("lines", &names)
             .field("body_len", &self.body.map(<[u8]>::len))
             .field("now", &self.now)
+            .field("authority", &String::from_utf8_lossy(self.authority))
             .finish()
     }
 }
@@ -625,7 +629,8 @@ pub enum Read<S: SecretBytes = Zeroizing<Vec<u8>>> {
     /// a ticket).
     Pending,
     /// The host serves no `records.secret`, refused or failed it, or broke its rules: fail closed.
-    Unavailable,
+    /// The word names the service's error (`unserved`, `declined`, `broken`, `short`), for the log.
+    Unavailable(&'static str),
 }
 
 /// Where the check reads a credential's secret: the host's `records.secret` on the request path, a
@@ -649,6 +654,19 @@ pub enum Judgement {
     Identity(String),
     /// The secret read pends (on the op's ticket, or on none: the door answers REFUSED).
     Pending,
+}
+
+/// The longest AccessKeyId AWS issues: a logged id is capped here.
+const ACCESS_KEY_ID_LOG_CAP: usize = 128;
+
+/// The client's AccessKeyId as the log carries it: its first [`ACCESS_KEY_ID_LOG_CAP`] characters,
+/// escaped (`char::escape_debug`), so a tab, a quote or a megabyte of text in the header cannot
+/// forge a field or flood the log.
+fn shown_id(id: &str) -> String {
+    id.chars()
+        .take(ACCESS_KEY_ID_LOG_CAP)
+        .flat_map(char::escape_debug)
+        .collect()
 }
 
 /// A REJECT, its reason logged at `info` in the plugin's own log (module `sigv4`): an end-user
@@ -696,7 +714,7 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
             .map(str::trim)
             .any(|h| !h.is_empty() && h.eq_ignore_ascii_case(name))
     };
-    let headers: Vec<(&str, &str)> = req
+    let mut headers: Vec<(&str, &str)> = req
         .lines
         .iter()
         .filter_map(|(name, value)| {
@@ -704,6 +722,13 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
             header_str(value).map(|v| (name, v))
         })
         .collect();
+    // An HTTP/2 request carries its host as `:authority`, never a `host` line: with no `host` line,
+    // the signed `host` is the request's authority as the host lends it.
+    if signed("host") && !req.has("host") {
+        if let Some(authority) = header_str(req.authority).filter(|a| !a.is_empty()) {
+            headers.push(("host", authority));
+        }
+    }
     let signed_value = |name: &str| {
         headers
             .iter()
@@ -751,7 +776,9 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
     };
     // `Uri::path` never answers an empty path: it reads `/` for one.
     let path = if path.is_empty() { "/" } else { path };
-    let canonical_uri = uri_encode_path(path);
+    // The credential scope names the service: `s3` signs its path encoded once, every other
+    // service twice.
+    let canonical_uri = canonical_uri(path, &parsed.service);
     let canonical_qs = canonical_query_string(query);
     let inbound = InboundRequest {
         method,
@@ -768,12 +795,13 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
     let (secret, live) = match source.read(CREDENTIAL_KIND, &parsed.access_key_id) {
         Read::Secret { secret, live } => (secret, live),
         Read::Pending => return Judgement::Pending,
-        Read::Unavailable => {
-            // An outage-like read failure: operator-actionable, so WARN.
+        Read::Unavailable(service_error) => {
+            // An outage-like read failure: operator-actionable, so WARN, naming the service's error.
             tracing::warn!(
                 module = "sigv4",
-                reason = "credential unavailable",
-                access_key_id = %parsed.access_key_id,
+                reason = "credential-unavailable",
+                service_error,
+                access_key_id = %shown_id(&parsed.access_key_id),
                 "sigv4 inbound request rejected: the host's records.secret did not answer"
             );
             return Judgement::Reject;
@@ -783,18 +811,35 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
         Ok(s) => (s, true),
         Err(_) => (DUMMY_SECRET, false),
     };
-    let verified = verify_inbound_sigv4(&parsed, &inbound, text, req.now).is_ok();
+    let checked = verify_inbound_sigv4(&parsed, &inbound, text, req.now);
+    let verified = checked.is_ok();
     // Admission: the signature verified AND the host called the credential live (its key enabled,
     // not revoked, the credential neither revoked nor expired). Any one failing rejects alike.
     if std::hint::black_box(u8::from(verified) & u8::from(live) & u8::from(utf8)) == 1 {
         Judgement::Identity(parsed.access_key_id)
+    } else if !utf8 {
+        // The host holds a secret that is not text: an operator data fault, not the client's, so
+        // WARN (the full check ran over the dummy in equal time, and it still rejects).
+        tracing::warn!(
+            module = "sigv4",
+            reason = "secret-not-utf8",
+            access_key_id = %shown_id(&parsed.access_key_id),
+            "sigv4 inbound request rejected: the stored secret is not UTF-8"
+        );
+        Judgement::Reject
     } else {
-        // One reason for every cause, as the client's one 401: the log must not tell an unknown
-        // AccessKeyId from a known one. The id is an identifier, not a secret.
+        // One reason word per cause; the client still gets the one opaque 401. The secret-dependent
+        // causes share `signature`, so the log does not tell an unknown AccessKeyId (verified
+        // against the dummy) from a bad signature or a credential that is not live. The id is an
+        // identifier, not a secret.
+        let reason = match checked {
+            Err(e) => e.word(),
+            Ok(()) => VerifyError::SignatureMismatch.word(),
+        };
         tracing::info!(
             module = "sigv4",
-            reason = "signature mismatch or credential not live",
-            access_key_id = %parsed.access_key_id,
+            reason,
+            access_key_id = %shown_id(&parsed.access_key_id),
             "sigv4 inbound request rejected"
         );
         Judgement::Reject

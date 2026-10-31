@@ -6,22 +6,25 @@
 //! signature chain is verified against AWS's own published worked example (GET iam ListUsers,
 //! 2015-08-30) in the tests.
 //!
-//! * The daily key: [`sign_v4`] is split into [`signing_key`] (the HMAC chain over date, region,
+//! * The daily key: signing is split into [`signing_key`] (the HMAC chain over date, region,
 //!   service) and [`sign_v4_with_key`] (the per-request part), so a caller holding the day's key
-//!   signs without re-deriving it. [`sign_v4`] is the two composed.
+//!   signs without re-deriving it. The tests' `sign_v4` is the two composed.
 //! * The secret is zeroised: the `AWS4<secret>` key material, every derived key, and the HMAC's own key state (the padded
 //!   key blocks and the chaining state after each) are [`Zeroizing`] buffers, wiped on drop. A
 //!   library HMAC keeps its key's inner and outer pad states in a value it frees unwiped, so the
 //!   contract's wiped HMAC holds them.
 //!
-//! The signer's chain is shared with the INBOUND check ([`crate::inbound`]): it recomputes a client's signature through [`hmac`], [`signing_key`] and [`sha256_hex`],
-//! and derives the canonical URI with [`uri_encode_path`], keeping its own canonical signing (a
-//! quoted header value's interior spaces are kept verbatim there).
+//! The signer's chain is shared with the INBOUND check ([`crate::inbound`]): it recomputes a
+//! client's signature through [`hmac`], [`signing_key`] and [`sha256_hex`], and derives the
+//! canonical URI and query with [`canonical_uri`] and [`canonical_query`]; it keeps its own
+//! canonical-request builder, with the same header-value rule (ASCII space runs trimmed and
+//! collapsed, quoted or not).
 
 use ring::digest;
 use zeroize::{Zeroize, Zeroizing};
 
-const SECS_PER_DAY: u64 = 86_400;
+/// The seconds in a day: the one constant the date arithmetic and the day-key schedule share.
+pub(crate) const SECS_PER_DAY: u64 = 86_400;
 const SECS_PER_HOUR: u64 = 3_600;
 
 /// The SigV4 algorithm token that appears in the `Authorization` header and the string-to-sign.
@@ -91,23 +94,95 @@ pub fn uri_encode_path(path: &str) -> String {
     out
 }
 
+/// The one service whose canonical URI is the path encoded once, never normalized.
+const S3: &str = "s3";
+
+/// The CANONICAL URI a request scoped to `service` is signed over, from its path as sent (already
+/// percent-encoded once): for `s3`, the path encoded ONCE — each `%XX` escape decoded and every
+/// byte re-encoded over the unreserved set and `/` with uppercase hex (an escaped `/` stays `%2F`,
+/// a separator never a key byte), never normalized; for every other service, the path as sent
+/// NORMALIZED ([`normalize_path`]) then encoded once more ([`uri_encode_path`], AWS's double
+/// encoding). The outbound signer and the inbound check both derive it here.
+pub fn canonical_uri(path: &str, service: &str) -> String {
+    if service == S3 {
+        encode_path_once(path)
+    } else {
+        uri_encode_path(&normalize_path(path))
+    }
+}
+
+/// `path` normalized as AWS normalizes a non-S3 canonical URI: empty and `.` segments dropped (so
+/// `//` collapses), each `..` removing the segment before it (never above the root), the result
+/// rooted at `/` and keeping a trailing `/` when the path ends in one (or in `.` / `..`). An empty
+/// path is `/`.
+fn normalize_path(path: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                kept.pop();
+            }
+            s => kept.push(s),
+        }
+    }
+    let last = path.rsplit('/').next().unwrap_or("");
+    let trailing = path.contains('/') && matches!(last, "" | "." | "..");
+    let mut out = String::with_capacity(path.len() + 1);
+    for s in &kept {
+        out.push('/');
+        out.push_str(s);
+    }
+    if out.is_empty() || trailing {
+        out.push('/');
+    }
+    out
+}
+
+/// `path` in its single-encoded canonical form: every `%XX` escape decoded (an escaped `/` kept
+/// escaped) and every byte encoded over the unreserved set and `/`. Idempotent over the canonical
+/// form.
+fn encode_path_once(path: &str) -> String {
+    let b = path.as_bytes();
+    let mut out = String::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match escaped_byte(b, i) {
+            Some(byte) => {
+                push_encoded(&mut out, byte, byte != b'/');
+                i += 3;
+            }
+            None => {
+                push_encoded(&mut out, b[i], true);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The byte a `%XX` escape at `b[i]` stands for; `None` when `b[i]` opens no escape (a `%` not
+/// followed by two hex digits is a literal `%`).
+fn escaped_byte(b: &[u8], i: usize) -> Option<u8> {
+    let hex = |c: u8| (c as char).to_digit(16);
+    if b[i] == b'%' && i + 2 < b.len() {
+        hex(b[i + 1])
+            .zip(hex(b[i + 2]))
+            .map(|(high, low)| ((high << 4) | low) as u8)
+    } else {
+        None
+    }
+}
+
 /// One query name or value in SigV4's canonical form: its `%XX` escapes decoded once (a `%` that
 /// does not open two hex digits is a literal `%`), then every byte URI-encoded over the unreserved
 /// set with uppercase hex. Idempotent over the canonical form.
 fn canonical_query_component(raw: &str) -> String {
     let b = raw.as_bytes();
-    let hex = |c: u8| (c as char).to_digit(16);
     let mut out = String::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        let escaped = if b[i] == b'%' && i + 2 < b.len() {
-            hex(b[i + 1])
-                .zip(hex(b[i + 2]))
-                .map(|(high, low)| ((high << 4) | low) as u8)
-        } else {
-            None
-        };
-        match escaped {
+        match escaped_byte(b, i) {
             Some(byte) => {
                 push_encoded(&mut out, byte, false);
                 i += 3;
@@ -126,7 +201,8 @@ fn canonical_query_component(raw: &str) -> String {
 /// value in canonical form ([`canonical_query_component`]), sorted by name then value, joined with
 /// `&`; `""` for none. The server recomputes it from what it receives the same way, so a reserved
 /// byte sent raw (`:`, `/`), a lowercase escape or an escaped unreserved byte signs as AWS checks
-/// it. (The inbound check keeps its own builder: a client's query is already canonical there.)
+/// it. The inbound check recomputes a client's canonical query with it too
+/// ([`crate::inbound::canonical_query_string`]).
 pub fn canonical_query(query: Option<&str>) -> String {
     let Some(q) = query.filter(|q| !q.is_empty()) else {
         return String::new();
@@ -176,7 +252,7 @@ pub fn format_amz_time(epoch_secs: u64) -> (String, String) {
     )
 }
 
-/// Canonicalize a (non-quoted) signed-header value per AWS SigV4: trim leading/trailing ASCII
+/// Canonicalize a signed-header value (quoted or not) per AWS SigV4: trim leading/trailing ASCII
 /// spaces (0x20) and collapse each run of sequential ASCII spaces to a single space. Only the ASCII
 /// space character is treated as whitespace — tabs, NBSP, newlines and every other Unicode
 /// whitespace codepoint pass through verbatim, because AWS does the same.
@@ -231,7 +307,7 @@ pub fn sign_v4(
     )
 }
 
-/// [`sign_v4`] under an already-derived [`signing_key`] for the request's date, region and service:
+/// `sign_v4` (the tests' composition) under an already-derived [`signing_key`] for the request's date, region and service:
 /// the signature hex + the `SignedHeaders` string for a request. `headers` is the
 /// full set of headers to sign (names case-insensitive); they are lowercased + sorted internally.
 /// `canonical_uri` must already be URI-encoded; `canonical_querystring` sorted + encoded (or

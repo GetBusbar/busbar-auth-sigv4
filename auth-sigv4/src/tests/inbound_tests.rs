@@ -9,7 +9,7 @@
 //! never admits, a pending or unavailable read).
 
 use super::*;
-use crate::sigv4::format_amz_time;
+use crate::sigv4::{format_amz_time, uri_encode_path};
 
 // ====================== ingress_sigv4_tests.rs, ported ======================
 
@@ -261,9 +261,12 @@ fn test_verify_inbound_sigv4_roundtrip_accepts() {
     assert_eq!(verify_inbound_sigv4(&parsed, &req, secret, now), Ok(()));
 }
 
+/// V1 (audit round 1 @57f7ef5, lead-confirmed; owner delegation 2026-10-30: the AWS SigV4 spec,
+/// not 1.5.5's first-value read): a signed header that appears more than once is canonicalized as
+/// ALL its values, each trimmed and space-collapsed, joined with `,` in the order received (the
+/// outbound signer's rule). Was: the FIRST value only, so a second value rode unsigned.
 #[test]
-fn test_verify_inbound_sigv4_duplicate_signed_header_is_read_at_its_first_value() {
-    // busbar 1.5.5 (crates/busbar/src/sigv4.rs:446-460) takes the FIRST matching header's value.
+fn test_verify_inbound_sigv4_repeated_signed_header_is_its_values_comma_joined() {
     let secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
     let amzdate = "20150830T123600Z";
     let now = parse_amz_date(amzdate).unwrap();
@@ -303,8 +306,8 @@ fn test_verify_inbound_sigv4_duplicate_signed_header_is_read_at_its_first_value(
                 "host".to_string(),
                 "example-service.amazonaws.com".to_string(),
             ),
-            ("x-amz-meta-tag".to_string(), "a".to_string()),
-            ("x-amz-meta-tag".to_string(), "b".to_string()),
+            ("x-amz-meta-tag".to_string(), " a ".to_string()),
+            ("x-amz-meta-tag".to_string(), "b  c".to_string()),
             (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
             (X_AMZ_DATE.to_string(), amzdate.to_string()),
         ];
@@ -318,10 +321,80 @@ fn test_verify_inbound_sigv4_duplicate_signed_header_is_read_at_its_first_value(
         };
         verify_inbound_sigv4(&parsed, &req, secret, now)
     };
-    // The client signed the first value: verifies.
-    assert_eq!(check("a"), Ok(()));
-    // The client signed the comma-joined `a,b`: rejected.
-    assert_eq!(check("a,b"), Err(VerifyError::SignatureMismatch));
+    // The client signed every value, each canonicalized, comma-joined in order: verifies.
+    assert_eq!(check("a,b c"), Ok(()));
+    // The client signed the first value only: the second would ride unsigned, so it rejects.
+    assert_eq!(check("a"), Err(VerifyError::SignatureMismatch));
+}
+
+/// The AWS SigV4 test suite (aws-sig-v4-test-suite, credential AKIDEXAMPLE /
+/// wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY, us-east-1, service `service`, 20150830T123600Z):
+/// `get-header-key-duplicate`, `get-header-value-order` and `get-header-value-trim` verify at
+/// AWS's published signatures over the request lines exactly as the suite sends them.
+#[test]
+fn the_aws_suite_repeated_and_trimmed_header_vectors_verify() {
+    const SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+    let amzdate = "20150830T123600Z";
+    let now = parse_amz_date(amzdate).unwrap();
+    let empty = sha256_hex(b"");
+    let cases = [
+        (
+            "get-header-key-duplicate",
+            "c9d5ea9f3f72853aea855b47ea873832890dbdd183b4468f858259531a5138ea",
+            vec![
+                ("My-Header1", "value2"),
+                ("My-Header1", "value2"),
+                ("My-Header1", "value1"),
+            ],
+        ),
+        (
+            "get-header-value-order",
+            "08c7e5a9acfcfeb3ab6b2185e75ce8b1deb5e634ec47601a50643f830c755c01",
+            vec![
+                ("My-Header1", "value4"),
+                ("My-Header1", "value1"),
+                ("My-Header1", "value3"),
+                ("My-Header1", "value2"),
+            ],
+        ),
+        (
+            "get-header-value-trim",
+            "acc3ed3afb60bb290fc8d2dd0098b9911fcaa05412b367055dee359757a9c736",
+            vec![("My-Header1", " value1"), ("My-Header2", " \"a   b   c\"")],
+        ),
+    ];
+    for (name, signature, mine) in cases {
+        let mut wire: Vec<(String, String)> =
+            vec![("Host".to_string(), "example.amazonaws.com".to_string())];
+        wire.extend(
+            mine.iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string())),
+        );
+        wire.push(("X-Amz-Date".to_string(), amzdate.to_string()));
+        let mut names: Vec<String> = mine.iter().map(|(k, _)| k.to_lowercase()).collect();
+        names.dedup();
+        let parsed = ParsedAuthHeader {
+            access_key_id: "AKIDEXAMPLE".to_string(),
+            datestamp: "20150830".to_string(),
+            region: "us-east-1".to_string(),
+            service: "service".to_string(),
+            signed_headers: format!("host;{};x-amz-date", names.join(";")),
+            signature: signature.to_string(),
+        };
+        let req = InboundRequest {
+            method: "GET",
+            canonical_uri: "/",
+            canonical_querystring: "",
+            headers: &wire,
+            payload_hash: &empty,
+            amzdate,
+        };
+        assert_eq!(
+            verify_inbound_sigv4(&parsed, &req, SECRET, now),
+            Ok(()),
+            "{name}"
+        );
+    }
 }
 
 #[test]
@@ -699,18 +772,102 @@ fn test_verify_inbound_sigv4_missing_date_rejected() {
 
 // ====================== the kernel's wiring tests, over `judge` ======================
 
+/// V2 (audit round 1 @57f7ef5, lead-confirmed; the AWS SigV4 spec, owner delegation 2026-10-30):
+/// the inbound canonical query is each name and value DECODED and re-encoded over the unreserved
+/// set with uppercase hex, sorted by encoded name then value (the outbound signer's
+/// `canonical_query`, shared). Was: the raw wire query sorted, never re-encoded, so a client whose
+/// wire query carried a reserved byte raw (`/`, `:`) or a lowercase escape never verified.
 #[test]
-fn test_canonical_query_string_sorts_but_does_not_reencode() {
+fn test_canonical_query_string_decodes_and_reencodes_each_name_and_value() {
     assert_eq!(canonical_query_string(None), "");
     assert_eq!(canonical_query_string(Some("")), "");
     assert_eq!(canonical_query_string(Some("b=2&a=1")), "a=1&b=2");
     assert_eq!(canonical_query_string(Some("flag")), "flag=");
     assert_eq!(canonical_query_string(Some("p=a%2Fb")), "p=a%2Fb");
-    assert_eq!(canonical_query_string(Some("p=a/b")), "p=a/b");
+    assert_eq!(canonical_query_string(Some("p=a%2fb")), "p=a%2Fb");
+    assert_eq!(canonical_query_string(Some("p=a/b:c")), "p=a%2Fb%3Ac");
+    assert_eq!(canonical_query_string(Some("k=%7E")), "k=~");
     // Empty pairs drop; equal keys sort by value.
     assert_eq!(
         canonical_query_string(Some("&b=2&&a=2&a=1&")),
         "a=1&a=2&b=2"
+    );
+    // The AWS SigV4 test suite's canonical query strings.
+    assert_eq!(
+        canonical_query_string(Some("Param2=value2&Param1=value1")),
+        "Param1=value1&Param2=value2",
+        "get-vanilla-query-order-key-case"
+    );
+    assert_eq!(
+        canonical_query_string(Some("Param1=value2&Param1=Value1")),
+        "Param1=Value1&Param1=value2",
+        "get-vanilla-query-order-key"
+    );
+    assert_eq!(
+        canonical_query_string(Some("\u{1234}=bar")),
+        "%E1%88%B4=bar",
+        "get-vanilla-utf8-query"
+    );
+}
+
+/// The AWS SigV4 test suite's `get-vanilla-query-order-key-case` (`GET
+/// /?Param2=value2&Param1=value1`) and `get-vanilla-utf8-query` (`GET /?ሴ=bar`) verify at AWS's
+/// published signatures over the query exactly as the suite sends it.
+#[test]
+fn the_aws_suite_query_vectors_verify_over_the_received_query() {
+    const SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+    let amzdate = "20150830T123600Z";
+    let now = parse_amz_date(amzdate).unwrap();
+    let empty = sha256_hex(b"");
+    let wire = vec![
+        ("Host".to_string(), "example.amazonaws.com".to_string()),
+        ("X-Amz-Date".to_string(), amzdate.to_string()),
+    ];
+    for (name, query, signature) in [
+        (
+            "get-vanilla-query-order-key-case",
+            "Param2=value2&Param1=value1",
+            "b97d918cfa904a5beff61c982a1b6f458b799221646efd99d3219ec94cdf2500",
+        ),
+        (
+            "get-vanilla-utf8-query",
+            "\u{1234}=bar",
+            "2cdec8eed098649ff3a119c94853b13c643bcf08f8b0a1d91e12c9027818dd04",
+        ),
+    ] {
+        let parsed = ParsedAuthHeader {
+            access_key_id: "AKIDEXAMPLE".to_string(),
+            datestamp: "20150830".to_string(),
+            region: "us-east-1".to_string(),
+            service: "service".to_string(),
+            signed_headers: "host;x-amz-date".to_string(),
+            signature: signature.to_string(),
+        };
+        let canonical = canonical_query_string(Some(query));
+        let req = InboundRequest {
+            method: "GET",
+            canonical_uri: "/",
+            canonical_querystring: &canonical,
+            headers: &wire,
+            payload_hash: &empty,
+            amzdate,
+        };
+        assert_eq!(
+            verify_inbound_sigv4(&parsed, &req, SECRET, now),
+            Ok(()),
+            "{name}"
+        );
+    }
+}
+
+/// A client signs the canonical query (`p=a%2Fb%3Ac`) and its wire carries the reserved bytes raw
+/// (`p=a/b:c`), as a URL library may send them: the judge recomputes the canonical form and admits.
+#[test]
+fn a_query_sent_with_reserved_bytes_raw_is_judged_over_its_canonical_form() {
+    let s = sign(SECRET, AKID, Some("p=a%2Fb%3Ac"), b"", None);
+    assert_eq!(
+        run(&s.lines, Some("p=a/b:c"), Some(b""), &mut Fake::default()),
+        Judgement::Identity(AKID.to_string())
     );
 }
 
@@ -825,6 +982,7 @@ fn run(
             .collect(),
         body,
         now: NOW,
+        authority: b"",
     };
     judge(&req, fake)
 }
@@ -855,7 +1013,7 @@ fn a_signed_body_that_matches_its_hash_is_admitted() {
 }
 
 #[test]
-fn an_escaped_query_param_is_signed_as_sent_never_reencoded() {
+fn an_already_canonical_escaped_query_param_is_judged_unchanged() {
     let s = sign(SECRET, AKID, Some("p=a%2Fb"), b"", None);
     assert_eq!(
         run(&s.lines, Some("p=a%2Fb"), Some(b""), &mut Fake::default()),
@@ -946,6 +1104,7 @@ fn an_expired_signature_rejects() {
             .collect(),
         body: Some(b""),
         now: NOW + CLOCK_SKEW_SECS + 60,
+        authority: b"",
     };
     assert_eq!(judge(&req, &mut Fake::default()), Judgement::Reject);
 }
@@ -1065,6 +1224,7 @@ fn a_tampered_path_query_or_method_rejects() {
             .collect(),
         body: Some(b""),
         now: NOW,
+        authority: b"",
     };
     assert_eq!(judge(&req, &mut Fake::default()), Judgement::Reject);
     let req = Request {
@@ -1086,7 +1246,7 @@ fn a_pending_read_pends_and_an_unavailable_one_rejects() {
         run(&s.lines, None, Some(b""), &mut fake),
         Judgement::Pending
     );
-    fake.answer = Some(|| Read::Unavailable);
+    fake.answer = Some(|| Read::Unavailable("declined"));
     assert_eq!(run(&s.lines, None, Some(b""), &mut fake), Judgement::Reject);
 }
 
@@ -1155,6 +1315,7 @@ fn a_path_with_a_reserved_byte_is_judged_over_its_double_encoded_canonical_uri()
             .collect(),
         body: Some(b""),
         now: NOW,
+        authority: b"",
     };
     assert_eq!(
         judge(&req(wire), &mut Fake::default()),
@@ -1167,8 +1328,84 @@ fn a_path_with_a_reserved_byte_is_judged_over_its_double_encoded_canonical_uri()
     );
 }
 
+/// A request judged against a client signature over `canonical_uri`, scoped to `service`, its
+/// wire path `wire`.
+fn judge_path(service: &str, canonical_uri: &str, wire: &str) -> Judgement {
+    let (amzdate, datestamp) = format_amz_time(NOW);
+    let payload_hash = sha256_hex(b"");
+    let headers = vec![
+        ("host".to_string(), "bucket.s3.amazonaws.com".to_string()),
+        (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
+        (X_AMZ_DATE.to_string(), amzdate.clone()),
+    ];
+    let (sig, signed_headers) = crate::sigv4::sign_v4(
+        SECRET,
+        "us-east-1",
+        service,
+        "GET",
+        canonical_uri,
+        "",
+        &headers,
+        &payload_hash,
+        &amzdate,
+        &datestamp,
+    );
+    let auth = format!(
+        "AWS4-HMAC-SHA256 Credential={AKID}/{datestamp}/us-east-1/{service}/aws4_request, \
+         SignedHeaders={signed_headers}, Signature={sig}"
+    );
+    let mut lines = vec![("authorization".to_string(), auth)];
+    lines.extend(headers);
+    let req = Request {
+        method: b"GET",
+        path: wire.as_bytes(),
+        query: None,
+        lines: lines
+            .iter()
+            .map(|(n, v)| (n.as_bytes(), v.as_bytes()))
+            .collect(),
+        body: Some(b""),
+        now: NOW,
+        authority: b"",
+    };
+    judge(&req, &mut Fake::default())
+}
+
+/// V3 (audit round 1 @57f7ef5, lead-confirmed; the AWS SigV4 spec): a request whose credential
+/// scope names `s3` is judged over its path encoded ONCE, never normalized; every other service
+/// over the path encoded twice. Was: double-encoded for S3 too, so an S3 client's signature over a
+/// key with a reserved byte never verified.
 #[test]
-fn a_duplicate_signed_header_is_read_at_its_first_value() {
+fn an_s3_scoped_request_is_judged_over_its_path_encoded_once() {
+    let admitted = Judgement::Identity(AKID.to_string());
+    assert_eq!(
+        judge_path("s3", "/bucket/key%3A1", "/bucket/key%3A1"),
+        admitted
+    );
+    assert_eq!(
+        judge_path("s3", "/bucket/a%2Fb%20c", "/bucket/a%2fb%20c"),
+        admitted,
+        "a lowercase escape on the wire is the same key"
+    );
+    assert_eq!(
+        judge_path("s3", "/bucket//a/./b", "/bucket//a/./b"),
+        admitted,
+        "S3 keeps `//` and `.` segments"
+    );
+    assert_eq!(
+        judge_path("s3", "/bucket/key%253A1", "/bucket/key%3A1"),
+        Judgement::Reject,
+        "S3 is never double-encoded"
+    );
+    assert_eq!(
+        judge_path("svc", "/bucket/key%253A1", "/bucket/key%3A1"),
+        admitted,
+        "every other service is double-encoded"
+    );
+}
+
+#[test]
+fn a_repeated_signed_header_is_judged_over_all_its_values() {
     let (amzdate, datestamp) = format_amz_time(NOW);
     let payload_hash = sha256_hex(b"");
     let lines_for = |signed_value: &str| {
@@ -1203,14 +1440,15 @@ fn a_duplicate_signed_header_is_read_at_its_first_value() {
             (X_AMZ_DATE.to_string(), amzdate.clone()),
         ]
     };
-    // The client signed the first value (1.5.5 reads a repeated header at its first value).
-    assert_eq!(
-        run(&lines_for("a"), None, Some(b""), &mut Fake::default()),
-        Judgement::Identity(AKID.to_string())
-    );
-    // The client signed the comma-joined `a,b`: rejected.
+    // V1 (audit round 1, the AWS SigV4 spec, owner delegation 2026-10-30; was 1.5.5's first-value
+    // read): the client signed every value, comma-joined in order: admitted.
     assert_eq!(
         run(&lines_for("a,b"), None, Some(b""), &mut Fake::default()),
+        Judgement::Identity(AKID.to_string())
+    );
+    // The client signed the first value only: the second rode unsigned, so it rejects.
+    assert_eq!(
+        run(&lines_for("a"), None, Some(b""), &mut Fake::default()),
         Judgement::Reject
     );
 }
@@ -1368,7 +1606,7 @@ fn a_requests_debug_names_its_lines_but_prints_no_value() {
     let req = Request {
         method: b"POST",
         path: PATH.as_bytes(),
-        query: Some(b"a=1"),
+        query: Some(b"X-Amz-Credential=AKID&X-Amz-Signature=QUERYSECRET"),
         lines: vec![
             (
                 &b"authorization"[..],
@@ -1378,13 +1616,100 @@ fn a_requests_debug_names_its_lines_but_prints_no_value() {
         ],
         body: Some(b"BODYSECRET"),
         now: NOW,
+        authority: b"",
     };
     let printed = format!("{req:?}");
-    for secret in ["SECRETTOK", "SIGSECRET", "BODYSECRET"] {
+    for secret in ["SECRETTOK", "SIGSECRET", "BODYSECRET", "QUERYSECRET"] {
         assert!(!printed.contains(secret), "{secret} leaked: {printed}");
     }
     assert!(printed.contains("x-amz-security-token"), "{printed}");
     assert!(printed.contains("POST"), "{printed}");
+}
+
+/// The info lines `judge` logs over `lines` at `now`, and its judgement.
+fn logged_judging(lines: &[(String, String)], now: u64) -> (Judgement, String) {
+    let req = Request {
+        method: b"POST",
+        path: PATH.as_bytes(),
+        query: None,
+        lines: lines
+            .iter()
+            .map(|(n, v)| (n.as_bytes(), v.as_bytes()))
+            .collect(),
+        body: Some(b""),
+        now,
+        authority: b"",
+    };
+    let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
+    let judged =
+        tracing::subscriber::with_default(cap.clone(), || judge(&req, &mut Fake::default()));
+    (judged, cap.messages().join("\n"))
+}
+
+/// `lines` with the value of every line named `name` replaced by `value`.
+fn with_line(lines: &[(String, String)], name: &str, value: &str) -> Vec<(String, String)> {
+    lines
+        .iter()
+        .map(|(n, v)| {
+            if n == name {
+                (n.clone(), value.to_string())
+            } else {
+                (n.clone(), v.clone())
+            }
+        })
+        .collect()
+}
+
+/// V5 (audit round 1 @57f7ef5, lead-confirmed; S5): every verification reject is logged at info
+/// with ONE reason word for its cause, never a generic one; the client still gets the one opaque
+/// 401. A bad signature and an unknown AccessKeyId (verified against the dummy) share `signature`.
+#[test]
+fn each_verification_reject_is_logged_with_its_own_reason_word() {
+    let s = sign(SECRET, AKID, None, b"", None);
+    let (tomorrow, _) = format_amz_time(NOW + 86_400);
+    let auth = s.lines[0].1.clone();
+    let cases = [
+        ("expired", s.lines.clone(), NOW + CLOCK_SKEW_SECS + 60),
+        (
+            "missing-date",
+            with_line(&s.lines, X_AMZ_DATE, "not-a-date"),
+            NOW,
+        ),
+        (
+            "malformed",
+            with_line(&s.lines, X_AMZ_DATE, &tomorrow),
+            NOW + 86_400,
+        ),
+        (
+            "signed-headers",
+            with_line(
+                &s.lines,
+                "authorization",
+                &auth.replace("SignedHeaders=host;", "SignedHeaders="),
+            ),
+            NOW,
+        ),
+        (
+            "signature",
+            sign("not-the-secret", AKID, None, b"", None).lines,
+            NOW,
+        ),
+        (
+            "signature",
+            sign(SECRET, "BBAKNOBODY0000000000", None, b"", None).lines,
+            NOW,
+        ),
+    ];
+    for (word, lines, now) in cases {
+        let (judged, logged) = logged_judging(&lines, now);
+        assert_eq!(judged, Judgement::Reject, "{word}");
+        assert_eq!(logged.lines().count(), 1, "logged once: {logged}");
+        assert!(
+            logged.contains(&format!("reason={word} "))
+                || logged.ends_with(&format!("reason={word}")),
+            "{word}: {logged}"
+        );
+    }
 }
 
 /// A rejected SigV4 request is logged (module `sigv4`, its reason), never with the signature or
@@ -1400,10 +1725,7 @@ fn a_bad_signature_reject_is_logged_without_the_signature() {
     assert_eq!(judged, Judgement::Reject);
     let logged = cap.messages().join("\n");
     assert!(logged.contains("module=sigv4"), "{logged:?}");
-    assert!(
-        logged.contains("signature mismatch or credential not live"),
-        "{logged:?}"
-    );
+    assert!(logged.contains("reason=signature"), "{logged:?}");
     assert!(
         !logged.contains(&signature),
         "the signature leaked: {logged:?}"
@@ -1426,4 +1748,72 @@ fn a_parsed_authorization_debug_withholds_the_signature() {
         printed.contains("AKID") && printed.contains("host;x-amz-date"),
         "{printed}"
     );
+}
+
+/// V7 (audit round 1 @57f7ef5, lead-confirmed): the AccessKeyId is the client's own text. The log
+/// carries it escaped (a tab or a quote cannot forge a field) and capped at 128 characters (AWS key
+/// ids are 16 to 128), never verbatim and uncapped.
+#[test]
+fn a_logged_access_key_id_is_escaped_and_capped() {
+    let akid = format!("AKID\t\"x\"{}", "A".repeat(300));
+    let s = sign(SECRET, &akid, None, b"", None);
+    let (judged, logged) = logged_judging(&s.lines, NOW);
+    assert_eq!(judged, Judgement::Reject);
+    assert!(logged.contains("access_key_id="), "{logged}");
+    assert!(!logged.contains('\t'), "a raw tab: {logged}");
+    assert!(logged.contains("AKID\\t\\\"x\\\""), "escaped: {logged}");
+    assert!(!logged.contains(&"A".repeat(129)), "capped: {logged}");
+    assert!(
+        logged.contains(&"A".repeat(100)),
+        "the head is kept: {logged}"
+    );
+}
+
+/// L1 (audit round 1 @57f7ef5, lead-confirmed; the AWS SigV4 spec): a request scoped to any
+/// service but S3 is judged over its path NORMALIZED before it is encoded (the AWS SigV4 test
+/// suite's normalize-path cases); S3's path is never normalized.
+#[test]
+fn a_non_s3_request_is_judged_over_its_normalized_path() {
+    let admitted = Judgement::Identity(AKID.to_string());
+    for (wire, canonical) in [
+        ("//example//", "/example/"),
+        ("/example/..", "/"),
+        ("/example1/example2/../..", "/"),
+        ("/./", "/"),
+        ("/./example", "/example"),
+        ("/a/b/../c%3A", "/a/c%253A"),
+    ] {
+        assert_eq!(judge_path("svc", canonical, wire), admitted, "{wire}");
+    }
+    assert_eq!(
+        judge_path("s3", "/example/", "//example//"),
+        Judgement::Reject,
+        "S3 is never normalized"
+    );
+}
+
+/// L8 (audit round 1 @57f7ef5, lead-confirmed): a stored secret that is not UTF-8 is an operator
+/// data fault, not a client's: the reject (still the one opaque 401, verified against the dummy in
+/// equal time) is logged once at WARN naming it, never silently.
+#[test]
+fn a_stored_secret_that_is_not_utf8_rejects_with_one_warn() {
+    let s = sign(DUMMY_SECRET, AKID, None, b"", None);
+    let mut fake = Fake {
+        raw: Some(vec![0xff, 0xfe]),
+        ..Fake::default()
+    };
+    let all = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
+    let judged = tracing::subscriber::with_default(all.clone(), || {
+        run(&s.lines, None, Some(b""), &mut fake)
+    });
+    assert_eq!(judged, Judgement::Reject);
+    let logged = all.messages();
+    assert_eq!(logged.len(), 1, "logged once: {logged:?}");
+    assert!(
+        logged[0].contains("module=sigv4") && logged[0].contains("reason=secret-not-utf8"),
+        "{logged:?}"
+    );
+    let warns = busbar_test_kit::warn_capture::WarnCapture::default();
+    tracing::subscriber::with_default(warns.clone(), || run(&s.lines, None, Some(b""), &mut fake));
+    assert_eq!(warns.messages().len(), 1, "at WARN: {:?}", warns.messages());
 }

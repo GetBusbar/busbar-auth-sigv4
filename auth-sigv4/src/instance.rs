@@ -10,7 +10,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use crate::signing::{Field, SigV4Binding, SignFacts, SigningCredential};
@@ -40,12 +40,11 @@ pub(crate) enum Who<'a> {
 pub(crate) enum Signed {
     /// The fields to set, in order (never none: a request with nothing to sign with FAILS).
     Fields(Vec<Field>),
-    /// Nothing can be signed, for this reason: no credential of the binding's own (own mode), no
-    /// caller credential or a malformed one (passthrough), or an `Authorization` value no header
-    /// may carry. The request FAILS; it is never sent unsigned.
+    /// Nothing can be signed, for this reason: a request fact the host lent that cannot be signed,
+    /// no credential of the binding's own (own mode), no caller credential or a malformed one
+    /// (passthrough), or an `Authorization` value no header may carry. The request FAILS; it is
+    /// never sent unsigned.
     Failed(Cow<'static, str>),
-    /// The host lent no method, host or path: nothing can be signed.
-    NoFacts,
 }
 
 /// One plugin instance: the `VerifyPlugin` and `OutboundPlugin` the door kit serves (`crate`).
@@ -54,6 +53,8 @@ pub struct SigV4 {
     next_handle: AtomicU64,
     /// Each handle: its generation and its binding (kept until retire).
     handles: RwLock<HashMap<u64, Handle>>,
+    /// Whether `tick` has warned that the wall clock cannot be read (once per instance).
+    clock_warned: AtomicBool,
 }
 
 impl SigV4 {
@@ -63,22 +64,29 @@ impl SigV4 {
             generation: AtomicU64::new(generation),
             next_handle: AtomicU64::new(1),
             handles: RwLock::new(HashMap::new()),
+            clock_warned: AtomicBool::new(false),
         }
     }
 
-    /// `refresh`: the generation later handles belong to.
+    /// `refresh`: the generation later handles belong to, stored under the handles write lock
+    /// (the lock rule, see [`Self::keep`]).
     pub(crate) fn set_generation(&self, generation: u64) {
+        let _handles = self.handles.write().unwrap_or_else(PoisonError::into_inner);
         self.generation.store(generation, Ordering::Release);
     }
 
     /// Keep `binding` under a new handle of the current generation.
+    ///
+    /// THE LOCK RULE: the generation is read, and the handle stored, under the handles WRITE lock;
+    /// [`Self::set_generation`] (`refresh`) stores the new generation under that same lock and
+    /// [`Self::retire`] sweeps under it. The three are therefore ordered: a handle can never be
+    /// stored under a generation a retire has already swept (it would then never drop).
     pub(crate) fn keep(&self, binding: SigV4Binding) -> u64 {
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
+        let binding = Arc::new(binding);
+        let mut handles = self.handles.write().unwrap_or_else(PoisonError::into_inner);
         let generation = self.generation.load(Ordering::Acquire);
-        self.handles
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(handle, (generation, Arc::new(binding)));
+        handles.insert(handle, (generation, binding));
         handle
     }
 
@@ -91,19 +99,26 @@ impl SigV4 {
             .map(|(_, b)| b.clone())
     }
 
-    /// `fields`' body: sign one request on `handle` for `who` over `facts` (`None`: the host lent
-    /// no method, host or path). `None` when this generation holds no such handle (REFUSED).
+    /// `fields`' body: sign one request on `handle` for `who` over `facts` (`Err`: why the facts
+    /// the host lent cannot be signed). `None` when this generation holds no such handle (REFUSED).
     pub(crate) fn sign(
         &self,
         handle: u64,
         who: Who<'_>,
-        facts: Option<SignFacts<'_>>,
+        facts: Result<SignFacts<'_>, &'static str>,
     ) -> Option<Signed> {
         let signed = self.sign_unlogged(handle, who, facts);
         let reason = match &signed {
             Some(Signed::Failed(reason)) => reason.as_ref(),
-            Some(Signed::NoFacts) => "the host lent no method, host or path",
-            _ => return signed,
+            Some(Signed::Fields(_)) => return signed,
+            None => {
+                tracing::info!(
+                    module = "sigv4",
+                    handle,
+                    "sigv4 request not signed: REFUSED, no such handle (never opened, or retired)"
+                );
+                return signed;
+            }
         };
         tracing::info!(module = "sigv4", reason, "sigv4 request not signed: FAILED");
         signed
@@ -114,11 +129,12 @@ impl SigV4 {
         &self,
         handle: u64,
         who: Who<'_>,
-        facts: Option<SignFacts<'_>>,
+        facts: Result<SignFacts<'_>, &'static str>,
     ) -> Option<Signed> {
         let binding = self.binding(handle)?;
-        let Some(facts) = facts else {
-            return Some(Signed::NoFacts);
+        let facts = match facts {
+            Ok(facts) => facts,
+            Err(reason) => return Some(Signed::Failed(Cow::Borrowed(reason))),
         };
         let fresh;
         let signer = match who {
@@ -166,6 +182,23 @@ impl SigV4 {
     /// would end it for good (`TickOut::next_tick_ns`), leaving a later binding's day keys to be
     /// derived on the request path (a daily signing key is derived ahead of time).
     pub(crate) fn tick(&self, now_ns: u64) -> u64 {
+        self.tick_at(now_ns, crate::now_epoch())
+    }
+
+    /// [`Self::tick`] at wall-clock `now` (seconds since the epoch; `None`: the clock cannot be
+    /// read, so no key is derived, never 1970's, and the first such tick warns).
+    pub(crate) fn tick_at(&self, now_ns: u64, now: Option<u64>) -> u64 {
+        let next = now_ns.saturating_add(PREDERIVE_TICK_NS);
+        let Some(now) = now else {
+            if !self.clock_warned.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    module = "sigv4",
+                    "the wall clock reads before the epoch: the SigV4 day keys are not \
+                     pre-derived (each request derives its own)"
+                );
+            }
+            return next;
+        };
         let bindings: Vec<Arc<SigV4Binding>> = self
             .handles
             .read()
@@ -173,11 +206,10 @@ impl SigV4 {
             .values()
             .map(|(_, b)| b.clone())
             .collect();
-        let now = crate::now_epoch();
         for b in &bindings {
             b.prederive(now);
         }
-        now_ns.saturating_add(PREDERIVE_TICK_NS)
+        next
     }
 }
 

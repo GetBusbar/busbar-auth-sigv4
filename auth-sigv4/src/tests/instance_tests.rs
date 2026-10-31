@@ -28,7 +28,6 @@ fn who(mode: u32, caller: &str) -> Who<'_> {
 fn answered(signed: Option<Signed>) -> (Outcome, bool, String) {
     match signed {
         None => (Outcome::Refused, false, String::new()),
-        Some(Signed::NoFacts) => (Outcome::Failed, false, String::new()),
         Some(Signed::Failed(reason)) => (Outcome::Failed, false, reason.into_owned()),
         Some(Signed::Fields(fields)) => (Outcome::Ready, !fields.is_empty(), String::new()),
     }
@@ -51,8 +50,9 @@ fn fields_said(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, boo
         content_type: None,
         payload_hash: &hash,
         timestamp_epoch: 1_440_938_160,
+        amz_headers: &[],
     };
-    answered(s.sign(handle, who(mode, caller), Some(facts)))
+    answered(s.sign(handle, who(mode, caller), Ok(facts)))
 }
 
 /// The `authorization` field among `signed`'s fields.
@@ -179,7 +179,7 @@ fn an_unsendable_or_malformed_credential_is_refused_at_open_or_fails_its_request
         answered(s.sign(
             quiet,
             Who::Caller(Some(&[0xff_u8][..])),
-            Some(SignFacts {
+            Ok(SignFacts {
                 method: "POST",
                 host: "h",
                 path: "/p",
@@ -187,6 +187,7 @@ fn an_unsendable_or_malformed_credential_is_refused_at_open_or_fails_its_request
                 content_type: None,
                 payload_hash: &sha256_hex(b""),
                 timestamp_epoch: 1,
+                amz_headers: &[],
             })
         )),
         (
@@ -242,11 +243,12 @@ fn authorization(s: &SigV4, handle: u64, walked: &Walked) -> String {
         host: "runtime.signer.example",
         path: walked.path,
         query: walked.query.filter(|q| !q.is_empty()),
-        content_type: crate::sent_content_type(headers),
+        content_type: crate::sent_content_type(headers).expect("text"),
         payload_hash: &hash,
         timestamp_epoch: 1_440_938_160,
+        amz_headers: &[],
     };
-    authorization_of(s.sign(handle, Who::Own, Some(facts)))
+    authorization_of(s.sign(handle, Who::Own, Ok(facts)))
 }
 
 /// The `authorization` AWS computes for a request with this canonical method, URI and query over
@@ -329,6 +331,65 @@ fn fields_signs_the_double_encoded_canonical_uri() {
             &[("content-type", "application/json")],
         )
     );
+}
+
+/// V3 (audit round 1 @57f7ef5, lead-confirmed; the AWS SigV4 spec): S3 is the one service whose
+/// canonical URI is the path encoded ONCE (and never normalized). A binding scoped to `s3` signs
+/// the key's `:` (sent `%3A`) as `%3A`, a space sent raw as `%20`, and keeps `//` and `.` segments;
+/// was: double-encoded as every other service, so every S3 key with a reserved byte failed at AWS.
+#[test]
+fn an_s3_binding_signs_the_path_encoded_once() {
+    let s = SigV4::new(1);
+    let settings = r#"{"service":"s3","region":"us-east-1"}"#;
+    let binding = style::open_binding(
+        style::SIGV4,
+        Some(b"AKIDEXAMPLE:SECRET"),
+        Some(settings.as_bytes()),
+    )
+    .expect("the binding opens");
+    let handle = s.keep(binding);
+    let hash = sha256_hex(b"");
+    for (wire, canonical) in [
+        ("/bucket/key%3A1", "/bucket/key%3A1"),
+        ("/bucket/a%2fb c", "/bucket/a%2Fb%20c"),
+        ("/bucket//a/./b", "/bucket//a/./b"),
+    ] {
+        let facts = SignFacts {
+            method: "GET",
+            host: "bucket.s3.amazonaws.com",
+            path: wire,
+            query: None,
+            content_type: None,
+            payload_hash: &hash,
+            timestamp_epoch: 1_440_938_160,
+            amz_headers: &[],
+        };
+        let headers = [
+            ("host".to_string(), "bucket.s3.amazonaws.com".to_string()),
+            ("x-amz-content-sha256".to_string(), hash.clone()),
+            ("x-amz-date".to_string(), "20150830T123600Z".to_string()),
+        ];
+        let (signature, signed_headers) = crate::sigv4::sign_v4(
+            "SECRET",
+            "us-east-1",
+            "s3",
+            "GET",
+            canonical,
+            "",
+            &headers,
+            &hash,
+            "20150830T123600Z",
+            "20150830",
+        );
+        assert_eq!(
+            authorization_of(s.sign(handle, Who::Own, Ok(facts))),
+            format!(
+                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, \
+                 SignedHeaders={signed_headers}, Signature={signature}"
+            ),
+            "{wire}"
+        );
+    }
 }
 
 /// RED (the signed set is the sent set): the content type a signature covers is the one the
@@ -437,11 +498,12 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
             host: "runtime.signer.example",
             path: "/model/m/converse",
             query: None,
-            content_type: crate::sent_content_type(head.iter().copied()),
+            content_type: crate::sent_content_type(head.iter().copied()).expect("text"),
             payload_hash: &hash,
             timestamp_epoch: 1_440_938_160,
+            amz_headers: &[],
         };
-        authorization_of(s.sign(handle, Who::Own, Some(facts)))
+        authorization_of(s.sign(handle, Who::Own, Ok(facts)))
     };
     let plane_only = [line("content-type", "application/json")];
     let completed = [
@@ -472,33 +534,37 @@ fn outbound_ready_is_false_for_an_unknown_or_retired_handle() {
 }
 
 /// `tick` pre-derives each live binding's key for today, so the first request of the day finds it
-/// held rather than deriving it on the request path.
+/// held rather than deriving it on the request path; within the hour before UTC midnight, tomorrow's
+/// too. The wall-clock time is passed explicitly (N, audit round 1: never the test's own clock, so
+/// the answer does not depend on when the test runs).
 #[test]
 fn tick_holds_todays_day_key_on_each_open_binding() {
+    // 2015-08-30 12:36:00 UTC, and 23:30:00 UTC the same day.
+    const NOON: u64 = 1_440_938_160;
+    const LATE: u64 = 1_440_977_400;
     let s = SigV4::new(1);
     let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
     let binding = s.binding(handle).expect("the binding is held");
     assert!(binding.held().is_empty(), "nothing derived before a tick");
-    s.tick(1_000);
-    let (_, today) = crate::sigv4::format_amz_time(crate::now_epoch());
-    // Tomorrow's key rides too when the clock is within the hour of midnight.
-    assert!(
-        binding.held().contains(&today),
-        "tick held {:?}, not {today}",
-        binding.held()
-    );
+    s.tick_at(1_000, Some(NOON));
+    assert_eq!(binding.held(), ["20150830"]);
+    s.tick_at(2_000, Some(LATE));
+    assert_eq!(binding.held(), ["20150830", "20150831"]);
 }
 
-/// A service that opens with a multi-byte character binds and is kept (the unsendable-token line
-/// that capitalised its first character is gone: such a credential is refused at open).
+/// A service that opens with a multi-byte character is no AWS service name: since L2 (audit round
+/// 1, the scope settings checked at open) it is refused by name, never bound (and nothing panics on
+/// its multi-byte first character).
 #[test]
-fn a_multibyte_service_binds_and_is_kept() {
-    let s = SigV4::new(1);
+fn a_multibyte_service_is_refused_at_open() {
     let settings = r#"{"service":"ébedrock","region":"us-east-1"}"#;
-    let binding =
+    let refused =
         crate::style::open_binding("sigv4", Some(b"AKID:SECRET"), Some(settings.as_bytes()))
-            .expect("the binding opens");
-    assert!(s.binding(s.keep(binding)).is_some(), "the handle is kept");
+            .expect_err("the binding is refused");
+    assert_eq!(
+        refused.iter().map(style::Refusal::line).collect::<Vec<_>>(),
+        ["settings.service: not an AWS service name (1 to 64 of a-z, 0-9 and -)"]
+    );
 }
 
 /// THE LENGTH LINE IS NEVER SIGNED (busbar Q128 transport-http, ruling (D)). The one line a framing
@@ -539,11 +605,12 @@ fn no_length_line_is_ever_signed() {
             host: "runtime.signer.example",
             path: "/model/m/converse",
             query: None,
-            content_type: crate::sent_content_type(head.iter().copied()),
+            content_type: crate::sent_content_type(head.iter().copied()).expect("text"),
             payload_hash: &hash,
             timestamp_epoch: 1_440_938_160,
+            amz_headers: &[],
         };
-        let authorization = authorization_of(s.sign(handle, Who::Own, Some(facts)));
+        let authorization = authorization_of(s.sign(handle, Who::Own, Ok(facts)));
         let signed = authorization
             .split("SignedHeaders=")
             .nth(1)
@@ -592,4 +659,145 @@ fn a_failed_fields_call_is_logged_once_without_the_credential() {
             "{secret} leaked: {logged:?}"
         );
     }
+}
+
+/// L1 (audit round 1 @57f7ef5, lead-confirmed; the AWS SigV4 spec): every service but S3 signs
+/// its path NORMALIZED (`//` collapsed, `.` and `..` segments resolved) before it is encoded. The
+/// cases are the AWS SigV4 test suite's normalize-path set (`get-slashes`, `get-relative`,
+/// `get-relative-relative`, `get-slash-dot-slash`, `get-slash-pointless-dot`, `get-slash`).
+#[test]
+fn a_non_s3_binding_signs_the_normalized_path() {
+    let s = SigV4::new(1);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    for (wire, canonical) in [
+        ("//example//", "/example/"),
+        ("/example/..", "/"),
+        ("/example1/example2/../..", "/"),
+        ("/./", "/"),
+        ("/./example", "/example"),
+        ("//", "/"),
+        ("/a/b/../c%3A", "/a/c%253A"),
+        ("/a/b/.", "/a/b/"),
+    ] {
+        let walked = Walked {
+            method: "GET",
+            path: wire,
+            query: None,
+            content_type: None,
+        };
+        assert_eq!(
+            authorization(&s, handle, &walked),
+            expected("GET", canonical, "", &[]),
+            "{wire}"
+        );
+    }
+}
+
+/// L6 (audit round 1 @57f7ef5, lead-confirmed): a wall clock that cannot be read (before the
+/// epoch) is no time to derive keys for: `tick` skips the pre-derivation (never 1970's keys) and
+/// warns once, not on every tick, and still answers its next tick.
+#[test]
+fn a_clock_that_cannot_be_read_skips_the_prederive_and_warns_once() {
+    let s = SigV4::new(1);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    let binding = s.binding(handle).expect("the binding is held");
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let next = tracing::subscriber::with_default(cap.clone(), || {
+        let next = s.tick_at(1_000, None);
+        s.tick_at(2_000, None);
+        next
+    });
+    assert!(next > 1_000, "the schedule goes on");
+    assert!(
+        binding.held().is_empty(),
+        "no key derived: {:?}",
+        binding.held()
+    );
+    let warned = cap.messages();
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(warned[0].contains("module=sigv4"), "{warned:?}");
+}
+
+/// L7 (audit round 1 @57f7ef5, lead-confirmed; S5): a `fields` call on a handle this generation
+/// does not hold (never opened, or retired) answers REFUSED and logs one info line naming the
+/// handle, never silently.
+#[test]
+fn a_fields_call_on_an_unknown_or_retired_handle_is_logged() {
+    let s = SigV4::new(1);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    s.retire(1);
+    let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
+    tracing::subscriber::with_default(cap.clone(), || {
+        assert_eq!(fields(&s, 999, MODE_OWN, ""), (Outcome::Refused, false));
+        assert_eq!(fields(&s, handle, MODE_OWN, ""), (Outcome::Refused, false));
+    });
+    let logged = cap.messages();
+    assert_eq!(logged.len(), 2, "{logged:?}");
+    assert!(
+        logged[0].contains("module=sigv4") && logged[0].contains("handle=999"),
+        "{logged:?}"
+    );
+    assert!(
+        logged[1].contains(&format!("handle={handle}")),
+        "{logged:?}"
+    );
+}
+
+/// L9 (audit round 1 @57f7ef5, lead-confirmed; the lock rule, as auth-header's F6): `keep` reads
+/// the generation while holding the handles write lock, and `refresh` stores the new generation
+/// under that same lock, so a handle waiting for the lock when a refresh lands is stored under the
+/// NEW generation, never under one a retire may already have swept (it would never drop). Driven
+/// deterministically: the test holds the write lock (as `refresh` does while it stores), a `keep`
+/// queues behind it, the generation moves, and the lock is released.
+#[test]
+fn a_handle_kept_while_the_generation_moves_takes_the_new_generation() {
+    let s = Arc::new(SigV4::new(1));
+    let guard = s.handles.write().unwrap();
+    let (started, wait) = std::sync::mpsc::channel();
+    let kept = {
+        let s = s.clone();
+        std::thread::spawn(move || {
+            let binding = style::open_binding(
+                style::SIGV4,
+                Some(b"AKIDEXAMPLE:SECRET"),
+                Some(SETTINGS.as_bytes()),
+            )
+            .unwrap();
+            started.send(()).unwrap();
+            s.keep(binding)
+        })
+    };
+    wait.recv().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    s.generation.store(2, Ordering::Release);
+    drop(guard);
+    let handle = kept.join().unwrap();
+    s.retire(1);
+    assert!(
+        s.binding(handle).is_some(),
+        "kept after the move: generation 2's"
+    );
+    s.retire(2);
+    assert!(s.binding(handle).is_none());
+}
+
+/// L9, the API sequence: open, refresh, retire(old), open again; the new handles carry the new
+/// generation and nothing is left under the retired one.
+#[test]
+fn keep_refresh_retire_are_ordered() {
+    use busbar_contract::abi::sdk::auth_outbound::OutboundPlugin;
+    let s = SigV4::new(1);
+    let a = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    s.refresh(b"{}", &[], 2).unwrap();
+    let b = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    s.retire(1);
+    let held: Vec<u64> = s
+        .handles
+        .read()
+        .unwrap()
+        .values()
+        .map(|(g, _)| *g)
+        .collect();
+    assert_eq!(held, [2]);
+    assert!(s.binding(a).is_none() && s.binding(b).is_some());
 }

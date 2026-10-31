@@ -470,6 +470,19 @@ fn a_signed_request_over_the_live_credential_identifies_its_access_key_id() {
     );
 }
 
+/// V4 (audit round 1 @57f7ef5, lead-confirmed): an HTTP/2 request carries its host as
+/// `:authority`, never a `host` line. The signed `host` is then the request's authority as the
+/// host lends it: admitted. Was: a signed `host` with no line rejected every h2 SigV4 client.
+#[test]
+fn a_signed_host_with_no_host_line_is_the_requests_authority() {
+    let o = open();
+    let mut req = signed(SECRET, AKID, b"");
+    req.lines.retain(|(n, _)| n != "host");
+    let a = verify(&o, &req, TICKET, 0, 256);
+    assert_eq!(a.out.verdict, VERDICT_IDENTITY);
+    assert_eq!(a.subject.as_deref(), Some(AKID));
+}
+
 /// The door lends the received method and raw query to the check: a GET signed over a query is
 /// admitted, and the same request received with another query or as a POST is not.
 #[test]

@@ -6,7 +6,8 @@
 //! modes, is [`crate::signing::SigV4Binding::sign`] through the door kit's `fields`
 //! (`crate::instance::SigV4::sign`).
 //!
-//! The settings schema: `{service, region}`. A `content_type` key is
+//! The settings schema: `{service, region}`, each trimmed and 1 to 64 of `[a-z0-9-]` (refused at
+//! open otherwise, `settings.<key>: <reason>`). A `content_type` key is
 //! read past (older configs carry it): the content type a signature covers is the one the request
 //! is sent with (the style declares `STYLE_NEEDS_HEADERS` and signs the sent value), never a
 //! setting. `region_unread` is the kernel's warning for a region it defaulted at seal, logged with
@@ -42,6 +43,13 @@ pub enum Refusal {
     Credential(String),
     /// The settings are: the kernel prefixes `provider '<p>' `.
     Settings(String),
+    /// One setting is: `settings.<key>: <reason>`, the contract's instance-relative form (S2).
+    Setting {
+        /// The setting's key.
+        key: &'static str,
+        /// What is wrong with it.
+        reason: &'static str,
+    },
 }
 
 impl Refusal {
@@ -50,8 +58,43 @@ impl Refusal {
         match self {
             Refusal::Credential(t) => format!("credential: {t}"),
             Refusal::Settings(t) => format!("settings: {t}"),
+            Refusal::Setting { key, reason } => format!("settings.{key}: {reason}"),
         }
     }
+}
+
+/// Why a `service` setting is refused.
+const SERVICE_SHAPE: &str = "not an AWS service name (1 to 64 of a-z, 0-9 and -)";
+/// Why a `region` setting is refused.
+const REGION_SHAPE: &str = "not an AWS region (1 to 64 of a-z, 0-9 and -)";
+
+/// Whether `s` (already trimmed) has the shape of an AWS service name or region: 1 to 64 of
+/// `[a-z0-9-]`. Both ride verbatim in the credential scope the signature and the `Authorization`
+/// value carry.
+fn scope_shaped(s: &str) -> bool {
+    (1..=64).contains(&s.len())
+        && s
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// The scope settings, `service` and `region`, wherever they are present in `m`: each a string,
+/// trimmed, of [`scope_shaped`]'s shape. One refusal per setting that is not (a non-string one
+/// keeps its `expected a string` refusal). The plugin-level settings (`validate`, `open`, `refresh`) and the
+/// bind check them alike.
+pub(crate) fn scope_findings(m: &Map<String, Value>) -> Vec<Refusal> {
+    let mut findings = Vec::new();
+    for (key, shape) in [("service", SERVICE_SHAPE), ("region", REGION_SHAPE)] {
+        match text(m, key) {
+            Err(r) => findings.push(r),
+            Ok(Some(v)) if !scope_shaped(v.trim()) => findings.push(Refusal::Setting {
+                key,
+                reason: shape,
+            }),
+            Ok(_) => {}
+        }
+    }
+    findings
 }
 
 /// The settings object (`{}` when absent).
@@ -111,12 +154,21 @@ fn warn_ignored(m: &Map<String, Value>) {
     }
 }
 
-fn sigv4_params(m: &Map<String, Value>) -> Result<SigV4Params, Refusal> {
+fn sigv4_params(m: &Map<String, Value>) -> Result<SigV4Params, Vec<Refusal>> {
     let missing = |k: &str| Refusal::Settings(format!("uses auth: sigv4 but has no `{k}`"));
+    let one = |r: Refusal| vec![r];
+    let service = text(m, "service").map_err(one)?;
+    let region = text(m, "region").map_err(one)?;
+    let service = service.ok_or_else(|| one(missing("service")))?;
+    let region = region.ok_or_else(|| one(missing("region")))?;
+    let shaped = scope_findings(m);
+    if !shaped.is_empty() {
+        return Err(shaped);
+    }
     Ok(SigV4Params {
-        service: text(m, "service")?.ok_or_else(|| missing("service"))?,
-        region: text(m, "region")?.ok_or_else(|| missing("region"))?,
-        region_unread: text(m, "region_unread")?,
+        service: service.trim().to_string(),
+        region: region.trim().to_string(),
+        region_unread: text(m, "region_unread").map_err(one)?,
     })
 }
 
@@ -164,7 +216,7 @@ fn bind(
         return Err(unknown);
     }
     warn_ignored(&m);
-    let params = sigv4_params(&m).map_err(|r| vec![r])?;
+    let params = sigv4_params(&m)?;
     let Some(credential) = credential else {
         // A passthrough-only binding (the contract's `None`): it signs only a caller's credential.
         return Ok(SigV4Binding::new(params, None));

@@ -546,16 +546,19 @@ fn tick_holds_todays_day_key_on_each_open_binding() {
     );
 }
 
-/// A service that opens with a multi-byte character binds and is kept (the unsendable-token line
-/// that capitalised its first character is gone: such a credential is refused at open).
+/// A service that opens with a multi-byte character is no AWS service name: since L2 (audit round
+/// 1, the scope settings checked at open) it is refused by name, never bound (and nothing panics on
+/// its multi-byte first character).
 #[test]
-fn a_multibyte_service_binds_and_is_kept() {
-    let s = SigV4::new(1);
+fn a_multibyte_service_is_refused_at_open() {
     let settings = r#"{"service":"ébedrock","region":"us-east-1"}"#;
-    let binding =
+    let refused =
         crate::style::open_binding("sigv4", Some(b"AKID:SECRET"), Some(settings.as_bytes()))
-            .expect("the binding opens");
-    assert!(s.binding(s.keep(binding)).is_some(), "the handle is kept");
+            .expect_err("the binding is refused");
+    assert_eq!(
+        refused.iter().map(style::Refusal::line).collect::<Vec<_>>(),
+        ["settings.service: not an AWS service name (1 to 64 of a-z, 0-9 and -)"]
+    );
 }
 
 /// THE LENGTH LINE IS NEVER SIGNED (busbar Q128 transport-http, ruling (D)). The one line a framing

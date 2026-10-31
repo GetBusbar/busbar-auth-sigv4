@@ -72,6 +72,8 @@ type Handle = (u32, u32, u32);
 #[derive(Default)]
 struct FakeHost {
     pend_first: bool,
+    /// Once set, the live credential answers not live (revoked between two calls).
+    revoked: std::sync::atomic::AtomicBool,
     pended: Mutex<HashSet<Handle>>,
     reads: Mutex<Vec<(Handle, String, String)>>,
 }
@@ -117,6 +119,7 @@ extern "C" fn fake_records_secret(
     }
     let long = long_secret();
     let (secret, live) = match id.as_str() {
+        AKID if host.revoked.load(std::sync::atomic::Ordering::SeqCst) => (SECRET, SECRET_NOT_LIVE),
         AKID => (SECRET, SECRET_LIVE),
         DEAD_AKID => (DEAD_SECRET, SECRET_NOT_LIVE),
         LONG_AKID => (long.as_str(), SECRET_LIVE),
@@ -652,8 +655,16 @@ fn a_short_identity_buffer_answers_short_and_the_recall_judges_again() {
         (AKID.len() + "authorization".len()) as u64,
         "the subject and the named line"
     );
+    // The host revokes the credential between the short answer and its re-call.
+    o.host
+        .revoked
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let again = verify(&o, &req, TICKET, 0, 256);
-    assert_eq!(again.subject.as_deref(), Some(AKID));
+    assert_eq!(
+        (again.out.verdict, again.subject.as_deref()),
+        (VERDICT_REJECT, None),
+        "revoked in between: the re-call judges again and rejects"
+    );
     let handles: Vec<Handle> = reads(&o).iter().map(|r| r.0).collect();
     assert_eq!(
         handles,

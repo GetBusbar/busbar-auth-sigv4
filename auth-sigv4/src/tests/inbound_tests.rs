@@ -261,9 +261,12 @@ fn test_verify_inbound_sigv4_roundtrip_accepts() {
     assert_eq!(verify_inbound_sigv4(&parsed, &req, secret, now), Ok(()));
 }
 
+/// V1 (audit round 1 @57f7ef5, lead-confirmed; owner delegation 2026-10-30: the AWS SigV4 spec,
+/// not 1.5.5's first-value read): a signed header that appears more than once is canonicalized as
+/// ALL its values, each trimmed and space-collapsed, joined with `,` in the order received (the
+/// outbound signer's rule). Was: the FIRST value only, so a second value rode unsigned.
 #[test]
-fn test_verify_inbound_sigv4_duplicate_signed_header_is_read_at_its_first_value() {
-    // busbar 1.5.5 (crates/busbar/src/sigv4.rs:446-460) takes the FIRST matching header's value.
+fn test_verify_inbound_sigv4_repeated_signed_header_is_its_values_comma_joined() {
     let secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
     let amzdate = "20150830T123600Z";
     let now = parse_amz_date(amzdate).unwrap();
@@ -303,8 +306,8 @@ fn test_verify_inbound_sigv4_duplicate_signed_header_is_read_at_its_first_value(
                 "host".to_string(),
                 "example-service.amazonaws.com".to_string(),
             ),
-            ("x-amz-meta-tag".to_string(), "a".to_string()),
-            ("x-amz-meta-tag".to_string(), "b".to_string()),
+            ("x-amz-meta-tag".to_string(), " a ".to_string()),
+            ("x-amz-meta-tag".to_string(), "b  c".to_string()),
             (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
             (X_AMZ_DATE.to_string(), amzdate.to_string()),
         ];
@@ -318,10 +321,69 @@ fn test_verify_inbound_sigv4_duplicate_signed_header_is_read_at_its_first_value(
         };
         verify_inbound_sigv4(&parsed, &req, secret, now)
     };
-    // The client signed the first value: verifies.
-    assert_eq!(check("a"), Ok(()));
-    // The client signed the comma-joined `a,b`: rejected.
-    assert_eq!(check("a,b"), Err(VerifyError::SignatureMismatch));
+    // The client signed every value, each canonicalized, comma-joined in order: verifies.
+    assert_eq!(check("a,b c"), Ok(()));
+    // The client signed the first value only: the second would ride unsigned, so it rejects.
+    assert_eq!(check("a"), Err(VerifyError::SignatureMismatch));
+}
+
+/// The AWS SigV4 test suite (aws-sig-v4-test-suite, credential AKIDEXAMPLE /
+/// wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY, us-east-1, service `service`, 20150830T123600Z):
+/// `get-header-key-duplicate`, `get-header-value-order` and `get-header-value-trim` verify at
+/// AWS's published signatures over the request lines exactly as the suite sends them.
+#[test]
+fn the_aws_suite_repeated_and_trimmed_header_vectors_verify() {
+    const SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+    let amzdate = "20150830T123600Z";
+    let now = parse_amz_date(amzdate).unwrap();
+    let empty = sha256_hex(b"");
+    let cases: [(&str, &str, Vec<(&str, &str)>); 3] = [
+        (
+            "get-header-key-duplicate",
+            "c9d5ea9f3f72853aea855b47ea873832890dbdd183b4468f858259531a5138ea",
+            vec![("My-Header1", "value2"), ("My-Header1", "value2"), ("My-Header1", "value1")],
+        ),
+        (
+            "get-header-value-order",
+            "08c7e5a9acfcfeb3ab6b2185e75ce8b1deb5e634ec47601a50643f830c755c01",
+            vec![
+                ("My-Header1", "value4"),
+                ("My-Header1", "value1"),
+                ("My-Header1", "value3"),
+                ("My-Header1", "value2"),
+            ],
+        ),
+        (
+            "get-header-value-trim",
+            "acc3ed3afb60bb290fc8d2dd0098b9911fcaa05412b367055dee359757a9c736",
+            vec![("My-Header1", " value1"), ("My-Header2", " \"a   b   c\"")],
+        ),
+    ];
+    for (name, signature, mine) in cases {
+        let mut wire: Vec<(String, String)> =
+            vec![("Host".to_string(), "example.amazonaws.com".to_string())];
+        wire.extend(mine.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())));
+        wire.push(("X-Amz-Date".to_string(), amzdate.to_string()));
+        let mut names: Vec<String> = mine.iter().map(|(k, _)| k.to_lowercase()).collect();
+        names.dedup();
+        let parsed = ParsedAuthHeader {
+            access_key_id: "AKIDEXAMPLE".to_string(),
+            datestamp: "20150830".to_string(),
+            region: "us-east-1".to_string(),
+            service: "service".to_string(),
+            signed_headers: format!("host;{};x-amz-date", names.join(";")),
+            signature: signature.to_string(),
+        };
+        let req = InboundRequest {
+            method: "GET",
+            canonical_uri: "/",
+            canonical_querystring: "",
+            headers: &wire,
+            payload_hash: &empty,
+            amzdate,
+        };
+        assert_eq!(verify_inbound_sigv4(&parsed, &req, SECRET, now), Ok(()), "{name}");
+    }
 }
 
 #[test]
@@ -1168,7 +1230,7 @@ fn a_path_with_a_reserved_byte_is_judged_over_its_double_encoded_canonical_uri()
 }
 
 #[test]
-fn a_duplicate_signed_header_is_read_at_its_first_value() {
+fn a_repeated_signed_header_is_judged_over_all_its_values() {
     let (amzdate, datestamp) = format_amz_time(NOW);
     let payload_hash = sha256_hex(b"");
     let lines_for = |signed_value: &str| {
@@ -1203,14 +1265,15 @@ fn a_duplicate_signed_header_is_read_at_its_first_value() {
             (X_AMZ_DATE.to_string(), amzdate.clone()),
         ]
     };
-    // The client signed the first value (1.5.5 reads a repeated header at its first value).
-    assert_eq!(
-        run(&lines_for("a"), None, Some(b""), &mut Fake::default()),
-        Judgement::Identity(AKID.to_string())
-    );
-    // The client signed the comma-joined `a,b`: rejected.
+    // V1 (audit round 1, the AWS SigV4 spec, owner delegation 2026-10-30; was 1.5.5's first-value
+    // read): the client signed every value, comma-joined in order: admitted.
     assert_eq!(
         run(&lines_for("a,b"), None, Some(b""), &mut Fake::default()),
+        Judgement::Identity(AKID.to_string())
+    );
+    // The client signed the first value only: the second rode unsigned, so it rejects.
+    assert_eq!(
+        run(&lines_for("a"), None, Some(b""), &mut Fake::default()),
         Judgement::Reject
     );
 }

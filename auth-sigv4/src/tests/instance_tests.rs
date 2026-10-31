@@ -28,7 +28,6 @@ fn who(mode: u32, caller: &str) -> Who<'_> {
 fn answered(signed: Option<Signed>) -> (Outcome, bool, String) {
     match signed {
         None => (Outcome::Refused, false, String::new()),
-        Some(Signed::NoFacts) => (Outcome::Failed, false, String::new()),
         Some(Signed::Failed(reason)) => (Outcome::Failed, false, reason.into_owned()),
         Some(Signed::Fields(fields)) => (Outcome::Ready, !fields.is_empty(), String::new()),
     }
@@ -52,7 +51,7 @@ fn fields_said(s: &SigV4, handle: u64, mode: u32, caller: &str) -> (Outcome, boo
         payload_hash: &hash,
         timestamp_epoch: 1_440_938_160,
     };
-    answered(s.sign(handle, who(mode, caller), Some(facts)))
+    answered(s.sign(handle, who(mode, caller), Ok(facts)))
 }
 
 /// The `authorization` field among `signed`'s fields.
@@ -179,7 +178,7 @@ fn an_unsendable_or_malformed_credential_is_refused_at_open_or_fails_its_request
         answered(s.sign(
             quiet,
             Who::Caller(Some(&[0xff_u8][..])),
-            Some(SignFacts {
+            Ok(SignFacts {
                 method: "POST",
                 host: "h",
                 path: "/p",
@@ -246,7 +245,7 @@ fn authorization(s: &SigV4, handle: u64, walked: &Walked) -> String {
         payload_hash: &hash,
         timestamp_epoch: 1_440_938_160,
     };
-    authorization_of(s.sign(handle, Who::Own, Some(facts)))
+    authorization_of(s.sign(handle, Who::Own, Ok(facts)))
 }
 
 /// The `authorization` AWS computes for a request with this canonical method, URI and query over
@@ -379,7 +378,7 @@ fn an_s3_binding_signs_the_path_encoded_once() {
             "20150830",
         );
         assert_eq!(
-            authorization_of(s.sign(handle, Who::Own, Some(facts))),
+            authorization_of(s.sign(handle, Who::Own, Ok(facts))),
             format!(
                 "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, \
                  SignedHeaders={signed_headers}, Signature={signature}"
@@ -499,7 +498,7 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
             payload_hash: &hash,
             timestamp_epoch: 1_440_938_160,
         };
-        authorization_of(s.sign(handle, Who::Own, Some(facts)))
+        authorization_of(s.sign(handle, Who::Own, Ok(facts)))
     };
     let plane_only = [line("content-type", "application/json")];
     let completed = [
@@ -601,7 +600,7 @@ fn no_length_line_is_ever_signed() {
             payload_hash: &hash,
             timestamp_epoch: 1_440_938_160,
         };
-        let authorization = authorization_of(s.sign(handle, Who::Own, Some(facts)));
+        let authorization = authorization_of(s.sign(handle, Who::Own, Ok(facts)));
         let signed = authorization
             .split("SignedHeaders=")
             .nth(1)

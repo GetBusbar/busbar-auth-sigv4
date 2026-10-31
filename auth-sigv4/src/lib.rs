@@ -77,7 +77,6 @@ mod signing;
 mod sigv4;
 mod style;
 
-use std::borrow::Cow;
 use std::mem::size_of;
 use std::task::Poll;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -239,6 +238,9 @@ const NO_STYLE: &str = "settings: no outbound auth style was named";
 
 /// The reason `fields` answers FAILED with when the host lent no method, host or path to sign.
 const NO_FACTS: &str = "sigv4 cannot sign: the host lent no method, host or path";
+/// The reason `fields` answers FAILED with when the query the host lent is not UTF-8: it cannot be
+/// signed as it is sent.
+const QUERY_NOT_UTF8: &str = "sigv4 cannot sign: the query is not UTF-8";
 
 /// A request fact as text: UTF-8 and not empty; `None` when the host lent none.
 fn fact(b: &[u8]) -> Option<&str> {
@@ -259,13 +261,18 @@ pub(crate) fn sent_content_type<'a>(
 
 /// The SigV4 facts of a `fields` call: the walked request's method, host, path, query and sent
 /// content type (SigV4 signs the real method and query of the
-/// walked request); `None` when the host sent no method, host or path.
-fn sign_facts<'a>(view: &FieldsView<'a>, hash: &'a str) -> Option<SignFacts<'a>> {
-    Some(SignFacts {
-        method: fact(view.method())?,
-        host: fact(view.authority())?,
-        path: fact(view.path())?,
-        query: view.query().and_then(fact),
+/// walked request); `Err` names why the facts the host lent cannot be signed.
+fn sign_facts<'a>(view: &FieldsView<'a>, hash: &'a str) -> Result<SignFacts<'a>, &'static str> {
+    let query = match view.query().map(std::str::from_utf8) {
+        None => None,
+        Some(Ok(q)) => Some(q).filter(|q| !q.is_empty()),
+        Some(Err(_)) => return Err(QUERY_NOT_UTF8),
+    };
+    Ok(SignFacts {
+        method: fact(view.method()).ok_or(NO_FACTS)?,
+        host: fact(view.authority()).ok_or(NO_FACTS)?,
+        path: fact(view.path()).ok_or(NO_FACTS)?,
+        query,
         content_type: sent_content_type(view.headers()),
         payload_hash: hash,
         timestamp_epoch: view.timestamp(),
@@ -321,7 +328,6 @@ impl OutboundPlugin for SigV4 {
         Poll::Ready(
             match self.sign(view.handle(), who, sign_facts(view, &hash)) {
                 None => FieldsAnswer::Refused,
-                Some(Signed::NoFacts) => FieldsAnswer::Failed(Cow::Borrowed(NO_FACTS)),
                 Some(Signed::Failed(reason)) => FieldsAnswer::Failed(reason),
                 Some(Signed::Fields(fields)) => {
                     for (name, value) in &fields {

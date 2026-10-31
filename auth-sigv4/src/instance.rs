@@ -40,12 +40,11 @@ pub(crate) enum Who<'a> {
 pub(crate) enum Signed {
     /// The fields to set, in order (never none: a request with nothing to sign with FAILS).
     Fields(Vec<Field>),
-    /// Nothing can be signed, for this reason: no credential of the binding's own (own mode), no
-    /// caller credential or a malformed one (passthrough), or an `Authorization` value no header
-    /// may carry. The request FAILS; it is never sent unsigned.
+    /// Nothing can be signed, for this reason: a request fact the host lent that cannot be signed,
+    /// no credential of the binding's own (own mode), no caller credential or a malformed one
+    /// (passthrough), or an `Authorization` value no header may carry. The request FAILS; it is
+    /// never sent unsigned.
     Failed(Cow<'static, str>),
-    /// The host lent no method, host or path: nothing can be signed.
-    NoFacts,
 }
 
 /// One plugin instance: the `VerifyPlugin` and `OutboundPlugin` the door kit serves (`crate`).
@@ -91,18 +90,17 @@ impl SigV4 {
             .map(|(_, b)| b.clone())
     }
 
-    /// `fields`' body: sign one request on `handle` for `who` over `facts` (`None`: the host lent
-    /// no method, host or path). `None` when this generation holds no such handle (REFUSED).
+    /// `fields`' body: sign one request on `handle` for `who` over `facts` (`Err`: why the facts
+    /// the host lent cannot be signed). `None` when this generation holds no such handle (REFUSED).
     pub(crate) fn sign(
         &self,
         handle: u64,
         who: Who<'_>,
-        facts: Option<SignFacts<'_>>,
+        facts: Result<SignFacts<'_>, &'static str>,
     ) -> Option<Signed> {
         let signed = self.sign_unlogged(handle, who, facts);
         let reason = match &signed {
             Some(Signed::Failed(reason)) => reason.as_ref(),
-            Some(Signed::NoFacts) => "the host lent no method, host or path",
             _ => return signed,
         };
         tracing::info!(module = "sigv4", reason, "sigv4 request not signed: FAILED");
@@ -114,11 +112,12 @@ impl SigV4 {
         &self,
         handle: u64,
         who: Who<'_>,
-        facts: Option<SignFacts<'_>>,
+        facts: Result<SignFacts<'_>, &'static str>,
     ) -> Option<Signed> {
         let binding = self.binding(handle)?;
-        let Some(facts) = facts else {
-            return Some(Signed::NoFacts);
+        let facts = match facts {
+            Ok(facts) => facts,
+            Err(reason) => return Some(Signed::Failed(Cow::Borrowed(reason))),
         };
         let fresh;
         let signer = match who {

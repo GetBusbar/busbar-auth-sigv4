@@ -436,23 +436,32 @@ pub fn verify_inbound_sigv4<H: AsRef<str>>(
         }
         prev = Some(name);
     }
-    // Each signed name takes the FIRST matching request header's value (case-insensitive); a signed name the request does not
-    // carry cannot be reconstructed. `sign_v4` canonicalizes the value.
-    // Every signed name is already lowercase ASCII-wise (checked above), so it is its own lowered
-    // name.
-    let mut selected: Vec<(&str, &str)> = Vec::with_capacity(signed.len());
+    // Each signed name takes EVERY matching request header's value (case-insensitive), each
+    // canonicalized (trimmed, space runs collapsed), joined with `,` in the order received: the
+    // AWS SigV4 rule, and the outbound signer's (`crate::sigv4::sign_v4_with_key`). A signed name
+    // the request does not carry cannot be reconstructed. Every signed name is already lowercase
+    // ASCII-wise (checked above), so it is its own lowered name.
+    let mut selected: Vec<(&str, Cow<'_, str>)> = Vec::with_capacity(signed.len());
     for name in &signed {
-        let Some((_, value)) = req
+        let mut values = req
             .headers
             .iter()
-            .find(|(k, _)| k.as_ref().eq_ignore_ascii_case(name))
-        else {
+            .filter(|(k, _)| k.as_ref().eq_ignore_ascii_case(name))
+            .map(|(_, v)| canonicalize_header_value(v.as_ref()));
+        let Some(first) = values.next() else {
             return Err(VerifyError::SignedHeadersMismatch);
         };
-        selected.push((*name, value.as_ref()));
+        let mut value = first;
+        for more in values {
+            let joined = value.to_mut();
+            joined.push(',');
+            joined.push_str(&more);
+        }
+        selected.push((*name, value));
     }
 
     // (4) Recompute — same canonicalization, byte-for-byte.
+    let selected: Vec<(&str, &str)> = selected.iter().map(|(k, v)| (*k, v.as_ref())).collect();
     let (computed_sig, computed_signed_headers) = sign_v4(
         secret,
         &parsed.region,

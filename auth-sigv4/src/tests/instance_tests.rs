@@ -691,3 +691,24 @@ fn a_non_s3_binding_signs_the_normalized_path() {
         );
     }
 }
+
+/// L6 (audit round 1 @57f7ef5, lead-confirmed): a wall clock that cannot be read (before the
+/// epoch) is no time to derive keys for: `tick` skips the pre-derivation (never 1970's keys) and
+/// warns once, not on every tick, and still answers its next tick.
+#[test]
+fn a_clock_that_cannot_be_read_skips_the_prederive_and_warns_once() {
+    let s = SigV4::new(1);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    let binding = s.binding(handle).expect("the binding is held");
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let next = tracing::subscriber::with_default(cap.clone(), || {
+        let next = s.tick_at(1_000, None);
+        s.tick_at(2_000, None);
+        next
+    });
+    assert!(next > 1_000, "the schedule goes on");
+    assert!(binding.held().is_empty(), "no key derived: {:?}", binding.held());
+    let warned = cap.messages();
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(warned[0].contains("module=sigv4"), "{warned:?}");
+}

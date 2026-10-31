@@ -817,6 +817,16 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
     // not revoked, the credential neither revoked nor expired). Any one failing rejects alike.
     if std::hint::black_box(u8::from(verified) & u8::from(live) & u8::from(utf8)) == 1 {
         Judgement::Identity(parsed.access_key_id)
+    } else if !utf8 {
+        // The host holds a secret that is not text: an operator data fault, not the client's, so
+        // WARN (the full check ran over the dummy in equal time, and it still rejects).
+        tracing::warn!(
+            module = "sigv4",
+            reason = "secret-not-utf8",
+            access_key_id = %shown_id(&parsed.access_key_id),
+            "sigv4 inbound request rejected: the stored secret is not UTF-8"
+        );
+        Judgement::Reject
     } else {
         // One reason word per cause; the client still gets the one opaque 401. The secret-dependent
         // causes share `signature`, so the log does not tell an unknown AccessKeyId (verified

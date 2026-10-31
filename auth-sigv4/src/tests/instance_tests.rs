@@ -650,3 +650,35 @@ fn a_failed_fields_call_is_logged_once_without_the_credential() {
         );
     }
 }
+
+/// L1 (audit round 1 @57f7ef5, lead-confirmed; the AWS SigV4 spec): every service but S3 signs
+/// its path NORMALIZED (`//` collapsed, `.` and `..` segments resolved) before it is encoded. The
+/// cases are the AWS SigV4 test suite's normalize-path set (`get-slashes`, `get-relative`,
+/// `get-relative-relative`, `get-slash-dot-slash`, `get-slash-pointless-dot`, `get-slash`).
+#[test]
+fn a_non_s3_binding_signs_the_normalized_path() {
+    let s = SigV4::new(1);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    for (wire, canonical) in [
+        ("//example//", "/example/"),
+        ("/example/..", "/"),
+        ("/example1/example2/../..", "/"),
+        ("/./", "/"),
+        ("/./example", "/example"),
+        ("//", "/"),
+        ("/a/b/../c%3A", "/a/c%253A"),
+        ("/a/b/.", "/a/b/"),
+    ] {
+        let walked = Walked {
+            method: "GET",
+            path: wire,
+            query: None,
+            content_type: None,
+        };
+        assert_eq!(
+            authorization(&s, handle, &walked),
+            expected("GET", canonical, "", &[]),
+            "{wire}"
+        );
+    }
+}

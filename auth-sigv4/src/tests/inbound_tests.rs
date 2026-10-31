@@ -1752,3 +1752,26 @@ fn a_logged_access_key_id_is_escaped_and_capped() {
     assert!(!logged.contains(&"A".repeat(129)), "capped: {logged}");
     assert!(logged.contains(&"A".repeat(100)), "the head is kept: {logged}");
 }
+
+/// L1 (audit round 1 @57f7ef5, lead-confirmed; the AWS SigV4 spec): a request scoped to any
+/// service but S3 is judged over its path NORMALIZED before it is encoded (the AWS SigV4 test
+/// suite's normalize-path cases); S3's path is never normalized.
+#[test]
+fn a_non_s3_request_is_judged_over_its_normalized_path() {
+    let admitted = Judgement::Identity(AKID.to_string());
+    for (wire, canonical) in [
+        ("//example//", "/example/"),
+        ("/example/..", "/"),
+        ("/example1/example2/../..", "/"),
+        ("/./", "/"),
+        ("/./example", "/example"),
+        ("/a/b/../c%3A", "/a/c%253A"),
+    ] {
+        assert_eq!(judge_path("svc", canonical, wire), admitted, "{wire}");
+    }
+    assert_eq!(
+        judge_path("s3", "/example/", "//example//"),
+        Judgement::Reject,
+        "S3 is never normalized"
+    );
+}

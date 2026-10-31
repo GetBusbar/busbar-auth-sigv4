@@ -760,10 +760,10 @@ const EXPECTED_FOLDS: &[&str] = &[
     "diag 4294967295 sev=0 busbar_auth_sigv4::style: sigv4 outbound binding refused module=\"sigv4\" reason=\"settings: outbound auth style `kerberos` is not served by this plugin\"",
     "diag 4294967295 sev=0 busbar_auth_sigv4::instance: sigv4 request not signed: FAILED module=\"sigv4\" reason=\"sigv4: this binding holds no credential of its own (passthrough-only); the request is not sent unsigned\"",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"unparseable SigV4 authorization\"",
-    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature mismatch or credential not live\" access_key_id=BBAKNOBODY",
-    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature mismatch or credential not live\" access_key_id=BBAKNOBODY",
-    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature mismatch or credential not live\" access_key_id=BBAKCONFORMANCE000002",
-    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature mismatch or credential not live\" access_key_id=BBAKCONFORMANCE000001",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature\" access_key_id=BBAKNOBODY",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature\" access_key_id=BBAKNOBODY",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature\" access_key_id=BBAKCONFORMANCE000002",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature\" access_key_id=BBAKCONFORMANCE000001",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"payload hash mismatch\"",
 ];
 
@@ -1076,7 +1076,7 @@ fn a_fields_call_with_nothing_to_sign_with_fails_with_its_reason() {
 }
 
 /// V5 (audit round 1 @57f7ef5, lead-confirmed; S5): a host that cannot answer `records.secret`
-/// (here: it serves no such service) rejects with the one opaque 401, and the plugin's own log
+/// (here: the dispatcher binds no credential store, so it declines the call) rejects with the one opaque 401, and the plugin's own log
 /// names the cause and the service's error at warn, never discarded.
 #[test]
 fn an_unserved_secret_read_rejects_and_logs_the_service_error() {
@@ -1093,7 +1093,7 @@ fn an_unserved_secret_read_rejects_and_logs_the_service_error() {
     let folds = std::mem::take(&mut *folds.0.lock().unwrap());
     assert!(
         folds.iter().any(|l| l.contains("reason=\"credential-unavailable\"")
-            && l.contains("service_error=\"unserved\"")),
+            && l.contains("service_error=\"declined\"")),
         "{folds:#?}"
     );
 }

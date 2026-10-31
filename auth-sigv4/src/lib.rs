@@ -104,7 +104,7 @@ use busbar_contract::abi::sdk::conn::Host;
 use busbar_contract::abi::sdk::door::{abi_str, statement};
 use busbar_contract::abi::sdk::exchange::Op;
 use busbar_contract::abi::sdk::life::{self, Refusal};
-use busbar_contract::abi::sdk::services::CredentialSecret;
+use busbar_contract::abi::sdk::services::{CredentialSecret, ServiceError};
 
 use crate::inbound::{Judgement, Read, SecretSource};
 use crate::instance::{SigV4, Signed, Who};
@@ -377,7 +377,12 @@ impl SecretSource for &VerifyOp {
                 let live = secret.live();
                 Read::Secret { secret, live }
             }
-            Poll::Ready(Err(_)) => Read::Unavailable,
+            Poll::Ready(Err(e)) => Read::Unavailable(match e {
+                ServiceError::Unserved => "unserved",
+                ServiceError::Declined(_) => "declined",
+                ServiceError::Broken => "broken",
+                ServiceError::Short { .. } => "short",
+            }),
         }
     }
 }

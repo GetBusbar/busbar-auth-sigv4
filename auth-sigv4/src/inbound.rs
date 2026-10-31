@@ -207,6 +207,20 @@ pub enum VerifyError {
     SignatureMismatch,
 }
 
+impl VerifyError {
+    /// The one reason word the plugin's log names this cause by (never sent to the client).
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::MissingAuthorization | Self::MalformedAuthorization => "malformed",
+            Self::MissingDate => "missing-date",
+            Self::Expired => "expired",
+            Self::SignedHeadersMismatch => "signed-headers",
+            Self::SignatureMismatch => "signature",
+        }
+    }
+}
+
 /// The parsed components of an inbound SigV4 `Authorization` header. Its `Debug` withholds the
 /// signature (a log line never carries one).
 #[derive(Clone, PartialEq, Eq)]
@@ -615,7 +629,8 @@ pub enum Read<S: SecretBytes = Zeroizing<Vec<u8>>> {
     /// a ticket).
     Pending,
     /// The host serves no `records.secret`, refused or failed it, or broke its rules: fail closed.
-    Unavailable,
+    /// The word names the service's error (`unserved`, `declined`, `broken`, `short`), for the log.
+    Unavailable(&'static str),
 }
 
 /// Where the check reads a credential's secret: the host's `records.secret` on the request path, a
@@ -767,11 +782,12 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
     let (secret, live) = match source.read(CREDENTIAL_KIND, &parsed.access_key_id) {
         Read::Secret { secret, live } => (secret, live),
         Read::Pending => return Judgement::Pending,
-        Read::Unavailable => {
-            // An outage-like read failure: operator-actionable, so WARN.
+        Read::Unavailable(service_error) => {
+            // An outage-like read failure: operator-actionable, so WARN, naming the service's error.
             tracing::warn!(
                 module = "sigv4",
-                reason = "credential unavailable",
+                reason = "credential-unavailable",
+                service_error,
                 access_key_id = %parsed.access_key_id,
                 "sigv4 inbound request rejected: the host's records.secret did not answer"
             );
@@ -782,17 +798,24 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
         Ok(s) => (s, true),
         Err(_) => (DUMMY_SECRET, false),
     };
-    let verified = verify_inbound_sigv4(&parsed, &inbound, text, req.now).is_ok();
+    let checked = verify_inbound_sigv4(&parsed, &inbound, text, req.now);
+    let verified = checked.is_ok();
     // Admission: the signature verified AND the host called the credential live (its key enabled,
     // not revoked, the credential neither revoked nor expired). Any one failing rejects alike.
     if std::hint::black_box(u8::from(verified) & u8::from(live) & u8::from(utf8)) == 1 {
         Judgement::Identity(parsed.access_key_id)
     } else {
-        // One reason for every cause, as the client's one 401: the log must not tell an unknown
-        // AccessKeyId from a known one. The id is an identifier, not a secret.
+        // One reason word per cause; the client still gets the one opaque 401. The secret-dependent
+        // causes share `signature`, so the log does not tell an unknown AccessKeyId (verified
+        // against the dummy) from a bad signature or a credential that is not live. The id is an
+        // identifier, not a secret.
+        let reason = match checked {
+            Err(e) => e.word(),
+            Ok(()) => VerifyError::SignatureMismatch.word(),
+        };
         tracing::info!(
             module = "sigv4",
-            reason = "signature mismatch or credential not live",
+            reason,
             access_key_id = %parsed.access_key_id,
             "sigv4 inbound request rejected"
         );

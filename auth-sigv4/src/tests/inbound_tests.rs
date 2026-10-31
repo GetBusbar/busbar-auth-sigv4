@@ -1231,7 +1231,7 @@ fn a_pending_read_pends_and_an_unavailable_one_rejects() {
         run(&s.lines, None, Some(b""), &mut fake),
         Judgement::Pending
     );
-    fake.answer = Some(|| Read::Unavailable);
+    fake.answer = Some(|| Read::Unavailable("declined"));
     assert_eq!(run(&s.lines, None, Some(b""), &mut fake), Judgement::Reject);
 }
 
@@ -1710,7 +1710,7 @@ fn a_bad_signature_reject_is_logged_without_the_signature() {
     let logged = cap.messages().join("\n");
     assert!(logged.contains("module=sigv4"), "{logged:?}");
     assert!(
-        logged.contains("signature mismatch or credential not live"),
+        logged.contains("reason=signature"),
         "{logged:?}"
     );
     assert!(

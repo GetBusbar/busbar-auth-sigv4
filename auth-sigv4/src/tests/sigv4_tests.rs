@@ -277,7 +277,12 @@ fn the_aws_suite_requests_sign_to_the_published_signatures() {
         ("get-vanilla", "/", None, VANILLA),
         ("get-slash", "//", None, VANILLA),
         ("get-relative", "/example/..", None, VANILLA),
-        ("get-relative-relative", "/example1/example2/../..", None, VANILLA),
+        (
+            "get-relative-relative",
+            "/example1/example2/../..",
+            None,
+            VANILLA,
+        ),
         ("get-slash-dot-slash", "/./", None, VANILLA),
         (
             "get-slashes",

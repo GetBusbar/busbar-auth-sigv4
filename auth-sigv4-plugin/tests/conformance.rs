@@ -1094,8 +1094,10 @@ fn an_unserved_secret_read_rejects_and_logs_the_service_error() {
     assert!(verdict.starts_with("Ready Reject"), "{verdict}");
     let folds = std::mem::take(&mut *folds.0.lock().unwrap());
     assert!(
-        folds.iter().any(|l| l.contains("reason=\"credential-unavailable\"")
-            && l.contains("service_error=\"declined\"")),
+        folds
+            .iter()
+            .any(|l| l.contains("reason=\"credential-unavailable\"")
+                && l.contains("service_error=\"declined\"")),
         "{folds:#?}"
     );
 }
@@ -1261,7 +1263,11 @@ fn each_request_fact_that_cannot_be_signed_fails_with_its_own_reason() {
         (with(2, bad), "the path is not UTF-8"),
     ];
     for (request, why) in cases {
-        assert_eq!(fields_raw(request, &json, Some(b"{}")), failed(why), "{why}");
+        assert_eq!(
+            fields_raw(request, &json, Some(b"{}")),
+            failed(why),
+            "{why}"
+        );
     }
     let bad_type = [NamedValue {
         name: s("Content-Type"),

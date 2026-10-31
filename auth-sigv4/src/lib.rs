@@ -236,27 +236,46 @@ const SETTINGS_REFUSED: &str = "settings: not a JSON object of the sigv4 style's
 /// The refusal `open_outbound` answers for a bind that names no style.
 const NO_STYLE: &str = "settings: no outbound auth style was named";
 
-/// The reason `fields` answers FAILED with when the host lent no method, host or path to sign.
-const NO_FACTS: &str = "sigv4 cannot sign: the host lent no method, host or path";
-/// The reason `fields` answers FAILED with when the query the host lent is not UTF-8: it cannot be
-/// signed as it is sent.
+/// The reasons `fields` answers FAILED with when a request fact the host lent cannot be signed,
+/// one per fact and fault: the request is never sent unsigned, nor signed over facts it is not
+/// sent with.
+const NO_METHOD: &str = "sigv4 cannot sign: the host lent no method";
+const METHOD_NOT_UTF8: &str = "sigv4 cannot sign: the method is not UTF-8";
+const NO_AUTHORITY: &str = "sigv4 cannot sign: the host lent no authority";
+const AUTHORITY_NOT_UTF8: &str = "sigv4 cannot sign: the authority is not UTF-8";
+const NO_PATH: &str = "sigv4 cannot sign: the host lent no path";
+const PATH_NOT_UTF8: &str = "sigv4 cannot sign: the path is not UTF-8";
 const QUERY_NOT_UTF8: &str = "sigv4 cannot sign: the query is not UTF-8";
+const CONTENT_TYPE_NOT_UTF8: &str = "sigv4 cannot sign: the content-type value is not UTF-8";
+const NO_BODY: &str = "sigv4 cannot sign: the host lent no body";
 
-/// A request fact as text: UTF-8 and not empty; `None` when the host lent none.
-fn fact(b: &[u8]) -> Option<&str> {
-    std::str::from_utf8(b).ok().filter(|s| !s.is_empty())
+/// A request fact as text: `absent` when the host lent none (empty), `not_utf8` when it is not
+/// text.
+fn fact<'a>(
+    b: &'a [u8],
+    absent: &'static str,
+    not_utf8: &'static str,
+) -> Result<&'a str, &'static str> {
+    if b.is_empty() {
+        return Err(absent);
+    }
+    std::str::from_utf8(b).map_err(|_| not_utf8)
 }
 
 /// The value of the first `content-type` line (ASCII case-insensitive) in the header envelope the
-/// host lent `fields` (the style declares `STYLE_NEEDS_HEADERS`); `None` when none is sent, or its
-/// value is not text.
+/// host lent `fields` (the style declares `STYLE_NEEDS_HEADERS`); `None` when none is sent.
+///
+/// # Errors
+///
+/// [`CONTENT_TYPE_NOT_UTF8`] when the value sent is not text: it is sent, so it cannot go unsigned.
 pub(crate) fn sent_content_type<'a>(
     headers: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
-) -> Option<&'a str> {
+) -> Result<Option<&'a str>, &'static str> {
     headers
         .into_iter()
         .find(|(n, _)| n.eq_ignore_ascii_case(b"content-type"))
-        .and_then(|(_, v)| std::str::from_utf8(v).ok())
+        .map(|(_, v)| std::str::from_utf8(v).map_err(|_| CONTENT_TYPE_NOT_UTF8))
+        .transpose()
 }
 
 /// The reason `fields` answers FAILED with when an `x-amz-*` line the request is sent with is not
@@ -291,16 +310,22 @@ fn sign_facts<'a>(
         Some(Ok(q)) => Some(q).filter(|q| !q.is_empty()),
         Some(Err(_)) => return Err(QUERY_NOT_UTF8),
     };
-    Ok(SignFacts {
-        method: fact(view.method()).ok_or(NO_FACTS)?,
-        host: fact(view.authority()).ok_or(NO_FACTS)?,
-        path: fact(view.path()).ok_or(NO_FACTS)?,
+    let facts = SignFacts {
+        method: fact(view.method(), NO_METHOD, METHOD_NOT_UTF8)?,
+        host: fact(view.authority(), NO_AUTHORITY, AUTHORITY_NOT_UTF8)?,
+        path: fact(view.path(), NO_PATH, PATH_NOT_UTF8)?,
         query,
-        content_type: sent_content_type(view.headers()),
+        content_type: sent_content_type(view.headers())?,
         amz_headers,
         payload_hash: hash,
         timestamp_epoch: view.timestamp(),
-    })
+    };
+    // The host lends the body at `HeadBody`, an empty one included: none lent cannot be bound to a
+    // payload hash, and is never signed as the empty body.
+    if view.body().is_none() {
+        return Err(NO_BODY);
+    }
+    Ok(facts)
 }
 
 impl OutboundPlugin for SigV4 {
@@ -343,7 +368,8 @@ impl OutboundPlugin for SigV4 {
         out: &mut FieldsWriter<'_>,
         _: &Op<'_>,
     ) -> Poll<FieldsAnswer> {
-        // The payload hash over the body the host lent at `HeadBody`; none lent is the empty body.
+        // The payload hash over the body the host lent at `HeadBody` (none lent FAILS, in
+        // `sign_facts`).
         let hash = crate::sigv4::sha256_hex(view.body().unwrap_or_default());
         let amz = sent_amz_headers(view);
         let who = match view.mode() {

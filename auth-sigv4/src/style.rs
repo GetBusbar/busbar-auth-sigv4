@@ -73,8 +73,7 @@ const REGION_SHAPE: &str = "not an AWS region (1 to 64 of a-z, 0-9 and -)";
 /// value carry.
 fn scope_shaped(s: &str) -> bool {
     (1..=64).contains(&s.len())
-        && s
-            .bytes()
+        && s.bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
@@ -87,10 +86,9 @@ pub(crate) fn scope_findings(m: &Map<String, Value>) -> Vec<Refusal> {
     for (key, shape) in [("service", SERVICE_SHAPE), ("region", REGION_SHAPE)] {
         match text(m, key) {
             Err(r) => findings.push(r),
-            Ok(Some(v)) if !scope_shaped(v.trim()) => findings.push(Refusal::Setting {
-                key,
-                reason: shape,
-            }),
+            Ok(Some(v)) if !scope_shaped(v.trim()) => {
+                findings.push(Refusal::Setting { key, reason: shape })
+            }
             Ok(_) => {}
         }
     }

@@ -422,6 +422,10 @@ fn the_service_and_region_are_trimmed_and_checked_at_open() {
             vec![SERVICE, REGION],
         ),
     ] {
-        assert_eq!(lines(open(SIGV4, Some("A:S"), &settings)), want, "{settings}");
+        assert_eq!(
+            lines(open(SIGV4, Some("A:S"), &settings)),
+            want,
+            "{settings}"
+        );
     }
 }

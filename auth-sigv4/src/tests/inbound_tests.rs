@@ -341,7 +341,11 @@ fn the_aws_suite_repeated_and_trimmed_header_vectors_verify() {
         (
             "get-header-key-duplicate",
             "c9d5ea9f3f72853aea855b47ea873832890dbdd183b4468f858259531a5138ea",
-            vec![("My-Header1", "value2"), ("My-Header1", "value2"), ("My-Header1", "value1")],
+            vec![
+                ("My-Header1", "value2"),
+                ("My-Header1", "value2"),
+                ("My-Header1", "value1"),
+            ],
         ),
         (
             "get-header-value-order",
@@ -362,7 +366,10 @@ fn the_aws_suite_repeated_and_trimmed_header_vectors_verify() {
     for (name, signature, mine) in cases {
         let mut wire: Vec<(String, String)> =
             vec![("Host".to_string(), "example.amazonaws.com".to_string())];
-        wire.extend(mine.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())));
+        wire.extend(
+            mine.iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string())),
+        );
         wire.push(("X-Amz-Date".to_string(), amzdate.to_string()));
         let mut names: Vec<String> = mine.iter().map(|(k, _)| k.to_lowercase()).collect();
         names.dedup();
@@ -382,7 +389,11 @@ fn the_aws_suite_repeated_and_trimmed_header_vectors_verify() {
             payload_hash: &empty,
             amzdate,
         };
-        assert_eq!(verify_inbound_sigv4(&parsed, &req, SECRET, now), Ok(()), "{name}");
+        assert_eq!(
+            verify_inbound_sigv4(&parsed, &req, SECRET, now),
+            Ok(()),
+            "{name}"
+        );
     }
 }
 
@@ -841,7 +852,11 @@ fn the_aws_suite_query_vectors_verify_over_the_received_query() {
             payload_hash: &empty,
             amzdate,
         };
-        assert_eq!(verify_inbound_sigv4(&parsed, &req, SECRET, now), Ok(()), "{name}");
+        assert_eq!(
+            verify_inbound_sigv4(&parsed, &req, SECRET, now),
+            Ok(()),
+            "{name}"
+        );
     }
 }
 
@@ -1690,7 +1705,8 @@ fn each_verification_reject_is_logged_with_its_own_reason_word() {
         assert_eq!(judged, Judgement::Reject, "{word}");
         assert_eq!(logged.lines().count(), 1, "logged once: {logged}");
         assert!(
-            logged.contains(&format!("reason={word} ")) || logged.ends_with(&format!("reason={word}")),
+            logged.contains(&format!("reason={word} "))
+                || logged.ends_with(&format!("reason={word}")),
             "{word}: {logged}"
         );
     }
@@ -1709,10 +1725,7 @@ fn a_bad_signature_reject_is_logged_without_the_signature() {
     assert_eq!(judged, Judgement::Reject);
     let logged = cap.messages().join("\n");
     assert!(logged.contains("module=sigv4"), "{logged:?}");
-    assert!(
-        logged.contains("reason=signature"),
-        "{logged:?}"
-    );
+    assert!(logged.contains("reason=signature"), "{logged:?}");
     assert!(
         !logged.contains(&signature),
         "the signature leaked: {logged:?}"
@@ -1750,7 +1763,10 @@ fn a_logged_access_key_id_is_escaped_and_capped() {
     assert!(!logged.contains('\t'), "a raw tab: {logged}");
     assert!(logged.contains("AKID\\t\\\"x\\\""), "escaped: {logged}");
     assert!(!logged.contains(&"A".repeat(129)), "capped: {logged}");
-    assert!(logged.contains(&"A".repeat(100)), "the head is kept: {logged}");
+    assert!(
+        logged.contains(&"A".repeat(100)),
+        "the head is kept: {logged}"
+    );
 }
 
 /// L1 (audit round 1 @57f7ef5, lead-confirmed; the AWS SigV4 spec): a request scoped to any

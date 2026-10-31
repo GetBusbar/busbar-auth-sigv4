@@ -104,7 +104,15 @@ impl SigV4 {
         let signed = self.sign_unlogged(handle, who, facts);
         let reason = match &signed {
             Some(Signed::Failed(reason)) => reason.as_ref(),
-            _ => return signed,
+            Some(Signed::Fields(_)) => return signed,
+            None => {
+                tracing::info!(
+                    module = "sigv4",
+                    handle,
+                    "sigv4 request not signed: REFUSED, no such handle (never opened, or retired)"
+                );
+                return signed;
+            }
         };
         tracing::info!(module = "sigv4", reason, "sigv4 request not signed: FAILED");
         signed

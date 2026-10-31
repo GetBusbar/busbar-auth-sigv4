@@ -761,12 +761,14 @@ const EXPECTED_FOLDS: &[&str] = &[
     "diag 4294967295 sev=0 busbar_auth_sigv4::style: sigv4 outbound binding refused module=\"sigv4\" reason=\"settings: outbound auth style `bearer` is not served by this plugin\"",
     "diag 4294967295 sev=0 busbar_auth_sigv4::style: sigv4 outbound binding refused module=\"sigv4\" reason=\"settings: outbound auth style `kerberos` is not served by this plugin\"",
     "diag 4294967295 sev=0 busbar_auth_sigv4::instance: sigv4 request not signed: FAILED module=\"sigv4\" reason=\"sigv4: this binding holds no credential of its own (passthrough-only); the request is not sent unsigned\"",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::instance: sigv4 request not signed: REFUSED, no such handle (never opened, or retired) module=\"sigv4\" handle=999",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"unparseable SigV4 authorization\"",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature\" access_key_id=BBAKNOBODY",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature\" access_key_id=BBAKNOBODY",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature\" access_key_id=BBAKCONFORMANCE000002",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature\" access_key_id=BBAKCONFORMANCE000001",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"payload hash mismatch\"",
+    "diag 4294967295 sev=0 busbar_auth_sigv4::instance: sigv4 request not signed: REFUSED, no such handle (never opened, or retired) module=\"sigv4\" handle=1",
 ];
 
 /// The SigV4 signature depends on nothing but its inputs; it is replaced by a marker so the

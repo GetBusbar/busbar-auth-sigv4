@@ -68,19 +68,25 @@ impl SigV4 {
         }
     }
 
-    /// `refresh`: the generation later handles belong to.
+    /// `refresh`: the generation later handles belong to, stored under the handles write lock
+    /// (the lock rule, see [`Self::keep`]).
     pub(crate) fn set_generation(&self, generation: u64) {
+        let _handles = self.handles.write().unwrap_or_else(PoisonError::into_inner);
         self.generation.store(generation, Ordering::Release);
     }
 
     /// Keep `binding` under a new handle of the current generation.
+    ///
+    /// THE LOCK RULE: the generation is read, and the handle stored, under the handles WRITE lock;
+    /// [`Self::set_generation`] (`refresh`) stores the new generation under that same lock and
+    /// [`Self::retire`] sweeps under it. The three are therefore ordered: a handle can never be
+    /// stored under a generation a retire has already swept (it would then never drop).
     pub(crate) fn keep(&self, binding: SigV4Binding) -> u64 {
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
+        let binding = Arc::new(binding);
+        let mut handles = self.handles.write().unwrap_or_else(PoisonError::into_inner);
         let generation = self.generation.load(Ordering::Acquire);
-        self.handles
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(handle, (generation, Arc::new(binding)));
+        handles.insert(handle, (generation, binding));
         handle
     }
 

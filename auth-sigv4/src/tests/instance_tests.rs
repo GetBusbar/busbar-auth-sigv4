@@ -331,6 +331,64 @@ fn fields_signs_the_double_encoded_canonical_uri() {
     );
 }
 
+/// V3 (audit round 1 @57f7ef5, lead-confirmed; the AWS SigV4 spec): S3 is the one service whose
+/// canonical URI is the path encoded ONCE (and never normalized). A binding scoped to `s3` signs
+/// the key's `:` (sent `%3A`) as `%3A`, a space sent raw as `%20`, and keeps `//` and `.` segments;
+/// was: double-encoded as every other service, so every S3 key with a reserved byte failed at AWS.
+#[test]
+fn an_s3_binding_signs_the_path_encoded_once() {
+    let s = SigV4::new(1);
+    let settings = r#"{"service":"s3","region":"us-east-1"}"#;
+    let binding = style::open_binding(
+        style::SIGV4,
+        Some(b"AKIDEXAMPLE:SECRET"),
+        Some(settings.as_bytes()),
+    )
+    .expect("the binding opens");
+    let handle = s.keep(binding);
+    let hash = sha256_hex(b"");
+    for (wire, canonical) in [
+        ("/bucket/key%3A1", "/bucket/key%3A1"),
+        ("/bucket/a%2fb c", "/bucket/a%2Fb%20c"),
+        ("/bucket//a/./b", "/bucket//a/./b"),
+    ] {
+        let facts = SignFacts {
+            method: "GET",
+            host: "bucket.s3.amazonaws.com",
+            path: wire,
+            query: None,
+            content_type: None,
+            payload_hash: &hash,
+            timestamp_epoch: 1_440_938_160,
+        };
+        let headers = [
+            ("host".to_string(), "bucket.s3.amazonaws.com".to_string()),
+            ("x-amz-content-sha256".to_string(), hash.clone()),
+            ("x-amz-date".to_string(), "20150830T123600Z".to_string()),
+        ];
+        let (signature, signed_headers) = crate::sigv4::sign_v4(
+            "SECRET",
+            "us-east-1",
+            "s3",
+            "GET",
+            canonical,
+            "",
+            &headers,
+            &hash,
+            "20150830T123600Z",
+            "20150830",
+        );
+        assert_eq!(
+            authorization_of(s.sign(handle, Who::Own, Some(facts))),
+            format!(
+                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, \
+                 SignedHeaders={signed_headers}, Signature={signature}"
+            ),
+            "{wire}"
+        );
+    }
+}
+
 /// RED (the signed set is the sent set): the content type a signature covers is the one the
 /// request is sent with, and a request sent with none signs none — never the binding's setting.
 #[test]

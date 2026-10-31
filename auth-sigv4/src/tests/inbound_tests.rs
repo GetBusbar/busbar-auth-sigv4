@@ -1309,6 +1309,81 @@ fn a_path_with_a_reserved_byte_is_judged_over_its_double_encoded_canonical_uri()
     );
 }
 
+/// A request judged against a client signature over `canonical_uri`, scoped to `service`, its
+/// wire path `wire`.
+fn judge_path(service: &str, canonical_uri: &str, wire: &str) -> Judgement {
+    let (amzdate, datestamp) = format_amz_time(NOW);
+    let payload_hash = sha256_hex(b"");
+    let headers = vec![
+        ("host".to_string(), "bucket.s3.amazonaws.com".to_string()),
+        (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
+        (X_AMZ_DATE.to_string(), amzdate.clone()),
+    ];
+    let (sig, signed_headers) = crate::sigv4::sign_v4(
+        SECRET,
+        "us-east-1",
+        service,
+        "GET",
+        canonical_uri,
+        "",
+        &headers,
+        &payload_hash,
+        &amzdate,
+        &datestamp,
+    );
+    let auth = format!(
+        "AWS4-HMAC-SHA256 Credential={AKID}/{datestamp}/us-east-1/{service}/aws4_request, \
+         SignedHeaders={signed_headers}, Signature={sig}"
+    );
+    let mut lines = vec![("authorization".to_string(), auth)];
+    lines.extend(headers);
+    let req = Request {
+        method: b"GET",
+        path: wire.as_bytes(),
+        query: None,
+        lines: lines
+            .iter()
+            .map(|(n, v)| (n.as_bytes(), v.as_bytes()))
+            .collect(),
+        body: Some(b""),
+        now: NOW,
+    };
+    judge(&req, &mut Fake::default())
+}
+
+/// V3 (audit round 1 @57f7ef5, lead-confirmed; the AWS SigV4 spec): a request whose credential
+/// scope names `s3` is judged over its path encoded ONCE, never normalized; every other service
+/// over the path encoded twice. Was: double-encoded for S3 too, so an S3 client's signature over a
+/// key with a reserved byte never verified.
+#[test]
+fn an_s3_scoped_request_is_judged_over_its_path_encoded_once() {
+    let admitted = Judgement::Identity(AKID.to_string());
+    assert_eq!(
+        judge_path("s3", "/bucket/key%3A1", "/bucket/key%3A1"),
+        admitted
+    );
+    assert_eq!(
+        judge_path("s3", "/bucket/a%2Fb%20c", "/bucket/a%2fb%20c"),
+        admitted,
+        "a lowercase escape on the wire is the same key"
+    );
+    assert_eq!(
+        judge_path("s3", "/bucket//a/./b", "/bucket//a/./b"),
+        admitted,
+        "S3 keeps `//` and `.` segments"
+    );
+    assert_eq!(
+        judge_path("s3", "/bucket/key%253A1", "/bucket/key%3A1"),
+        Judgement::Reject,
+        "S3 is never double-encoded"
+    );
+    assert_eq!(
+        judge_path("svc", "/bucket/key%253A1", "/bucket/key%3A1"),
+        admitted,
+        "every other service is double-encoded"
+    );
+}
+
 #[test]
 fn a_repeated_signed_header_is_judged_over_all_its_values() {
     let (amzdate, datestamp) = format_amz_time(NOW);

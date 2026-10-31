@@ -735,3 +735,53 @@ fn a_fields_call_on_an_unknown_or_retired_handle_is_logged() {
     );
     assert!(logged[1].contains(&format!("handle={handle}")), "{logged:?}");
 }
+
+/// L9 (audit round 1 @57f7ef5, lead-confirmed; the lock rule, as auth-header's F6): `keep` reads
+/// the generation while holding the handles write lock, and `refresh` stores the new generation
+/// under that same lock, so a handle waiting for the lock when a refresh lands is stored under the
+/// NEW generation, never under one a retire may already have swept (it would never drop). Driven
+/// deterministically: the test holds the write lock (as `refresh` does while it stores), a `keep`
+/// queues behind it, the generation moves, and the lock is released.
+#[test]
+fn a_handle_kept_while_the_generation_moves_takes_the_new_generation() {
+    let s = Arc::new(SigV4::new(1));
+    let guard = s.handles.write().unwrap();
+    let (started, wait) = std::sync::mpsc::channel();
+    let kept = {
+        let s = s.clone();
+        std::thread::spawn(move || {
+            let binding = style::open_binding(
+                style::SIGV4,
+                Some(b"AKIDEXAMPLE:SECRET"),
+                Some(SETTINGS.as_bytes()),
+            )
+            .unwrap();
+            started.send(()).unwrap();
+            s.keep(binding)
+        })
+    };
+    wait.recv().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    s.generation.store(2, Ordering::Release);
+    drop(guard);
+    let handle = kept.join().unwrap();
+    s.retire(1);
+    assert!(s.binding(handle).is_some(), "kept after the move: generation 2's");
+    s.retire(2);
+    assert!(s.binding(handle).is_none());
+}
+
+/// L9, the API sequence: open, refresh, retire(old), open again; the new handles carry the new
+/// generation and nothing is left under the retired one.
+#[test]
+fn keep_refresh_retire_are_ordered() {
+    use busbar_contract::abi::sdk::auth_outbound::OutboundPlugin;
+    let s = SigV4::new(1);
+    let a = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    s.refresh(b"{}", &[], 2).unwrap();
+    let b = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    s.retire(1);
+    let held: Vec<u64> = s.handles.read().unwrap().values().map(|(g, _)| *g).collect();
+    assert_eq!(held, [2]);
+    assert!(s.binding(a).is_none() && s.binding(b).is_some());
+}

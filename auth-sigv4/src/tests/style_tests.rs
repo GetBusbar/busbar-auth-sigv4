@@ -1,0 +1,491 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Busbar Inc and contributors
+
+//! `open_outbound`'s body: `sigv4` binds from its settings, and every refusal is 1.5.5's own words
+//! in the `credential:` / `settings:` lines the kernel composes (ARCHITECT ruling Q5).
+
+use super::*;
+use crate::signing::SignFacts;
+use crate::sigv4;
+
+fn open(
+    style: &str,
+    credential: Option<&str>,
+    settings: &str,
+) -> Result<SigV4Binding, Vec<Refusal>> {
+    open_binding(
+        style,
+        credential.map(str::as_bytes),
+        Some(settings.as_bytes()),
+    )
+}
+
+fn lines(r: Result<SigV4Binding, Vec<Refusal>>) -> Vec<String> {
+    r.expect_err("the binding is refused")
+        .iter()
+        .map(Refusal::line)
+        .collect()
+}
+
+/// The two params are needed; the content type is no param (the signature covers the one sent),
+/// and a `content_type` key is read past. OWNER RULING: a session token no header value may carry
+/// is refused at open, naming the finding (was: it opened, and each request signed nothing).
+#[test]
+fn sigv4_needs_its_two_params_and_refuses_an_unsendable_token() {
+    assert_eq!(
+        lines(open(SIGV4, Some("A:S"), r#"{"region":"us-east-1"}"#)),
+        ["settings.service: required for sigv4 signing"]
+    );
+    assert_eq!(
+        lines(open(SIGV4, Some("A:S"), r#"{"service":"svc"}"#)),
+        ["settings.region: required for sigv4 signing"]
+    );
+    assert!(open(
+        SIGV4,
+        Some("A:S"),
+        r#"{"service":"svc","region":"us-east-1"}"#
+    )
+    .is_ok());
+    let r = open(
+        SIGV4,
+        Some("A:S:T\r\nX"),
+        r#"{"service":"svc","region":"us-east-1","content_type":"application/json"}"#,
+    );
+    assert_eq!(
+        lines(r),
+        ["credential: the session token holds a byte no header value may carry"]
+    );
+}
+
+/// `open_binding` answers EVERY refusing finding, the settings' first and then the credential's: a
+/// config with several faults is told them all at once, not one per redeploy.
+#[test]
+fn every_refusing_finding_is_answered_together() {
+    assert_eq!(
+        lines(open(SIGV4, Some("AKIA:"), "{}")),
+        [
+            "settings.service: required for sigv4 signing",
+            "settings.region: required for sigv4 signing",
+            "credential: the secret access key is empty",
+        ]
+    );
+    assert_eq!(
+        lines(open(SIGV4, Some("AKIA:"), r#"{"service":"S!","bogus":1}"#)),
+        [
+            "settings: unknown key `bogus`",
+            "settings.region: required for sigv4 signing",
+            "settings.service: not an AWS service name (1 to 64 of a-z, 0-9 and -)",
+            "credential: the secret access key is empty",
+        ]
+    );
+}
+
+/// A binding opened with no credential is the contract's passthrough-only binding: it opens (the
+/// caller's credential may sign), and own-mode signing on it FAILS with the reason, never signing
+/// nothing silently (OWNER RULING; was: an empty field set).
+#[test]
+fn a_keyless_binding_opens_but_refuses_to_sign_in_own_mode() {
+    let r = open(
+        SIGV4,
+        None,
+        r#"{"service":"svc","region":"us-east-1","content_type":"application/json"}"#,
+    );
+    let binding = r.expect("a keyless sigv4 binding still opens: the caller's credential may sign");
+    let hash = sigv4::sha256_hex(b"{}");
+    let facts = SignFacts {
+        method: "POST",
+        host: "h",
+        path: "/p",
+        query: None,
+        content_type: None,
+        payload_hash: &hash,
+        timestamp_epoch: 1,
+        amz_headers: &[],
+    };
+    assert_eq!(
+        binding.sign(&facts).map(|_| ()),
+        Err(crate::signing::NO_OWN_CREDENTIAL)
+    );
+}
+
+#[test]
+fn an_unknown_style_or_malformed_settings_is_refused() {
+    assert_eq!(
+        lines(open("kerberos", Some("k"), "{}")),
+        ["settings: outbound auth style `kerberos` is not served by this plugin"]
+    );
+    assert_eq!(
+        lines(open(SIGV4, Some("k"), "[1]")),
+        ["settings: outbound auth settings must be a JSON object"]
+    );
+    assert_eq!(
+        lines(open("bearer", Some("k"), "{}")),
+        ["settings: outbound auth style `bearer` is not served by this plugin"],
+        "bearer is a different mechanism, busbar-auth-header"
+    );
+}
+
+/// A blank (empty or whitespace) `service` or `region` is no value: the same refusal as one absent.
+#[test]
+fn a_blank_service_or_region_is_refused_as_missing() {
+    assert_eq!(
+        lines(open(
+            SIGV4,
+            Some("A:S"),
+            r#"{"service":"","region":"us-east-1"}"#
+        )),
+        ["settings.service: required for sigv4 signing"]
+    );
+    assert_eq!(
+        lines(open(
+            SIGV4,
+            Some("A:S"),
+            r#"{"service":"svc","region":"  \t"}"#
+        )),
+        ["settings.region: required for sigv4 signing"]
+    );
+}
+
+/// A `service` or `region` that is not a string is refused as invalid, not coerced.
+#[test]
+fn a_non_string_service_or_region_is_refused_as_invalid() {
+    assert_eq!(
+        lines(open(
+            SIGV4,
+            Some("A:S"),
+            r#"{"service":5,"region":"us-east-1"}"#
+        )),
+        ["settings.service: expected a string"]
+    );
+    assert_eq!(
+        lines(open(
+            SIGV4,
+            Some("A:S"),
+            r#"{"service":"svc","region":["x"]}"#
+        )),
+        ["settings.region: expected a string"]
+    );
+}
+
+#[test]
+fn all_invalid_scope_settings_are_reported_together() {
+    for (settings, expected) in [
+        (
+            "{}",
+            vec![
+                "settings.service: required for sigv4 signing",
+                "settings.region: required for sigv4 signing",
+            ],
+        ),
+        (
+            r#"{"service":5,"region":"BAD"}"#,
+            vec![
+                "settings.service: expected a string",
+                "settings.region: not an AWS region (1 to 64 of a-z, 0-9 and -)",
+            ],
+        ),
+    ] {
+        assert_eq!(lines(open(SIGV4, Some("A:S"), settings)), expected);
+    }
+}
+
+/// A credential that is not UTF-8 is refused, not read as keyless.
+#[test]
+fn a_credential_that_is_not_utf8_is_refused() {
+    let r = open_binding(
+        SIGV4,
+        Some(&[0xff]),
+        Some(br#"{"service":"svc","region":"us-east-1"}"#),
+    );
+    assert_eq!(lines(r), ["credential: the credential is not UTF-8"]);
+}
+
+#[test]
+fn a_malformed_credential_is_refused_at_open() {
+    const SETTINGS: &str = r#"{"service":"svc","region":"us-east-1"}"#;
+    let shape = "credential: expected ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]";
+    for (credential, expected) in [
+        ("AKID", vec![shape]),
+        ("", vec![shape]),
+        (":sk", vec!["credential: the access key id is empty"]),
+        ("AK:", vec!["credential: the secret access key is empty"]),
+        (
+            ":",
+            vec![
+                "credential: the access key id is empty",
+                "credential: the secret access key is empty",
+            ],
+        ),
+        (
+            "AK\u{7f}:SK",
+            vec!["credential: the access key id holds a byte no header value may carry"],
+        ),
+        (
+            "AK:SK:bad\ntok",
+            vec!["credential: the session token holds a byte no header value may carry"],
+        ),
+        ("AK:SK:", vec!["credential: the session token is empty"]),
+    ] {
+        let refused = lines(open(SIGV4, Some(credential), SETTINGS));
+        assert_eq!(refused, expected, "{credential:?}");
+        for line in &refused {
+            for secret in ["SK", "sk", "bad", "AK:", "\u{7f}"] {
+                assert!(
+                    !line.contains(secret),
+                    "{credential:?}: a refusal echoes credential bytes: {line}"
+                );
+            }
+        }
+    }
+
+    assert!(open(SIGV4, None, SETTINGS).is_ok());
+}
+
+/// A style setting this plugin does not read is refused by name, not ignored (a typo such as
+/// `regoin` would otherwise go unnoticed); `content_type` is still read past (1.5.5 configs).
+#[test]
+fn an_unknown_settings_key_is_refused_by_name() {
+    assert_eq!(
+        lines(open(
+            SIGV4,
+            Some("A:S"),
+            r#"{"service":"s3","region":"x","regoin":"y"}"#
+        )),
+        ["settings: unknown key `regoin`"]
+    );
+    assert!(open(
+        SIGV4,
+        Some("A:S"),
+        r#"{"service":"s3","region":"x","content_type":"application/json"}"#
+    )
+    .is_ok());
+}
+
+/// The warning the kernel hands in as `region_unread` when the provider's host names no region and
+/// the scope falls back to the dialect's default: 1.5.5's signer's own words
+/// (`proto/bedrock/writer.rs`, v1.5.5).
+const REGION_UNREAD: &str = "could not derive AWS region from Bedrock endpoint host; defaulting \
+                             SigV4 scope to us-east-1 (set a \
+                             bedrock-runtime[-fips].<region>.amazonaws.com host)";
+
+/// The WARN lines logged while `binding` signs one request to `host` `times` times.
+fn warned_signing(binding: &SigV4Binding, host: &str, times: usize) -> Vec<String> {
+    let hash = sigv4::sha256_hex(b"{}");
+    let facts = SignFacts {
+        method: "POST",
+        host,
+        path: "/model/m-cap/converse",
+        query: None,
+        content_type: Some("application/json"),
+        payload_hash: &hash,
+        timestamp_epoch: 1_440_938_160,
+        amz_headers: &[],
+    };
+    let cap = crate::diagnostics::Log::new(tracing::Level::WARN);
+    tracing::subscriber::with_default(cap.subscriber(), || {
+        for _ in 0..times {
+            binding.sign(&facts).expect("a clean credential signs");
+        }
+    });
+    cap.messages()
+        .into_iter()
+        .map(|m| m.trim_end().to_string())
+        .collect()
+}
+
+/// A BEDROCK HOST WITH NO DERIVABLE REGION WARNS ON EVERY SIGNATURE, as 1.5.5's signer did: the
+/// kernel resolved the region at seal to the default and handed the dialect's warning in as
+/// `region_unread`, which this plugin reads (never refuses as unknown) and logs, word for word, with
+/// the request's `host`, on each request it signs under that default. 1.5.5 wrote it to busbar's own
+/// log, `<TS>  WARN could not derive AWS region ... host=127.0.0.1:<PORT>` (the oracle's
+/// `egress.image-detail|high|bedrock` golden); a plugin's WARN line reaches that log through its
+/// own. A host whose region reads is handed no warning and logs none.
+#[test]
+fn a_bedrock_host_with_no_derivable_region_warns_on_every_signature() {
+    let settings = serde_json::json!({
+        "service": "bedrock",
+        "region": "us-east-1",
+        "content_type": "application/json",
+        "region_unread": REGION_UNREAD,
+    })
+    .to_string();
+    let defaulted = open(SIGV4, Some("AKIDORACLEDETAIL0001:SECRET"), &settings)
+        .expect("`region_unread` is the kernel's to hand in, not an unknown key");
+    let warned = warned_signing(&defaulted, "127.0.0.1:41234", 2);
+    assert_eq!(warned.len(), 2, "{warned:?}");
+    for line in &warned {
+        assert!(line.contains(REGION_UNREAD), "{line}");
+        assert!(line.contains("host=127.0.0.1:41234"), "{line}");
+        assert!(line.contains("module=\"sigv4\""), "{line}");
+    }
+    let named = open(
+        SIGV4,
+        Some("AKIDORACLEDETAIL0001:SECRET"),
+        r#"{"service":"bedrock","region":"eu-west-1"}"#,
+    )
+    .expect("opens");
+    assert!(
+        warned_signing(&named, "bedrock-runtime.eu-west-1.amazonaws.com", 2).is_empty(),
+        "a host whose region reads warns nothing"
+    );
+}
+
+/// `region_unread` is read; every other key this plugin does not read is still refused by name.
+#[test]
+fn an_unknown_setting_other_than_region_unread_is_still_refused() {
+    assert_eq!(
+        lines(open(
+            SIGV4,
+            Some("A:S"),
+            r#"{"service":"s3","region":"x","region_unread":"w","regoin":"y"}"#
+        )),
+        ["settings: unknown key `regoin`"]
+    );
+    assert!(open(
+        SIGV4,
+        Some("A:S"),
+        r#"{"service":"s3","region":"x","region_unread":"w"}"#
+    )
+    .is_ok());
+}
+
+#[test]
+fn style_settings_that_do_not_parse_withhold_the_decoders_text() {
+    assert_eq!(
+        lines(open(SIGV4, Some("A:S"), r#"{"service": "wJalrXUtnFEMI"#)),
+        [
+            "settings: outbound auth settings are not JSON: it ends before the JSON does (line 1, \
+          column 26; the decoder's text is withheld)"
+        ]
+    );
+}
+
+#[test]
+fn a_refused_binding_is_logged_once_without_the_credential() {
+    let cap = crate::diagnostics::Log::new(tracing::Level::DEBUG);
+    tracing::subscriber::with_default(cap.subscriber(), || {
+        assert!(open(
+            SIGV4,
+            Some("AKIDNOCOLONSECRET"),
+            r#"{"service":"s","region":"r"}"#
+        )
+        .is_err());
+        assert!(open(
+            SIGV4,
+            Some("AKID:SECRETOK"),
+            r#"{"service":"s","region":"r"}"#
+        )
+        .is_ok());
+    });
+    let logged = cap.messages();
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert!(logged[0].contains("module=\"sigv4\""), "{logged:?}");
+    assert!(
+        logged[0].contains("credential: expected ACCESS_KEY_ID:SECRET_ACCESS_KEY[:SESSION_TOKEN]"),
+        "{logged:?}"
+    );
+    assert!(!logged[0].contains("AKIDNOCOLONSECRET"), "{logged:?}");
+}
+
+#[test]
+fn a_key_core_forwards_is_ignored_with_one_warn_at_the_bind() {
+    let cap = crate::diagnostics::Log::new(tracing::Level::WARN);
+    let bound = tracing::subscriber::with_default(cap.subscriber(), || {
+        open(
+            SIGV4,
+            Some("A:S"),
+            r#"{"service":"s","region":"r","scope":"x","token_url":"https://t","token_uri":"https://u","subject":"y","content_type":"application/x-amz-json-1.1"}"#,
+        )
+    });
+    assert!(bound.is_ok(), "a forwarded key does not fail the bind");
+    let warned = cap.messages();
+    assert_eq!(warned.len(), 5, "{warned:?}");
+    for key in ["token_uri", "subject"] {
+        assert_eq!(
+            warned
+                .iter()
+                .filter(|line| line.contains(&format!(
+                    "settings.{key}: not used by the sigv4 style; ignored"
+                )))
+                .count(),
+            1,
+            "{warned:?}"
+        );
+    }
+    assert!(
+        warned
+            .iter()
+            .any(|l| l.contains("settings.content_type: not used by the sigv4 style; ignored")),
+        "{warned:?}"
+    );
+    assert!(
+        warned
+            .iter()
+            .any(|l| l.contains("settings.scope: not used by the sigv4 style; ignored")),
+        "{warned:?}"
+    );
+    assert!(
+        warned
+            .iter()
+            .any(|l| l.contains("settings.token_url: not used by the sigv4 style; ignored")),
+        "{warned:?}"
+    );
+    assert!(
+        warned.iter().all(|l| l.contains("module=\"sigv4\"")),
+        "{warned:?}"
+    );
+    assert_eq!(
+        lines(open(
+            SIGV4,
+            Some("A:S"),
+            r#"{"service":"s","region":"r","scope":"x","regoin":"y"}"#
+        )),
+        ["settings: unknown key `regoin`"]
+    );
+}
+
+#[test]
+fn the_service_and_region_are_trimmed_and_checked_at_open() {
+    let trimmed = open(
+        SIGV4,
+        Some("A:S"),
+        r#"{"service":" bedrock ","region":"us-east-1 "}"#,
+    )
+    .expect("a padded service and region open, trimmed");
+    assert_eq!(trimmed.params().service, "bedrock");
+    assert_eq!(trimmed.params().region, "us-east-1");
+    const SERVICE: &str = "settings.service: not an AWS service name (1 to 64 of a-z, 0-9 and -)";
+    const REGION: &str = "settings.region: not an AWS region (1 to 64 of a-z, 0-9 and -)";
+    let max = "a".repeat(64);
+    open(
+        SIGV4,
+        Some("A:S"),
+        &format!(r#"{{"service":"{max}","region":"{max}"}}"#),
+    )
+    .expect("a 64-character service and region are the legal maximum");
+    let long = "a".repeat(65);
+    for (settings, want) in [
+        (
+            r#"{"service":"Bedrock","region":"us-east-1"}"#.to_string(),
+            vec![SERVICE],
+        ),
+        (
+            r#"{"service":"bedrock","region":"us east 1"}"#.to_string(),
+            vec![REGION],
+        ),
+        (
+            format!(r#"{{"service":"{long}","region":"eu-west-1"}}"#),
+            vec![SERVICE],
+        ),
+        (
+            r#"{"service":"s3/x","region":"us-east-1;x"}"#.to_string(),
+            vec![SERVICE, REGION],
+        ),
+    ] {
+        assert_eq!(
+            lines(open(SIGV4, Some("A:S"), &settings)),
+            want,
+            "{settings}"
+        );
+    }
+}

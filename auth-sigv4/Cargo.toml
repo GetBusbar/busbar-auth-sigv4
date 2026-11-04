@@ -1,21 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "busbar-auth-sigv4"
-version = "0.1.0"
+version = "1.6.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "The sigv4 auth: the logic a busbar build links (its door), and nothing else."
+description = "AWS SigV4 as one auth-kind plugin on the auth kind's memory ABI: the outbound sigv4 style (the operator's own credential or the caller's), and the inbound SigV4 verify (moved from the kernel) over the host's records.secret."
+
+# MOVED from busbar (crates/busbar-auth-sigv4 at busbar bb0c7f71d4, history imported;
+# BUSBAR-1.6.0.md §9: every plugin lives in its own repo). The source is busbar's verbatim.
 
 [lib]
-# rlib: the LINKED door, which a busbar build names as a compiled-in row. The dropped-in door is the
-# sibling `busbar-auth-sigv4-plugin` cdylib, which exports this same door as its one symbol; this crate exports none.
+# rlib only: the LINKED door (`busbar_auth_sigv4::door`, the `DoorFn` a compiled-in row holds) and the
+# tests. The DROPPED door is the sibling `busbar-auth-sigv4-plugin` cdylib, the same door behind the
+# one exported symbol: this crate exports none, and is `#![forbid(unsafe_code)]`.
 crate-type = ["rlib"]
 
-# DEPENDENCY POLICY. A plugin's busbar closure is busbar-contract and nothing else; third-party crates
-# come from the workspace table (`{ workspace = true }`), which is busbar's dependency policy. No
-# plugin opens its own socket, dials, binds or does TLS: a connection is a declared need the kernel
-# serves through the connector.
+# DEPENDENCY POLICY. A plugin's closure is `busbar-contract` plus the third-party crates it needs to
+# do its job (owner ruling 2026-09-28, PLUGIN LIBRARIES): the SigV4 HMAC chain (`hex`; SHA-256 is
+# `ring`'s digest, the keyed HMAC the contract SDK's wiped one), the settings and credential JSON
+# (`serde_json`), zeroisation of derived key material (`zeroize`), and the reject log
+# (`tracing`, into the plugin's own log file). No kernel crate,
+# no plane, no sibling auth-kind plugin.
+# Every version is the workspace table's (busbar's at the pin).
 [dependencies]
 busbar-contract = { workspace = true }
+hex = { workspace = true }
+ring = { workspace = true }
+serde_json = { workspace = true }
+# The inbound check logs each reject (its reason, never the credential) into the plugin's own log.
+tracing = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+# The sealed signing fixture helpers are enabled only in tests.
+busbar-contract = { workspace = true, features = ["test-seal"] }
+tracing-subscriber = { workspace = true, features = ["fmt"] }

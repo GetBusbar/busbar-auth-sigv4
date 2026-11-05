@@ -185,8 +185,14 @@ const MARKS: [MarkWord; 6] = [
 /// What the plugin states: its name, version, concurrency, marks and auth tail. It states no
 /// diagnostic ids (a credential that cannot sign is refused at open, or its request FAILS with the
 /// reason; nothing is noted beside a request sent unsigned).
+/// JSON Schema for the lifecycle settings document, embedded in the signed Statement.
+const SETTINGS_SCHEMA: &[u8] = include_bytes!("../settings.schema.json");
+
 const STATEMENT: Statement = with_tail(
-    statement("busbar-auth-sigv4", env!("CARGO_PKG_VERSION"), 1024).with_mark_words(&MARKS),
+    Statement {
+        settings_schema: busbar_contract::abi::mechanism::call::Blob::json(SETTINGS_SCHEMA),
+        ..statement("busbar-auth-sigv4", env!("CARGO_PKG_VERSION"), 1024).with_mark_words(&MARKS)
+    },
     TAIL,
 );
 
@@ -521,3 +527,6 @@ mod diagnostics;
 #[cfg(test)]
 #[path = "tests/fixtures.rs"]
 mod fixtures;
+
+#[cfg(test)]
+mod settings_schema_tests;

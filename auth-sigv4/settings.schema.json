@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SigV4 lifecycle settings",
+  "description": "Instance-level settings, before an outbound signing binding is selected. Credentials are lent separately. An absent blob is equivalent to {}.",
+  "type": "object",
+  "default": {},
+  "properties": {
+    "service": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*[a-z0-9-]{1,64}[\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*$",
+      "description": "Optional at lifecycle validation; signing bindings require a non-null value. Surrounding Unicode whitespace is trimmed."
+    },
+    "region": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*[a-z0-9-]{1,64}[\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]*$",
+      "description": "Optional at lifecycle validation; signing bindings require a non-null value. Surrounding Unicode whitespace is trimmed."
+    },
+    "region_unread": {
+      "description": "Host warning about region resolution. Lifecycle accepts any value; the signing binding checks string or null."
+    },
+    "content_type": {
+      "description": "Compatibility/provider setting ignored by this plugin; any JSON value is accepted."
+    },
+    "token_url": {
+      "description": "Compatibility/provider setting ignored by this plugin; any JSON value is accepted."
+    },
+    "token_uri": {
+      "description": "Compatibility/provider setting ignored by this plugin; any JSON value is accepted."
+    },
+    "scope": {
+      "description": "Compatibility/provider setting ignored by this plugin; any JSON value is accepted."
+    },
+    "subject": {
+      "description": "Compatibility/provider setting ignored by this plugin; any JSON value is accepted."
+    }
+  },
+  "additionalProperties": false
+}

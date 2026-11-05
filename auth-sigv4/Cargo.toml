@@ -34,6 +34,7 @@ tracing = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+jsonschema = { workspace = true }
 # The sealed signing fixture helpers are enabled only in tests.
 busbar-contract = { workspace = true, features = ["test-seal"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }

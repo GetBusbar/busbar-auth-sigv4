@@ -41,7 +41,7 @@ fn settings_schema_matches_sigv4_lifecycle() {
         ),
         (json!({"service":"a".repeat(64)}), true),
         (
-            json!({"region_unread":42,"content_type":[],"token_url":false,"scope":{}}),
+            json!({"region_unread":42,"token_url":false,"scope":{}}),
             true,
         ),
         (json!({"service":"a".repeat(65)}), false),
@@ -49,6 +49,9 @@ fn settings_schema_matches_sigv4_lifecycle() {
         (json!({"service":"s3/other"}), false),
         (json!({"region":"\u{2003} "}), false),
         (json!({"region":42}), false),
+        (json!({"content_type":"application/json"}), false),
+        (json!({"content_type":[]}), false),
+        (json!({"content_type":null}), false),
         (json!({"access_key":"secret"}), false),
         (Value::Null, false),
     ]);

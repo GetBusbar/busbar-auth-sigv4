@@ -793,8 +793,7 @@ fn inbound_steps(p: &Plugin<Auth>, host: Option<(&Dispatcher, &Creds)>, t: &mut 
     }
 }
 
-const SIGV4_SETTINGS: &str =
-    r#"{"service":"svc","region":"us-east-1","content_type":"application/json"}"#;
+const SIGV4_SETTINGS: &str = r#"{"service":"svc","region":"us-east-1"}"#;
 
 fn script(p: &Plugin<Auth>, host: Option<(&Dispatcher, &Creds)>) -> Vec<String> {
     let mut t = Vec::new();
@@ -976,8 +975,6 @@ const EXPECTED: &[&str] = &[
 /// The plugin's own log, folded into the host's: each inbound REJECT names its reason (module
 /// `sigv4`, at info), the AccessKeyId where one parsed, never the signature or the secret.
 const EXPECTED_FOLDS: &[&str] = &[
-    "diag 4294967295 sev=1 busbar_auth_sigv4::style: settings.content_type: not used by the sigv4 style; ignored (the sent content-type is signed) module=\"sigv4\"",
-    "diag 4294967295 sev=1 busbar_auth_sigv4::style: settings.content_type: not used by the sigv4 style; ignored (the sent content-type is signed) module=\"sigv4\"",
     "diag 4294967295 sev=0 busbar_auth_sigv4::style: sigv4 outbound binding refused module=\"sigv4\" reason=\"settings: outbound auth style `bearer` is not served by this plugin\"",
     "diag 4294967295 sev=0 busbar_auth_sigv4::style: sigv4 outbound binding refused module=\"sigv4\" reason=\"settings: outbound auth style `kerberos` is not served by this plugin\"",
     "diag 4294967295 sev=0 busbar_auth_sigv4::instance: sigv4 request not signed: FAILED module=\"sigv4\" reason=\"sigv4: this binding holds no credential of its own (passthrough-only); the request is not sent unsigned\"",
@@ -988,7 +985,6 @@ const EXPECTED_FOLDS: &[&str] = &[
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature\" access_key_id=BBAKCONFORMANCE000002",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"signature\" access_key_id=BBAKCONFORMANCE000001",
     "diag 4294967295 sev=0 busbar_auth_sigv4::inbound: sigv4 inbound request rejected module=\"sigv4\" reason=\"payload hash mismatch\"",
-    "diag 4294967295 sev=1 busbar_auth_sigv4::style: settings.content_type: not used by the sigv4 style; ignored (the sent content-type is signed) module=\"sigv4\"",
     "diag 4294967295 sev=0 busbar_auth_sigv4::instance: sigv4 request not signed: REFUSED, no such handle (never opened, or retired) module=\"sigv4\" handle=1",
 ];
 
@@ -1278,12 +1274,11 @@ fn an_unsendable_session_token_is_refused_at_open_through_the_door() {
     assert_eq!(
         noted,
         [
-    "diag 4294967295 sev=1 busbar_auth_sigv4::style: settings.content_type: not used by the sigv4 style; ignored (the sent content-type is signed) module=\"sigv4\"",
             "diag 4294967295 sev=0 busbar_auth_sigv4::style: sigv4 outbound binding refused \
           module=\"sigv4\" reason=\"credential: the session token holds a byte no header value \
           may carry\""
         ],
-        "the ignored-setting warning and refusal never expose the token"
+        "the refusal never exposes the token"
     );
 }
 

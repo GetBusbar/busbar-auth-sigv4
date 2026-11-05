@@ -29,12 +29,22 @@ Configured under the `sigv4` module name. The style settings:
 | `service` | yes | the AWS service the signature is scoped to (e.g. `bedrock`, `s3`); trimmed, 1 to 64 of `a-z`, `0-9`, `-` |
 | `region` | yes | the AWS region (e.g. `us-east-1`); trimmed, 1 to 64 of `a-z`, `0-9`, `-` |
 | `region_unread` | no | set by busbar, not by hand: the warning logged with each signature when the region was defaulted |
-| `content_type` | no | read past (older configs carry it): the content type signed is the one the request is sent with |
 
 `token_url`, `token_uri`, `scope` and `subject` (keys busbar forwards from its shared provider
 schema) are ignored with one WARN at the bind. Any other key is refused by name. A `service` or
 `region` that is not of the shape above is refused at open (`settings.service: ...`,
 `settings.region: ...`), at `validate`, `open` and `refresh` alike.
+
+### Upgrading signing settings
+
+`content_type` is not a signing setting in 1.6 and is refused as an unknown key. The signer
+covers the actual `content-type` request header. The LLM plane must supply only the current
+signing settings; update its producer together with this plugin.
+
+If a stored SigV4 module or binding settings object actually contains `content_type`, remove
+that unused member during configuration migration before validation. Do not remove or change
+the request's `content-type` header. This is a one-time conversion of present data, not a
+runtime fallback; it does not imply that 1.5.5 exposed this plugin setting.
 
 ### The credential
 

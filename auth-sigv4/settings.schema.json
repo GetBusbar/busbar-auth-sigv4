@@ -24,9 +24,6 @@
     "region_unread": {
       "description": "Host warning about region resolution. Lifecycle accepts any value; the signing binding checks string or null."
     },
-    "content_type": {
-      "description": "Compatibility/provider setting ignored by this plugin; any JSON value is accepted."
-    },
     "token_url": {
       "description": "Compatibility/provider setting ignored by this plugin; any JSON value is accepted."
     },

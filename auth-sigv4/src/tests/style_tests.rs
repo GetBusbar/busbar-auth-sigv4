@@ -27,9 +27,7 @@ fn lines(r: Result<SigV4Binding, Vec<Refusal>>) -> Vec<String> {
         .collect()
 }
 
-/// The two params are needed; the content type is no param (the signature covers the one sent),
-/// and a `content_type` key is read past. OWNER RULING: a session token no header value may carry
-/// is refused at open, naming the finding (was: it opened, and each request signed nothing).
+/// The two scope params are needed; a session token no header value may carry is refused at open.
 #[test]
 fn sigv4_needs_its_two_params_and_refuses_an_unsendable_token() {
     assert_eq!(
@@ -49,7 +47,7 @@ fn sigv4_needs_its_two_params_and_refuses_an_unsendable_token() {
     let r = open(
         SIGV4,
         Some("A:S:T\r\nX"),
-        r#"{"service":"svc","region":"us-east-1","content_type":"application/json"}"#,
+        r#"{"service":"svc","region":"us-east-1"}"#,
     );
     assert_eq!(
         lines(r),
@@ -85,11 +83,7 @@ fn every_refusing_finding_is_answered_together() {
 /// nothing silently (OWNER RULING; was: an empty field set).
 #[test]
 fn a_keyless_binding_opens_but_refuses_to_sign_in_own_mode() {
-    let r = open(
-        SIGV4,
-        None,
-        r#"{"service":"svc","region":"us-east-1","content_type":"application/json"}"#,
-    );
+    let r = open(SIGV4, None, r#"{"service":"svc","region":"us-east-1"}"#);
     let binding = r.expect("a keyless sigv4 binding still opens: the caller's credential may sign");
     let hash = sigv4::sha256_hex(b"{}");
     let facts = SignFacts {
@@ -242,7 +236,7 @@ fn a_malformed_credential_is_refused_at_open() {
 }
 
 /// A style setting this plugin does not read is refused by name, not ignored (a typo such as
-/// `regoin` would otherwise go unnoticed); `content_type` is still read past (1.5.5 configs).
+/// `regoin` would otherwise go unnoticed).
 #[test]
 fn an_unknown_settings_key_is_refused_by_name() {
     assert_eq!(
@@ -253,12 +247,36 @@ fn an_unknown_settings_key_is_refused_by_name() {
         )),
         ["settings: unknown key `regoin`"]
     );
-    assert!(open(
-        SIGV4,
-        Some("A:S"),
-        r#"{"service":"s3","region":"x","content_type":"application/json"}"#
-    )
-    .is_ok());
+}
+
+#[test]
+fn a_content_type_setting_is_refused_instead_of_ignored() {
+    for value in [
+        serde_json::json!("application/json"),
+        serde_json::json!([]),
+        serde_json::Value::Null,
+    ] {
+        let settings =
+            serde_json::json!({"service":"s3", "region":"us-east-1", "content_type":value});
+        assert_eq!(
+            lines(open(SIGV4, Some("A:S"), &settings.to_string())),
+            ["settings: unknown key `content_type`"]
+        );
+    }
+}
+
+#[test]
+fn scope_settings_bind_without_an_ignored_setting_warning() {
+    let cap = crate::diagnostics::Log::new(tracing::Level::WARN);
+    let bound = tracing::subscriber::with_default(cap.subscriber(), || {
+        open(
+            SIGV4,
+            Some("A:S"),
+            r#"{"service":"bedrock","region":"us-east-1"}"#,
+        )
+    });
+    assert!(bound.is_ok());
+    assert!(cap.messages().is_empty());
 }
 
 /// The warning the kernel hands in as `region_unread` when the provider's host names no region and
@@ -305,7 +323,6 @@ fn a_bedrock_host_with_no_derivable_region_warns_on_every_signature() {
     let settings = serde_json::json!({
         "service": "bedrock",
         "region": "us-east-1",
-        "content_type": "application/json",
         "region_unread": REGION_UNREAD,
     })
     .to_string();
@@ -394,12 +411,12 @@ fn a_key_core_forwards_is_ignored_with_one_warn_at_the_bind() {
         open(
             SIGV4,
             Some("A:S"),
-            r#"{"service":"s","region":"r","scope":"x","token_url":"https://t","token_uri":"https://u","subject":"y","content_type":"application/x-amz-json-1.1"}"#,
+            r#"{"service":"s","region":"r","scope":"x","token_url":"https://t","token_uri":"https://u","subject":"y"}"#,
         )
     });
     assert!(bound.is_ok(), "a forwarded key does not fail the bind");
     let warned = cap.messages();
-    assert_eq!(warned.len(), 5, "{warned:?}");
+    assert_eq!(warned.len(), 4, "{warned:?}");
     for key in ["token_uri", "subject"] {
         assert_eq!(
             warned
@@ -412,12 +429,6 @@ fn a_key_core_forwards_is_ignored_with_one_warn_at_the_bind() {
             "{warned:?}"
         );
     }
-    assert!(
-        warned
-            .iter()
-            .any(|l| l.contains("settings.content_type: not used by the sigv4 style; ignored")),
-        "{warned:?}"
-    );
     assert!(
         warned
             .iter()

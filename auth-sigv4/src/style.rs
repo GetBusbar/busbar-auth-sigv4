@@ -7,11 +7,10 @@
 //! (`crate::instance::SigV4::sign`).
 //!
 //! The settings schema: `{service, region}`, each trimmed and 1 to 64 of `[a-z0-9-]` (refused at
-//! open otherwise, `settings.<key>: <reason>`). A `content_type` key is
-//! read past (older configs carry it): the content type a signature covers is the one the request
-//! is sent with (the style declares `STYLE_NEEDS_HEADERS` and signs the sent value), never a
-//! setting. `region_unread` is the kernel's warning for a region it defaulted at seal, logged with
-//! each signature. The keys core forwards from its shared provider schema (`token_url`,
+//! open otherwise, `settings.<key>: <reason>`). The content type a signature covers is the one
+//! the request is sent with (the style declares `STYLE_NEEDS_HEADERS` and signs the sent value),
+//! never a setting. `region_unread` is the kernel's warning for a region it defaulted at seal,
+//! logged with each signature. The keys core forwards from its shared provider schema (`token_url`,
 //! `token_uri`, `scope`, `subject`) are ignored with one WARN each at the bind. Any other key is
 //! refused by name (``settings: unknown key `<k>` ``), never ignored.
 //!
@@ -133,10 +132,10 @@ fn text(m: &Map<String, Value>, key: &'static str) -> Result<Option<String>, Ref
     }
 }
 
-/// The style settings this plugin reads, and `content_type`, read past (older configs carry it).
+/// The style settings this plugin reads.
 /// `region_unread` is the kernel's: the warning it hands in when it resolved `region` at seal to the
 /// dialect's default (see [`SigV4Params::region_unread`]).
-const KNOWN_KEYS: [&str; 4] = ["service", "region", "region_unread", "content_type"];
+const KNOWN_KEYS: [&str; 3] = ["service", "region", "region_unread"];
 
 /// The keys core forwards from its shared provider/style schema (its `StyleParams`) to every
 /// style's instance open and bind. They mean nothing to sigv4 and are ignored, never refused
@@ -152,15 +151,8 @@ pub(crate) fn unknown_keys(m: &Map<String, Value>) -> Vec<Refusal> {
         .collect()
 }
 
-/// One WARN per forwarded key the bind ignores, and one for a `content_type` (read past: the
-/// content type a signature covers is the one the request is sent with).
+/// One WARN per forwarded key the bind ignores.
 fn warn_ignored(m: &Map<String, Value>) {
-    if m.contains_key("content_type") {
-        tracing::warn!(
-            module = "sigv4",
-            "settings.content_type: not used by the sigv4 style; ignored (the sent content-type is signed)"
-        );
-    }
     for key in m.keys().filter(|k| FORWARDED_KEYS.contains(&k.as_str())) {
         tracing::warn!(
             module = "sigv4",

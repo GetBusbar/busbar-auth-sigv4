@@ -226,10 +226,6 @@ fn plugin_settings(settings: &[u8]) -> Result<(), Refusal> {
     }
 }
 
-/// `VerifyPlugin::open`'s static refusal (the combined door opens through `OutboundPlugin::open`,
-/// which names each key).
-const SETTINGS_REFUSED: &str = "settings: not a JSON object of the sigv4 style's keys";
-
 /// The refusal `open_outbound` answers for a bind that names no style.
 const NO_STYLE: &str = "settings: no outbound auth style was named";
 
@@ -472,10 +468,23 @@ fn service_error_word(e: ServiceError) -> &'static str {
 }
 
 impl VerifyPlugin for SigV4 {
-    /// The kit opens the one instance through [`OutboundPlugin::open`]; this builds the same.
-    fn open(settings: &[u8], _: &[&[u8]]) -> Result<Self, &'static str> {
-        plugin_settings(settings).map_err(|_| SETTINGS_REFUSED)?;
+    fn validate(settings: &[u8]) -> Result<(), Refusal> {
+        plugin_settings(settings)
+    }
+
+    /// The combined door opens through [`OutboundPlugin::open`]; a verifier-only adapter uses
+    /// the same settings checks and preserves their typed refusal.
+    fn open_refusing(settings: &[u8], _: &[&[u8]]) -> Result<Self, Refusal> {
+        plugin_settings(settings)?;
         Ok(SigV4::new(0))
+    }
+
+    /// Verification holds no settings, resolved secrets or cached verdicts: every request reads
+    /// its credential through `records.secret`. Validate the new document and report zero cache
+    /// entries dropped. Outbound bindings and their generations belong to `OutboundPlugin`.
+    fn reload(&self, settings: &[u8], _: &[&[u8]]) -> Result<u64, Refusal> {
+        plugin_settings(settings)?;
+        Ok(0)
     }
 
     /// `verify` at the `HeadBody` point: the inbound SigV4 check ([`inbound::judge`]), its secret

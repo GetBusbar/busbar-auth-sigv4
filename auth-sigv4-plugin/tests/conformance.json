@@ -150,8 +150,7 @@
         "credential": "AKIDEXAMPLE:SECRET:TOKEN",
         "settings": {
           "service": "svc",
-          "region": "us-east-1",
-          "content_type": "application/json"
+          "region": "us-east-1"
         },
         "head": {
           "method": "POST",

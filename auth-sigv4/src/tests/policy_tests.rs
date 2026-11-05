@@ -118,7 +118,7 @@ fn an_unknown_plugin_level_key_is_refused_by_name_at_validate_open_and_refresh()
     for ok in [
         &b""[..],
         b"{}",
-        br#"{"service":"bedrock","region":"us-east-1","region_unread":"w","content_type":"a/b"}"#,
+        br#"{"service":"bedrock","region":"us-east-1","region_unread":"w"}"#,
     ] {
         assert_eq!(plugin_level(ok), [None, None, None]);
     }
@@ -199,4 +199,78 @@ fn a_declined_secret_read_names_what_the_host_answered() {
         crate::service_error_word(ServiceError::Short { bytes: 1, items: 1 }),
         "short"
     );
+}
+
+#[test]
+fn a_content_type_setting_is_refused_at_validate_open_and_refresh() {
+    let want = Some((
+        busbar_contract::abi::mechanism::call::Outcome::Failed,
+        "settings: unknown key `content_type`".to_string(),
+    ));
+    assert_eq!(
+        plugin_level(br#"{"content_type":"application/json"}"#),
+        [want.clone(), want.clone(), want]
+    );
+}
+
+#[test]
+fn verifier_lifecycle_preserves_typed_settings_refusals() {
+    use crate::instance::SigV4;
+    use busbar_contract::abi::mechanism::call::Outcome;
+    use busbar_contract::abi::sdk::auth_door::VerifyPlugin;
+
+    let instance = <SigV4 as VerifyPlugin>::open_refusing(b"{}", &[]).expect("valid settings");
+    for (settings, message) in [
+        (&b"[]"[..], "settings: must be a JSON object"),
+        (
+            &br#"{"content_type":"application/json"}"#[..],
+            "settings: unknown key `content_type`",
+        ),
+        (
+            &br#"{"service":"Bad"}"#[..],
+            "settings.service: not an AWS service name (1 to 64 of a-z, 0-9 and -)",
+        ),
+    ] {
+        let refused = [
+            <SigV4 as VerifyPlugin>::validate(settings).err(),
+            <SigV4 as VerifyPlugin>::open_refusing(settings, &[]).err(),
+            <SigV4 as VerifyPlugin>::reload(&instance, settings, &[]).err(),
+        ];
+        for refusal in refused {
+            let refusal = refusal.expect("invalid settings are refused");
+            assert_eq!(refusal.outcome(), Outcome::Failed);
+            assert_eq!(refusal.text(), Some(message));
+        }
+    }
+}
+
+#[test]
+fn verifier_reload_has_no_cache_and_preserves_outbound_bindings() {
+    use crate::instance::SigV4;
+    use busbar_contract::abi::sdk::auth_door::VerifyPlugin;
+
+    let instance = <SigV4 as VerifyPlugin>::open_refusing(b"{}", &[]).expect("valid settings");
+    let binding = crate::style::open_binding(
+        "sigv4",
+        Some(b"ACCESS:SECRET"),
+        Some(br#"{"service":"bedrock","region":"us-east-1"}"#),
+    )
+    .expect("outbound settings");
+    let handle = instance.keep(binding);
+    assert_eq!(
+        <SigV4 as VerifyPlugin>::reload(
+            &instance,
+            br#"{"service":"s3","region":"eu-west-1"}"#,
+            &[],
+        )
+        .expect("no verifier-local settings to replace"),
+        0
+    );
+    let held = instance
+        .binding(handle)
+        .expect("outbound binding remains live");
+    assert_eq!(held.params().service, "bedrock");
+    assert_eq!(held.params().region, "us-east-1");
+    assert!(<SigV4 as VerifyPlugin>::reload(&instance, b"[]", &[]).is_err());
+    assert!(instance.binding(handle).is_some());
 }

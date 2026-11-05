@@ -11,8 +11,7 @@ use crate::style;
 use busbar_contract::abi::auth::{MODE_OWN, MODE_PASSTHROUGH};
 use busbar_contract::abi::mechanism::call::Outcome;
 
-const SETTINGS: &str =
-    r#"{"service":"svc","region":"us-east-1","content_type":"application/json"}"#;
+const SETTINGS: &str = r#"{"service":"svc","region":"us-east-1"}"#;
 
 /// Whose credential `mode` signs with: the caller's (`caller`, none when empty) in passthrough.
 fn who(mode: u32, caller: &str) -> Who<'_> {

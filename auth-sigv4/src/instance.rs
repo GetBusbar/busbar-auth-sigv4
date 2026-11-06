@@ -47,7 +47,7 @@ pub(crate) enum Signed {
     Failed(Cow<'static, str>),
 }
 
-/// One plugin instance: the `VerifyPlugin` and `OutboundPlugin` the door kit serves (`crate`).
+/// One plugin instance: the `VerifyPlugin` and `OutboundPlugin` the door kit serves.
 pub struct SigV4 {
     generation: AtomicU64,
     next_handle: AtomicU64,
@@ -177,12 +177,14 @@ impl SigV4 {
             .retain(|_, (g, _)| *g != generation);
     }
 
-    /// `tick`: pre-derive every live binding's day keys ahead of midnight. Answers the next tick,
-    /// ALWAYS: the schedule runs from the instance's open, before any binding exists, and a `0`
-    /// would end it for good (`TickOut::next_tick_ns`), leaving a later binding's day keys to be
-    /// derived on the request path (a daily signing key is derived ahead of time).
-    /// The host's wall-clock `now` (seconds since the epoch; `None`: the clock cannot be
-    /// read, so no key is derived, never 1970's, and the first such tick of each outage warns).
+    /// `tick`: pre-derive every live binding's day keys ahead of midnight, at the host's wall-clock
+    /// `now` (seconds since the epoch). `None`: the clock cannot be read, so no key is derived
+    /// (never 1970's), and the first such tick of each outage warns.
+    ///
+    /// Answers the next tick (`now_ns` plus the tick interval) ALWAYS, on both paths: the schedule
+    /// runs from the instance's open, before any binding exists, and a `0` would end it for good
+    /// (`TickOut::next_tick_ns`), leaving a later binding's day keys to be derived on the request
+    /// path.
     pub(crate) fn tick_at(&self, now_ns: u64, now: Option<u64>) -> u64 {
         let next = now_ns.saturating_add(PREDERIVE_TICK_NS);
         let Some(now) = now else {

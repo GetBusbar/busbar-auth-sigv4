@@ -23,7 +23,7 @@ use busbar_contract::abi::sdk::cred::{Cred, Parts};
 use busbar_contract::header::is_legal_header_value;
 use zeroize::Zeroizing;
 
-use crate::inbound::{X_AMZ_CONTENT_SHA256, X_AMZ_DATE};
+use crate::inbound::{X_AMZ_CONTENT_SHA256, X_AMZ_DATE, X_AMZ_SECURITY_TOKEN};
 use crate::sigv4;
 use crate::sigv4::SECS_PER_DAY;
 
@@ -176,19 +176,6 @@ impl SigningCredential {
     }
 }
 
-/// Set (or replace) one header in an envelope vector, case-insensitively — the envelope is a small
-/// `Vec`, not a map, because the wire request preserves the order fields were set in.
-fn set_header(envelope: &mut Vec<(String, String)>, name: &str, value: String) {
-    if let Some(existing) = envelope
-        .iter_mut()
-        .find(|(k, _)| k.eq_ignore_ascii_case(name))
-    {
-        existing.1 = value;
-    } else {
-        envelope.push((name.to_string(), value));
-    }
-}
-
 /// One day's derived key.
 struct DayKey {
     datestamp: String,
@@ -307,13 +294,14 @@ impl SigV4Binding {
             let set_here = name.eq_ignore_ascii_case(X_AMZ_DATE)
                 || name.eq_ignore_ascii_case(X_AMZ_CONTENT_SHA256)
                 || (cred.session_token.is_some()
-                    && name.eq_ignore_ascii_case("x-amz-security-token"));
+                    && name.eq_ignore_ascii_case(X_AMZ_SECURITY_TOKEN));
             if !set_here {
                 headers.push(((*name).to_string(), (*value).to_string()));
             }
         }
-        set_header(&mut headers, X_AMZ_DATE, amzdate.clone());
-        set_header(&mut headers, X_AMZ_CONTENT_SHA256, payload_hash.clone());
+        // The sent date and payload hash lines were left out above: the signer's own are signed.
+        headers.push((X_AMZ_DATE.to_string(), amzdate.clone()));
+        headers.push((X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()));
         let canonical_uri = sigv4::canonical_uri(facts.path, service);
         let canonical_query = Zeroizing::new(sigv4::canonical_query(facts.query));
         self.derive(&datestamp);
@@ -377,7 +365,7 @@ impl SigV4Binding {
         ];
         if let Some(t) = &cred.session_token {
             fields.push((
-                "x-amz-security-token".to_string(),
+                X_AMZ_SECURITY_TOKEN.to_string(),
                 FieldValue::Sealed(Parts::new().sealed(t.field())),
             ));
         }

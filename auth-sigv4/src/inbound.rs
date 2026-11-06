@@ -33,12 +33,18 @@ use busbar_contract::abi::sdk::chip::aws4::Aws4Request;
 use busbar_contract::abi::sdk::cred::Cred;
 use busbar_contract::constant_time_eq;
 
-use crate::sigv4::{canonical_uri, SIGNATURE_TERMINATION, SIGV4_ALGORITHM};
+use crate::sigv4::{
+    canonical_query, canonical_uri, SECS_PER_DAY, SECS_PER_HOUR, SIGNATURE_TERMINATION,
+    SIGV4_ALGORITHM,
+};
 
 /// The canonical lowercase name of the `x-amz-date` header.
 pub const X_AMZ_DATE: &str = "x-amz-date";
 /// The canonical lowercase name of the `x-amz-content-sha256` header.
 pub const X_AMZ_CONTENT_SHA256: &str = "x-amz-content-sha256";
+/// The canonical lowercase name of the `x-amz-security-token` header (a temporary credential's
+/// session token): signed outbound, marked sensitive, and stripped inbound.
+pub const X_AMZ_SECURITY_TOKEN: &str = "x-amz-security-token";
 /// The `authorization` header: the one carrier this plugin's `verify` reads its credential from.
 pub const AUTHORIZATION: &str = "authorization";
 /// The credential kind the host holds SigV4 credentials under (`records.secret`'s `kind`).
@@ -261,7 +267,7 @@ fn parse_amz_date(amzdate: &str) -> Option<u64> {
     let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146_097 + doe - 719_468;
-    let epoch = days * crate::sigv4::SECS_PER_DAY as i64 + hour * 3_600 + min * 60 + sec;
+    let epoch = days * SECS_PER_DAY as i64 + hour * SECS_PER_HOUR as i64 + min * 60 + sec;
     if epoch < 0 {
         return None;
     }
@@ -270,7 +276,7 @@ fn parse_amz_date(amzdate: &str) -> Option<u64> {
 
 /// The fully-assembled inputs for verifying ONE inbound SigV4 request. `canonical_uri` MUST already
 /// be URI-encoded the SAME way the signer encodes it (`crate::sigv4::canonical_uri`); `canonical_querystring`
-/// MUST be [`canonical_query_string`]'s (or empty). `headers` carries the ACTUAL request header
+/// MUST be [`crate::sigv4::canonical_query`]'s (or empty). `headers` carries the ACTUAL request header
 /// values for (at least) every name in the parsed `SignedHeaders` list; extra headers are ignored
 /// (only the signed ones enter the canonical request).
 pub struct InboundRequest<'a, H = String> {
@@ -294,11 +300,11 @@ pub struct InboundRequest<'a, H = String> {
 ///   1. validates `x-amz-date` is within ±`CLOCK_SKEW_SECS` of `now` (replay/skew bound),
 ///   2. confirms the Credential's `datestamp` agrees with `x-amz-date`'s date (a signer always
 ///      derives the scope datestamp from the same timestamp),
-///   3. selects EXACTLY the headers named in `SignedHeaders` from the request (rejecting if any is
-///      absent, or if `host` is not among them — `host` MUST be signed),
-///   4. recomputes the signature via [`Cred::aws4_verify`] (NO duplicate canonicalization), and
-///   5. constant-time-compares the recomputed signature to the client's, AND constant-time-compares
-///      the recomputed SignedHeaders string to the client's claimed one.
+///   3. requires `SignedHeaders` to be lowercase ASCII and strictly ascending (so it is exactly the list
+///      the recomputation signs over) and selects EXACTLY the headers it names from the request
+///      (rejecting if any is absent, or if `host` is not among them — `host` MUST be signed), and
+///   4. recomputes the signature via [`Cred::aws4_verify`] (NO duplicate canonicalization), which
+///      compares it to the client's in constant time.
 ///
 /// Returns `Ok(())` only when every check passes. The caller MUST invoke this even for an UNKNOWN
 /// AccessKeyId (with the plugin's dummy secret) so the unknown-key and bad-signature paths are
@@ -332,21 +338,30 @@ pub fn verify_inbound_sigv4<H: AsRef<str>>(
 
     let mut prev: Option<&str> = None;
     for name in &signed {
-        if name.bytes().any(|b| b.is_ascii_uppercase()) || prev.is_some_and(|p| p >= *name) {
+        if !name.is_ascii()
+            || name.bytes().any(|b| b.is_ascii_uppercase())
+            || prev.is_some_and(|p| p >= *name)
+        {
             return Err(VerifyError::SignedHeadersMismatch);
         }
         prev = Some(name);
     }
 
+    // The request's lines by lowercased name (a stable sort keeps each name's values in request
+    // order), so each signed name is a binary search: never a scan of every line per signed name,
+    // whose cost an unauthenticated client would choose.
+    let mut by_name: Vec<(String, &str)> = req
+        .headers
+        .iter()
+        .map(|(k, v)| (k.as_ref().to_ascii_lowercase(), v.as_ref()))
+        .collect();
+    by_name.sort_by(|a, b| a.0.cmp(&b.0));
     let mut selected = Zeroizing::new(Vec::with_capacity(req.headers.len()));
     for name in &signed {
+        let start = by_name.partition_point(|(k, _)| k.as_str() < *name);
         let before = selected.len();
-        for (_, value) in req
-            .headers
-            .iter()
-            .filter(|(k, _)| k.as_ref().eq_ignore_ascii_case(name))
-        {
-            selected.push(((*name).to_owned(), value.as_ref().to_owned()));
+        for (_, value) in by_name[start..].iter().take_while(|(k, _)| k == name) {
+            selected.push(((*name).to_owned(), (*value).to_owned()));
         }
         if selected.len() == before {
             return Err(VerifyError::SignedHeadersMismatch);
@@ -366,26 +381,11 @@ pub fn verify_inbound_sigv4<H: AsRef<str>>(
         datestamp: &parsed.datestamp,
     };
 
-    let mut computed_names: Vec<String> = signed.iter().map(|name| name.to_lowercase()).collect();
-    computed_names.sort();
-    let computed_signed_headers = computed_names.join(";");
-    let headers_ok = constant_time_eq(&computed_signed_headers, &parsed.signed_headers);
-    let sig_ok = credential.aws4_verify(&request, &parsed.signature);
-    if std::hint::black_box(u8::from(headers_ok) & u8::from(sig_ok)) == 1 {
+    if credential.aws4_verify(&request, &parsed.signature) {
         Ok(())
     } else {
         Err(VerifyError::SignatureMismatch)
     }
-}
-
-/// Canonicalize the received query string for SigV4, the AWS rule and the outbound signer's
-/// (`crate::sigv4::canonical_query`, shared): each `name=value` pair (a bare name has the empty
-/// value) has its `%XX` escapes decoded once and every byte re-encoded over the unreserved set with
-/// uppercase hex, the pairs sorted by encoded name then value and joined with `&`; `""` for none.
-/// A client's already-canonical query is unchanged (the encoding is idempotent over the canonical
-/// form), and one sent with a reserved byte raw or a lowercase escape verifies as AWS recomputes it.
-pub fn canonical_query_string(query: Option<&str>) -> String {
-    crate::sigv4::canonical_query(query)
 }
 
 /// A header value as the kernel's `HeaderValue::to_str` read it: the text when every byte is
@@ -674,7 +674,7 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
     let path = if path.is_empty() { "/" } else { path };
 
     let canonical_uri = canonical_uri(path, &parsed.service);
-    let canonical_qs = Zeroizing::new(canonical_query_string(query));
+    let canonical_qs = Zeroizing::new(canonical_query(query));
     let inbound = InboundRequest {
         method,
         canonical_uri: &canonical_uri,

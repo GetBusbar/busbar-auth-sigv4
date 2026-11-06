@@ -34,7 +34,7 @@
 //! ## Inbound: SigV4 verification
 //!
 //! The inbound SigV4 check reads through a host store service, keeping the dummy-secret timing
-//! equivalence for an unknown AccessKeyId. It is [`inbound`]; `verify` serves it at
+//! equivalence for an unknown AccessKeyId. It is `inbound`; `verify` serves it at
 //! the `HeadBody` point (`CAP_INBOUND`, every header line, the body):
 //!
 //! * no `authorization` line, or one that does not open with `AWS4-HMAC-SHA256`: PASS (not this
@@ -70,7 +70,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-pub mod inbound;
+mod inbound;
 mod instance;
 mod signing;
 mod sigv4;
@@ -109,7 +109,7 @@ use crate::signing::SignFacts;
 
 /// The fields that carry credential material: `FIELD_SENSITIVE` (an h2 encoder sends them
 /// never-indexed; lead-signed 2026-10-30). The date and the payload hash carry none.
-const SENSITIVE_FIELDS: [&str; 2] = ["authorization", "x-amz-security-token"];
+const SENSITIVE_FIELDS: [&str; 2] = [inbound::AUTHORIZATION, inbound::X_AMZ_SECURITY_TOKEN];
 
 /// The flags field `name` is written with.
 fn field_flags(name: &str) -> u32 {
@@ -121,9 +121,9 @@ fn field_flags(name: &str) -> u32 {
 }
 
 /// The one style this plugin serves: it signs the body, so it needs the `HeadBody` point (THE
-/// DESIGN, "Auth points and guest lists") and hashes the body itself; it signs the content type
-/// the request is sent with, so it needs the header envelope; it serves the caller's credential
-/// too.
+/// DESIGN, "Auth points and guest lists") and hashes the body itself; it signs every content type
+/// and every `x-amz-*` line the request is sent with, so it needs the header envelope; it serves
+/// the caller's credential too.
 const STYLE_DECLS: [StyleDecl; 1] = [StyleDecl {
     name: abi_str(style::SIGV4),
     flags: STYLE_CALLER_CREDENTIAL | STYLE_NEEDS_HEADERS,
@@ -182,12 +182,12 @@ const MARKS: [MarkWord; 6] = [
     ),
 ];
 
-/// What the plugin states: its name, version, concurrency, marks and auth tail. It states no
-/// diagnostic ids (a credential that cannot sign is refused at open, or its request FAILS with the
-/// reason; nothing is noted beside a request sent unsigned).
 /// JSON Schema for the lifecycle settings document, embedded in the signed Statement.
 const SETTINGS_SCHEMA: &[u8] = include_bytes!("../settings.schema.json");
 
+/// What the plugin states: its name, version, concurrency, marks and auth tail. It states no
+/// diagnostic ids (a credential that cannot sign is refused at open, or its request FAILS with the
+/// reason; nothing is noted beside a request sent unsigned).
 const STATEMENT: Statement = with_tail(
     Statement {
         settings_schema: busbar_contract::abi::mechanism::call::Blob::json(SETTINGS_SCHEMA),
@@ -278,12 +278,12 @@ const AMZ_NOT_UTF8: &str = "sigv4 cannot sign: an x-amz-* line's value is not UT
 /// Every `x-amz-*` line and each additional `content-type` line in the header envelope, in
 /// order. The first content type is carried separately by `SignFacts`; all repetitions must
 /// also be signed. `Err` when a signed line is not text.
-fn sent_signing_headers<'a>(
-    view: &FieldsView<'a>,
+pub(crate) fn sent_signing_headers<'a>(
+    headers: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
 ) -> Result<Vec<(&'a str, &'a str)>, &'static str> {
     let mut out = Vec::new();
     let mut first_content_type = true;
-    for (name, value) in view.headers() {
+    for (name, value) in headers {
         if name.eq_ignore_ascii_case(b"content-type") {
             let value = std::str::from_utf8(value).map_err(|_| CONTENT_TYPE_NOT_UTF8)?;
             if first_content_type {
@@ -372,7 +372,7 @@ impl OutboundPlugin for SigV4 {
         _: &Op<'_>,
     ) -> Poll<FieldsAnswer> {
         let hash = crate::sigv4::sha256_hex(view.body().unwrap_or_default());
-        let amz = sent_signing_headers(view);
+        let amz = sent_signing_headers(view.headers());
         let who = match view.mode() {
             Mode::Own => Who::Own,
             Mode::Passthrough => Who::Caller(view.caller_credential()),
@@ -487,7 +487,7 @@ impl VerifyPlugin for SigV4 {
         Ok(0)
     }
 
-    /// `verify` at the `HeadBody` point: the inbound SigV4 check ([`inbound::judge`]), its secret
+    /// `verify` at the `HeadBody` point: the inbound SigV4 check (`inbound::judge`), its secret
     /// read through the host's `records.secret` on every call.
     fn verify_ticketed(&self, view: &VerifyView<'_>, op: &VerifyOp) -> Poll<Answer> {
         let request = inbound::Request {
@@ -513,12 +513,12 @@ impl VerifyPlugin for SigV4 {
 
         if inbound::carries_sigv4(&request) {
             answer.strips = vec![Strip::field(inbound::AUTHORIZATION)];
-            if request
-                .lines
-                .iter()
-                .any(|(name, _)| name.eq_ignore_ascii_case(b"x-amz-security-token"))
-            {
-                answer.strips.push(Strip::field("x-amz-security-token"));
+            if request.lines.iter().any(|(name, _)| {
+                name.eq_ignore_ascii_case(inbound::X_AMZ_SECURITY_TOKEN.as_bytes())
+            }) {
+                answer
+                    .strips
+                    .push(Strip::field(inbound::X_AMZ_SECURITY_TOKEN));
             }
         }
         Poll::Ready(answer)

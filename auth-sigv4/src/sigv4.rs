@@ -10,7 +10,8 @@ use zeroize::Zeroizing;
 
 /// The seconds in a day: the one constant the date arithmetic and the day-key schedule share.
 pub(crate) const SECS_PER_DAY: u64 = 86_400;
-const SECS_PER_HOUR: u64 = 3_600;
+/// The seconds in an hour.
+pub(crate) const SECS_PER_HOUR: u64 = 3_600;
 
 /// The SigV4 algorithm token that appears in the `Authorization` header and the string-to-sign.
 pub const SIGV4_ALGORITHM: &str = "AWS4-HMAC-SHA256";
@@ -159,8 +160,7 @@ fn canonical_query_component(raw: &str) -> Zeroizing<String> {
 /// value in canonical form ([`canonical_query_component`]), sorted by name then value, joined with
 /// `&`; `""` for none. The server recomputes it from what it receives the same way, so a reserved
 /// byte sent raw (`:`, `/`), a lowercase escape or an escaped unreserved byte signs as AWS checks
-/// it. The inbound check recomputes a client's canonical query with it too
-/// ([`crate::inbound::canonical_query_string`]).
+/// it. The inbound check recomputes a client's canonical query with it too.
 pub fn canonical_query(query: Option<&str>) -> String {
     let Some(q) = query.filter(|q| !q.is_empty()) else {
         return String::new();

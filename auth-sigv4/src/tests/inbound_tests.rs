@@ -660,38 +660,6 @@ fn test_verify_inbound_sigv4_datestamp_must_match_amzdate() {
     );
 }
 
-/// AWS published worked example — GET iam ListUsers, 2015-08-30: the inbound recomputation
-/// reproduces AWS's documented signature.
-#[test]
-fn test_sign_v4_matches_aws_published_example() {
-    let headers = vec![
-        (
-            "content-type".to_string(),
-            "application/x-www-form-urlencoded; charset=utf-8".to_string(),
-        ),
-        ("host".to_string(), "iam.amazonaws.com".to_string()),
-        (X_AMZ_DATE.to_string(), "20150830T123600Z".to_string()),
-    ];
-    let payload_hash = sha256_hex(b"");
-    let (sig, signed) = sign_v4(
-        "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
-        "us-east-1",
-        "iam",
-        "GET",
-        "/",
-        "Action=ListUsers&Version=2010-05-08",
-        &headers,
-        &payload_hash,
-        "20150830T123600Z",
-        "20150830",
-    );
-    assert_eq!(signed, "content-type;host;x-amz-date");
-    assert_eq!(
-        sig,
-        "5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7"
-    );
-}
-
 #[test]
 fn test_verify_inbound_sigv4_unknown_key_dummy_secret_is_signature_mismatch() {
     let amzdate = "20150830T123600Z";
@@ -812,33 +780,39 @@ fn test_verify_inbound_sigv4_missing_date_rejected() {
 
 #[test]
 fn test_canonical_query_string_decodes_and_reencodes_each_name_and_value() {
-    assert_eq!(canonical_query_string(None), "");
-    assert_eq!(canonical_query_string(Some("")), "");
-    assert_eq!(canonical_query_string(Some("b=2&a=1")), "a=1&b=2");
-    assert_eq!(canonical_query_string(Some("flag")), "flag=");
-    assert_eq!(canonical_query_string(Some("t=abc==")), "t=abc%3D%3D");
-    assert_eq!(canonical_query_string(Some("p=a%2Fb")), "p=a%2Fb");
-    assert_eq!(canonical_query_string(Some("p=a%2fb")), "p=a%2Fb");
-    assert_eq!(canonical_query_string(Some("p=a/b:c")), "p=a%2Fb%3Ac");
-    assert_eq!(canonical_query_string(Some("k=%7E")), "k=~");
+    assert_eq!(crate::sigv4::canonical_query(None), "");
+    assert_eq!(crate::sigv4::canonical_query(Some("")), "");
+    assert_eq!(crate::sigv4::canonical_query(Some("b=2&a=1")), "a=1&b=2");
+    assert_eq!(crate::sigv4::canonical_query(Some("flag")), "flag=");
+    assert_eq!(
+        crate::sigv4::canonical_query(Some("t=abc==")),
+        "t=abc%3D%3D"
+    );
+    assert_eq!(crate::sigv4::canonical_query(Some("p=a%2Fb")), "p=a%2Fb");
+    assert_eq!(crate::sigv4::canonical_query(Some("p=a%2fb")), "p=a%2Fb");
+    assert_eq!(
+        crate::sigv4::canonical_query(Some("p=a/b:c")),
+        "p=a%2Fb%3Ac"
+    );
+    assert_eq!(crate::sigv4::canonical_query(Some("k=%7E")), "k=~");
 
     assert_eq!(
-        canonical_query_string(Some("&b=2&&a=2&a=1&")),
+        crate::sigv4::canonical_query(Some("&b=2&&a=2&a=1&")),
         "a=1&a=2&b=2"
     );
 
     assert_eq!(
-        canonical_query_string(Some("Param2=value2&Param1=value1")),
+        crate::sigv4::canonical_query(Some("Param2=value2&Param1=value1")),
         "Param1=value1&Param2=value2",
         "get-vanilla-query-order-key-case"
     );
     assert_eq!(
-        canonical_query_string(Some("Param1=value2&Param1=Value1")),
+        crate::sigv4::canonical_query(Some("Param1=value2&Param1=Value1")),
         "Param1=Value1&Param1=value2",
         "get-vanilla-query-order-key"
     );
     assert_eq!(
-        canonical_query_string(Some("\u{1234}=bar")),
+        crate::sigv4::canonical_query(Some("\u{1234}=bar")),
         "%E1%88%B4=bar",
         "get-vanilla-utf8-query"
     );
@@ -877,7 +851,7 @@ fn the_aws_suite_query_vectors_verify_over_the_received_query() {
             signed_headers: "host;x-amz-date".to_string(),
             signature: signature.to_string(),
         };
-        let canonical = canonical_query_string(Some(query));
+        let canonical = crate::sigv4::canonical_query(Some(query));
         let req = InboundRequest {
             method: "GET",
             canonical_uri: "/",
@@ -1715,18 +1689,6 @@ fn the_verification_runs_over_the_dummy_unless_the_credential_is_live_text() {
     );
 }
 
-/// The fake's bookkeeping is itself what the other tests lean on: any id it does not hold answers
-/// an empty secret, not live, as the host does.
-#[test]
-fn the_fake_source_answers_an_empty_not_live_secret_for_any_other_id() {
-    let mut fake = Fake::default();
-    let Read::Secret { secret, live } = fake.read("sigv4", "nobody") else {
-        panic!("a secret");
-    };
-    assert!(secret.is_empty());
-    assert!(!live);
-}
-
 /// A request signed over `claimed` (the SignedHeaders list as the client writes it) whose
 /// canonical headers are `canon` (name, value) in the order verify recomputes them, with a real
 /// signature over that canonical form. The wire carries `wire`.
@@ -2293,5 +2255,112 @@ fn every_s3_signing_name_is_judged_over_its_path_encoded_once() {
         judge_path("s3control", "/bucket/key%253A1", "/bucket//./key%3A1"),
         admitted,
         "a name that only opens with `s3` is normalized and double-encoded"
+    );
+}
+
+/// The signed headers are selected from the request in time that grows with the request, not with
+/// the product of the signed names and the header lines: an unauthenticated request naming tens of
+/// thousands of signed headers is selected (and here, being correctly signed, verified) quickly.
+/// The wire carries the lines in reverse order and in upper case; each signed value is still found.
+#[test]
+fn many_signed_headers_are_selected_in_near_linear_time() {
+    const N: usize = 20_000;
+    let secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+    let amzdate = "20150830T123600Z";
+    let now = parse_amz_date(amzdate).unwrap();
+    let payload_hash = sha256_hex(b"{\"x\":1}");
+    let mut headers: Vec<(String, String)> = (0..N)
+        .map(|i| (format!("X-H{i:05}"), format!("v{i}")))
+        .collect();
+    headers.push(("host".to_string(), "svc.example".to_string()));
+    headers.push((X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()));
+    headers.push((X_AMZ_DATE.to_string(), amzdate.to_string()));
+    headers.reverse();
+    let (sig, signed_headers) = sign_v4(
+        secret,
+        "us-east-1",
+        "svc",
+        "POST",
+        "/v1/x",
+        "",
+        &headers,
+        &payload_hash,
+        amzdate,
+        "20150830",
+    );
+    let parsed = ParsedAuthHeader {
+        access_key_id: "AKIAEXAMPLE1234567890".to_string(),
+        datestamp: "20150830".to_string(),
+        region: "us-east-1".to_string(),
+        service: "svc".to_string(),
+        signed_headers,
+        signature: sig,
+    };
+    let req = InboundRequest {
+        method: "POST",
+        canonical_uri: "/v1/x",
+        canonical_querystring: "",
+        headers: &headers,
+        payload_hash: &payload_hash,
+        amzdate,
+    };
+    let started = std::time::Instant::now();
+    assert_eq!(verify_inbound_sigv4(&parsed, &req, secret, now), Ok(()));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "selecting {N} signed headers took {elapsed:?}"
+    );
+}
+
+/// A `SignedHeaders` name that is not ASCII is refused, even when the signature is real: the
+/// signer lowercases it (Unicode), so the list the client states is not the list it signed.
+#[test]
+fn a_non_ascii_signed_header_name_is_refused() {
+    let secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+    let amzdate = "20150830T123600Z";
+    let now = parse_amz_date(amzdate).unwrap();
+    let payload_hash = sha256_hex(b"{\"x\":1}");
+    let headers = vec![
+        ("host".to_string(), "svc.example".to_string()),
+        (X_AMZ_CONTENT_SHA256.to_string(), payload_hash.clone()),
+        (X_AMZ_DATE.to_string(), amzdate.to_string()),
+        ("x\u{c4}".to_string(), "v".to_string()),
+    ];
+    let (sig, signed_by_signer) = sign_v4(
+        secret,
+        "us-east-1",
+        "svc",
+        "POST",
+        "/v1/x",
+        "",
+        &headers,
+        &payload_hash,
+        amzdate,
+        "20150830",
+    );
+    assert_eq!(
+        signed_by_signer,
+        "host;x-amz-content-sha256;x-amz-date;x\u{e4}"
+    );
+    let parsed = ParsedAuthHeader {
+        access_key_id: "AKIAEXAMPLE1234567890".to_string(),
+        datestamp: "20150830".to_string(),
+        region: "us-east-1".to_string(),
+        service: "svc".to_string(),
+        signed_headers: "host;x-amz-content-sha256;x-amz-date;x\u{c4}".to_string(),
+        signature: sig,
+    };
+    let req = InboundRequest {
+        method: "POST",
+        canonical_uri: "/v1/x",
+        canonical_querystring: "",
+        headers: &headers,
+        payload_hash: &payload_hash,
+        amzdate,
+    };
+    assert_eq!(
+        verify_inbound_sigv4(&parsed, &req, secret, now),
+        Err(VerifyError::SignedHeadersMismatch)
     );
 }

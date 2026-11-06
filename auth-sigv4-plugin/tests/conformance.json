@@ -36,9 +36,6 @@
     ],
     "cases": [
       {
-        "credential": null,
-        "method": "POST",
-        "path": "/model/m/converse",
         "timestamp": 1440938202,
         "body": "{\"messages\":[]}",
         "lines": {
@@ -50,9 +47,6 @@
         "verdict": "identity:BBAKCONFORMANCE000001"
       },
       {
-        "credential": null,
-        "method": "POST",
-        "path": "/model/m/converse",
         "timestamp": 1440938202,
         "body": "{\"messages\":[]}",
         "lines": {
@@ -64,9 +58,6 @@
         "verdict": "reject"
       },
       {
-        "credential": null,
-        "method": "POST",
-        "path": "/model/m/converse",
         "timestamp": 1440938202,
         "body": "{\"messages\":[]}",
         "lines": {
@@ -78,9 +69,6 @@
         "verdict": "reject"
       },
       {
-        "credential": null,
-        "method": "POST",
-        "path": "/model/m/converse",
         "timestamp": 1440938202,
         "body": "{\"messages\":[]}",
         "lines": {
@@ -92,9 +80,6 @@
         "verdict": "reject"
       },
       {
-        "credential": null,
-        "method": "POST",
-        "path": "/model/m/converse",
         "timestamp": 1440938202,
         "body": "{\"messages\":[\"tampered\"]}",
         "lines": {
@@ -106,9 +91,6 @@
         "verdict": "reject"
       },
       {
-        "credential": null,
-        "method": "POST",
-        "path": "/model/m/converse",
         "timestamp": 1440941760,
         "body": "{\"messages\":[]}",
         "lines": {
@@ -120,9 +102,6 @@
         "verdict": "reject"
       },
       {
-        "credential": null,
-        "method": "POST",
-        "path": "/model/m/converse",
         "timestamp": 1440938202,
         "lines": {
           "authorization": "Bearer sk-busbar-conformance"
@@ -130,9 +109,6 @@
         "verdict": "pass"
       },
       {
-        "credential": null,
-        "method": "POST",
-        "path": "/model/m/converse",
         "timestamp": 1440938202,
         "lines": {},
         "verdict": "pass"

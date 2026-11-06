@@ -649,7 +649,7 @@ fn the_head_the_transport_completes_signs_to_1_5_5s_bytes() {
             content_type: crate::sent_content_type(head.iter().copied()).expect("text"),
             payload_hash: &hash,
             timestamp_epoch: 1_440_938_160,
-            amz_headers: &[],
+            amz_headers: &crate::sent_signing_headers(head.iter().copied()).expect("text"),
         };
         authorization_of(s.sign(handle, Who::Own, Ok(facts)))
     };
@@ -747,7 +747,7 @@ fn no_length_line_is_ever_signed() {
             content_type: crate::sent_content_type(head.iter().copied()).expect("text"),
             payload_hash: &hash,
             timestamp_epoch: 1_440_938_160,
-            amz_headers: &[],
+            amz_headers: &crate::sent_signing_headers(head.iter().copied()).expect("text"),
         };
         let authorization = authorization_of(s.sign(handle, Who::Own, Ok(facts)));
         let signed = authorization
@@ -942,4 +942,44 @@ fn keep_refresh_retire_are_ordered() {
         .collect();
     assert_eq!(held, [2]);
     assert!(s.binding(a).is_none() && s.binding(b).is_some());
+}
+
+/// A request sent with two `content-type` lines and an `x-amz-*` line signs every one of them, as
+/// the header walk `fields` makes finds them: the repeated content type joins the first in order
+/// (AWS's comma-joined value), and lines SigV4 does not sign (`accept`) stay out.
+#[test]
+fn every_sent_content_type_and_amz_line_is_signed() {
+    let s = SigV4::new(1);
+    let handle = open(&s, Some("AKIDEXAMPLE:SECRET"));
+    let hash = sha256_hex(b"");
+    let head: [(&[u8], &[u8]); 4] = [
+        (b"Content-Type", b"application/json"),
+        (b"accept", b"*/*"),
+        (b"X-Amz-Meta-Tag", b"blue"),
+        (b"content-type", b"charset=utf-8"),
+    ];
+    let amz = crate::sent_signing_headers(head.iter().copied()).expect("text");
+    let facts = SignFacts {
+        method: "GET",
+        host: "runtime.signer.example",
+        path: "/",
+        query: None,
+        content_type: crate::sent_content_type(head.iter().copied()).expect("text"),
+        payload_hash: &hash,
+        timestamp_epoch: 1_440_938_160,
+        amz_headers: &amz,
+    };
+    assert_eq!(
+        authorization_of(s.sign(handle, Who::Own, Ok(facts))),
+        expected(
+            "GET",
+            "/",
+            "",
+            &[
+                ("content-type", "application/json"),
+                ("content-type", "charset=utf-8"),
+                ("x-amz-meta-tag", "blue"),
+            ],
+        )
+    );
 }

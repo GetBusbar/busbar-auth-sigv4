@@ -16,7 +16,9 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::Mutex;
 
-use busbar_auth_sigv4::inbound::{X_AMZ_CONTENT_SHA256, X_AMZ_DATE};
+/// The SigV4 header names a signed request carries.
+const X_AMZ_CONTENT_SHA256: &str = "x-amz-content-sha256";
+const X_AMZ_DATE: &str = "x-amz-date";
 use busbar_contract::abi::auth::{
     check_identify, slot as auth_slot, AuthTail, IdentifyOut, IdentityBuf, NamedValue, StripName,
     VerifyIn, CANCEL_ABANDONED, CAP_INBOUND, CAP_OUTBOUND, DECISION_CONTINUE, DECISION_STOP,

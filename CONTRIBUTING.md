@@ -43,6 +43,6 @@ cargo build --release --locked -p busbar-auth-sigv4-plugin --lib
 BUSBAR_PLUGIN_CDYLIB="$PWD/target/release/libbusbar_auth_sigv4_plugin.so" cargo test --release --workspace --locked
 ```
 
-The README's Tests section names any live backend the full suite needs. Add or update
-tests for any behavior change, and update the README when you change behavior or
+The README's Tests section names what the full suite needs (the built plugin image and a busbar
+checkout). Add or update tests for any behavior change, and update the README when you change behavior or
 config. Keep commits focused and describe what changed, why, and how it was verified.

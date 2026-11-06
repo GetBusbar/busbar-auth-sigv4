@@ -30,7 +30,7 @@ Configured under the `sigv4` module name. The style settings:
 | `region_unread` | no | set by busbar, not by hand: the warning logged with each signature when the region was defaulted |
 
 `token_url`, `token_uri`, `scope` and `subject` (keys busbar forwards from its shared provider
-schema) are ignored with one WARN at the bind. Any other key is refused by name. A `service` or
+schema) are ignored with one WARN each at the bind. Any other key is refused by name. A `service` or
 `region` that is not of the shape above is refused at open (`settings.service: ...`,
 `settings.region: ...`), at `validate`, `open` and `refresh` alike.
 
@@ -98,8 +98,14 @@ cargo build --release -p busbar-auth-sigv4-plugin
 ## Tests
 
 ```bash
-cargo test --workspace --locked
+cargo build --release --locked -p busbar-auth-sigv4-plugin --lib
+BUSBAR_CHECKOUT=<busbar checkout at .busbar-ref> cargo test --release --workspace --locked
 ```
+
+The conformance suite loads the built plugin image: `BUSBAR_PLUGIN_CDYLIB` (an absolute path)
+names it, or it is read from the test profile's own target directory, so build it first in the
+same profile. The end-to-end suite (`tests/sigv4_both_ways.rs`) builds and boots the real `busbar`
+from `BUSBAR_CHECKOUT`; an unset `BUSBAR_CHECKOUT` fails it. No live backend is needed.
 
 ## License
 

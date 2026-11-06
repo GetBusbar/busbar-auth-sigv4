@@ -3,7 +3,7 @@
 
 //! The SigV4 diagnostic assertions read a plain tracing fmt writer.
 use std::io::{self, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Clone, Default)]
 struct Bytes(Arc<Mutex<Vec<u8>>>);
@@ -23,6 +23,18 @@ pub(crate) struct Log {
 }
 impl Log {
     pub(crate) fn new(level: tracing::Level) -> Self {
+        use tracing_subscriber::layer::SubscriberExt;
+        // Parallel captures are short-lived, while another test can register the same
+        // callsite without a subscriber. Keep dynamic interest registered for the
+        // process lifetime so it cannot cache an empty subscriber set between them.
+        // This dispatch is never installed as a default and records no events.
+        static INTEREST: OnceLock<tracing::Dispatch> = OnceLock::new();
+        let _ = INTEREST.get_or_init(|| {
+            tracing::Dispatch::new(
+                tracing_subscriber::registry()
+                    .with(tracing_subscriber::filter::dynamic_filter_fn(|_, _| false)),
+            )
+        });
         Self {
             bytes: Bytes::default(),
             level,

@@ -348,7 +348,7 @@ impl OutboundPlugin for SigV4 {
         style: &str,
         credential: Option<&[u8]>,
         settings: Option<&[u8]>,
-        _: Option<&Host>,
+        _: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
         _: &mut Diags,
     ) -> Result<u64, OpenRefusal> {
         if style.is_empty() {
@@ -369,7 +369,7 @@ impl OutboundPlugin for SigV4 {
         &self,
         view: &FieldsView<'_>,
         out: &mut FieldsWriter<'_>,
-        _: &Op<'_>,
+        _: &Op<'_, busbar_contract::plugin::markers::AuthKind>,
     ) -> Poll<FieldsAnswer> {
         let hash = crate::sigv4::sha256_hex(view.body().unwrap_or_default());
         let amz = sent_signing_headers(view.headers());
@@ -424,7 +424,13 @@ impl OutboundPlugin for SigV4 {
     }
 
     /// Pre-derive the SigV4 day keys ahead of UTC midnight.
-    fn tick(&self, now_ns: u64, host: Option<&Host>, ticket: Ticket, _: &mut Diags) -> u64 {
+    fn tick(
+        &self,
+        now_ns: u64,
+        host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
+        ticket: Ticket,
+        _: &mut Diags,
+    ) -> u64 {
         let now = host.and_then(|host| match host.connector(ticket).clock_now() {
             Poll::Ready(Ok(reading)) => Some(reading.wall_ns / 1_000_000_000),
             _ => None,
@@ -433,7 +439,12 @@ impl OutboundPlugin for SigV4 {
     }
 
     /// No driver ticket is held, and nothing waits on one: READY.
-    fn drive(&self, _: Option<&Host>, _: Ticket, _: &mut Diags) -> Driven {
+    fn drive(
+        &self,
+        _: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
+        _: Ticket,
+        _: &mut Diags,
+    ) -> Driven {
         Driven::Ready
     }
 }

@@ -26,3 +26,4 @@ busbar-plugin-loader = { workspace = true, features = ["test-support"] }
 hex = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+busbar-contract = { workspace = true, features = ["test-seal"] }

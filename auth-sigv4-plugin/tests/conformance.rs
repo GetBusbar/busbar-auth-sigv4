@@ -28,7 +28,7 @@ use busbar_contract::abi::mechanism::lifecycle::{
 };
 use busbar_contract::redacted::sha256_hex;
 use busbar_contract::services::{
-    Caller, DiskDest, HookAsk, HostServices, NestAsk, RecordsList, Snapshot, TrustKeyRef, UNSERVED,
+    Caller, DiskDest, HookAsk, HostServices, NestAsk, RecordsList, TrustKeyRef, UNSERVED,
 };
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
 use busbar_plugin_loader::dispatch::{
@@ -375,17 +375,20 @@ impl HostServices for Creds {
         _counterparty: &str,
         _item: &str,
         _digest: &str,
-    ) -> Stored {
-        Stored::refused(UNSERVED)
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
     fn trust_decide(
         &self,
         _caller: &Caller,
+        _ticket: busbar_contract::abi::mechanism::ticket::Ticket,
         _key: TrustKeyRef<'_>,
         _expected: Option<&str>,
         _approve: bool,
-    ) -> Stored {
-        Stored::refused(UNSERVED)
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
     fn trust_state(&self, _caller: &Caller, _counterparty: &str) -> Stored {
         Stored::refused(UNSERVED)
@@ -423,8 +426,9 @@ impl HostServices for Creds {
         _unit: Option<u64>,
         _ttl_secs: u64,
         _record: &[u8],
-    ) -> Stored {
-        Stored::refused(UNSERVED)
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
     fn ticket_take(&self, _caller: &Caller, _unit: Option<u64>) -> Stored {
         Stored::refused(UNSERVED)
@@ -494,8 +498,8 @@ impl HostServices for Creds {
     fn hook_call(&self, _caller: &Caller, _unit: Option<u64>, _ask: HookAsk, _later: Later) -> Ran {
         Ran::Now(Stored::refused(UNSERVED))
     }
-    fn snapshot_read(&self, _caller: &Caller, _scope: u32) -> Snapshot {
-        Snapshot::Refused(UNSERVED)
+    fn snapshot_read(&self, _caller: &Caller, _scope: u32, _later: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
 
     fn now(&self) -> Reading {
@@ -1015,7 +1019,11 @@ fn run(
 #[test]
 fn compiled_in_and_dropped_in_answer_every_op_identically() {
     let creds = Arc::new(Creds::default());
-    let d = Dispatcher::with_services(DispatchConfig::default(), creds.clone());
+    let d = Dispatcher::with_services(
+        DispatchConfig::default(),
+        creds.clone(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let folds = Arc::new(Folds::default());
     let (linked_t, linked_f) = run(&linked(&folds, &d), &folds, &d, &creds);
     assert_eq!(
@@ -1041,7 +1049,11 @@ fn compiled_in_and_dropped_in_answer_every_op_identically() {
 #[test]
 fn signed_obs_text_duplicates_refuse_on_the_real_loader_in_both_legs() {
     let creds = Arc::new(Creds::default());
-    let d = Dispatcher::with_services(DispatchConfig::default(), creds.clone());
+    let d = Dispatcher::with_services(
+        DispatchConfig::default(),
+        creds.clone(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let folds = Arc::new(Folds::default());
     for p in [linked(&folds, &d), dropped(&folds, &d)] {
         let mut opened: Frame<OpenIn, OpenOut> = Frame::new(z(), z());
@@ -1158,7 +1170,11 @@ extern "C" fn sensitive_door() -> &'static Door {
 #[test]
 fn red_a_writer_that_flags_every_field_is_not_the_pinned_bytes() {
     let creds = Arc::new(Creds::default());
-    let d = Dispatcher::with_services(DispatchConfig::default(), creds.clone());
+    let d = Dispatcher::with_services(
+        DispatchConfig::default(),
+        creds.clone(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let folds = Arc::new(Folds::default());
     let red = load_linked::<Auth>(&row(sensitive_door), bind(&folds, &d)).expect("the door loads");
     let t = mask_signature(script(&red, Some((&d, &creds))));
@@ -1189,7 +1205,10 @@ extern "C" fn overrunning_door() -> &'static Door {
 
 #[test]
 fn red_a_writer_that_ignores_the_host_capacity_faults() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let folds = Arc::new(Folds::default());
     let red =
         load_linked::<Auth>(&row(overrunning_door), bind(&folds, &d)).expect("the door loads");
@@ -1204,7 +1223,11 @@ fn red_a_writer_that_ignores_the_host_capacity_faults() {
 /// An opened linked instance over the inbound cell's host, with one sigv4 handle on `credential`.
 fn open_signing(credential: &'static str) -> (Arc<Folds>, Plugin<Auth>, u64) {
     let creds = Arc::new(Creds::default());
-    let d = Dispatcher::with_services(DispatchConfig::default(), creds);
+    let d = Dispatcher::with_services(
+        DispatchConfig::default(),
+        creds,
+        busbar_contract::services::test_caller_binding(),
+    );
     let folds = Arc::new(Folds::default());
     let p = linked(&folds, &d);
     let mut o: Frame<OpenIn, OpenOut> = Frame::new(z(), z());
@@ -1256,7 +1279,11 @@ fn fields_signs_the_walked_requests_query_and_method_through_the_door() {
 #[test]
 fn an_unsendable_session_token_is_refused_at_open_through_the_door() {
     let creds = Arc::new(Creds::default());
-    let d = Dispatcher::with_services(DispatchConfig::default(), creds);
+    let d = Dispatcher::with_services(
+        DispatchConfig::default(),
+        creds,
+        busbar_contract::services::test_caller_binding(),
+    );
     let folds = Arc::new(Folds::default());
     let p = linked(&folds, &d);
     let mut o: Frame<OpenIn, OpenOut> = Frame::new(z(), z());
@@ -1286,7 +1313,10 @@ fn an_unsendable_session_token_is_refused_at_open_through_the_door() {
 /// (a refusal with an empty reason leaves the operator nothing to act on).
 #[test]
 fn a_fields_call_without_an_authority_fails_with_its_reason() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let folds = Arc::new(Folds::default());
     let p = linked(&folds, &d);
     let mut o: Frame<OpenIn, OpenOut> = Frame::new(z(), z());
@@ -1316,7 +1346,11 @@ fn a_fields_call_without_an_authority_fails_with_its_reason() {
 #[test]
 fn a_fields_call_with_nothing_to_sign_with_fails_with_its_reason() {
     let creds = Arc::new(Creds::default());
-    let d = Dispatcher::with_services(DispatchConfig::default(), creds);
+    let d = Dispatcher::with_services(
+        DispatchConfig::default(),
+        creds,
+        busbar_contract::services::test_caller_binding(),
+    );
     let folds = Arc::new(Folds::default());
     let p = linked(&folds, &d);
     let mut o: Frame<OpenIn, OpenOut> = Frame::new(z(), z());
@@ -1357,7 +1391,10 @@ fn a_fields_call_with_nothing_to_sign_with_fails_with_its_reason() {
 
 #[test]
 fn an_unserved_secret_read_rejects_and_logs_the_service_error() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let folds = Arc::new(Folds::default());
     let p = linked(&folds, &d);
     let mut o: Frame<OpenIn, OpenOut> = Frame::new(z(), z());
@@ -1640,7 +1677,11 @@ fn fixed_vectors_rotation_short_identity_and_closed_instances() {
     for dropped_leg in [false, true] {
         ANSWERS.with(|answers| answers.borrow_mut().clear());
         let creds = Arc::new(Creds::default());
-        let d = Dispatcher::with_services(DispatchConfig::default(), creds.clone());
+        let d = Dispatcher::with_services(
+            DispatchConfig::default(),
+            creds.clone(),
+            busbar_contract::services::test_caller_binding(),
+        );
         let folds = Arc::new(Folds::default());
         let p = if dropped_leg {
             dropped(&folds, &d)
@@ -1946,11 +1987,14 @@ fn real_door_rejects_changed_abi_layout_statement_and_every_other_kind() {
     use busbar_contract::abi::mechanism::rendering::RENDERING_MAGIC;
     use busbar_contract::abi::mechanism::KindCode;
     use busbar_plugin_loader::dispatch::kinds::{
-        export::Export, hook::Hook, plane::Plane, secret::Secret, store::Store,
+        export::Export, hook::Hook, plane::Plane, secret::Secret, store_v4::StoreV4 as Store,
         transport::Transport,
     };
     use busbar_plugin_loader::dispatch::{Kind, LoadError};
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let folds = Arc::new(Folds::default());
     let path = built_plugin_image();
     let real = busbar_auth_sigv4::door().parts();
@@ -2071,8 +2115,7 @@ fn real_door_rejects_changed_abi_layout_statement_and_every_other_kind() {
 }
 
 fn first_crossings(p: &Plugin<Auth>) -> u64 {
-    use std::sync::atomic::Ordering::SeqCst;
-    p.inner.crossings.load(SeqCst) - p.inner.resumes.load(SeqCst)
+    p.test_invocations().0 - p.test_invocations().1
 }
 static READY_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 extern "C" fn failed_ready(_: *mut c_void, _: *const c_void, out: *mut c_void) -> RawOutcome {

@@ -450,10 +450,8 @@ fn the_aws_suite_repeated_and_trimmed_header_vectors_verify() {
         ),
     ];
     for (name, signature, mine) in cases {
-        let mut wire: Vec<(String, String)> = vec![(
-            "Host".to_string(),
-            "example.amazonaws.com".to_string(),
-        )];
+        let mut wire: Vec<(String, String)> =
+            vec![("Host".to_string(), "example.amazonaws.com".to_string())];
         wire.extend(
             mine.iter()
                 .map(|(k, v)| ((*k).to_string(), (*v).to_string())),
@@ -830,10 +828,7 @@ fn the_aws_suite_query_vectors_verify_over_the_received_query() {
     let now = parse_amz_date(amzdate).unwrap();
     let empty = sha256_hex(b"");
     let wire = vec![
-        (
-            "Host".to_string(),
-            "example.amazonaws.com".to_string(),
-        ),
+        ("Host".to_string(), "example.amazonaws.com".to_string()),
         ("X-Amz-Date".to_string(), amzdate.to_string()),
     ];
     for (name, query, signature) in [

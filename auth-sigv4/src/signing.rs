@@ -18,7 +18,7 @@
 
 use std::sync::RwLock;
 
-use busbar_contract::abi::sdk::chip::SealedValue;
+use busbar_contract::abi::sdk::chip::{Refused, SealedValue};
 use busbar_contract::abi::sdk::cred::{Cred, Parts};
 use busbar_contract::header::is_legal_header_value;
 use zeroize::Zeroizing;
@@ -89,9 +89,6 @@ pub(crate) const SESSION_TOKEN_EMPTY: &str = "the session token is empty";
 /// The session token cannot ride in `x-amz-security-token`.
 pub(crate) const SESSION_TOKEN_UNSENDABLE: &str =
     "the session token holds a byte no header value may carry";
-/// The plugin's signing recipe refused the request for a reason other than the session token.
-const SIGN_REFUSED: &str = "sigv4: the signing recipe refused the request";
-
 /// What `fields` answers in own mode on a binding opened with no credential of its own.
 pub(crate) const NO_OWN_CREDENTIAL: &str = "sigv4: this binding holds no credential of its own \
      (passthrough-only); the request is not sent unsigned";
@@ -342,13 +339,7 @@ impl SigV4Binding {
             .unwrap_or_else(|| {
                 sign_with(&recipe::day_key(&cred.secret, &datestamp, region, service))
             })
-            .map_err(|_| {
-                if cred.session_token.is_some() {
-                    SESSION_TOKEN_UNSENDABLE
-                } else {
-                    SIGN_REFUSED
-                }
-            })?;
+            .map_err(|Refused(reason)| reason)?;
         let signed_headers = signed.signed_headers;
         let credential_scope = format!(
             "{datestamp}/{region}/{service}/{}",

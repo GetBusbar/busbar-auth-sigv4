@@ -64,7 +64,7 @@ const DUMMY_SECRET: &str = "AWS4-DUMMY-SECRET-FOR-CONSTANT-TIME-REJECT-PATH";
 /// text: the work is the same for every id, and the admission mask is unchanged.
 fn verification_text(secret: &[u8], live: bool) -> (&str, bool) {
     match std::str::from_utf8(secret) {
-        Ok(s) if live => (s, true),
+        Ok(s) if live && !s.is_empty() => (s, true),
         Ok(_) => (DUMMY_SECRET, true),
         Err(_) => (DUMMY_SECRET, false),
     }

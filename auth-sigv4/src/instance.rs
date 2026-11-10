@@ -100,6 +100,14 @@ impl SigV4 {
             .map(|(_, b)| b.clone())
     }
 
+    /// Whether a binding for `handle` is held (no `Arc` clone).
+    pub(crate) fn has_binding(&self, handle: u64) -> bool {
+        self.handles
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(&handle)
+    }
+
     /// `fields`' body: sign one request on `handle` for `who` over `facts` (`Err`: why the facts
     /// the host lent cannot be signed). `None` when this generation holds no such handle (REFUSED).
     pub(crate) fn sign(

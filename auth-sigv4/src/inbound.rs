@@ -646,13 +646,13 @@ pub fn judge(req: &Request<'_>, source: &mut impl SecretSource) -> Judgement {
     let mut actual = [0_u8; 64];
     let mut declared = [0_u8; 64];
     let digest = ring::digest::digest(&ring::digest::SHA256, body);
-    let hashed =
+    let declared_len_ok =
         hex::encode_to_slice(digest, &mut actual).is_ok() && payload_hash.len() == declared.len();
-    if hashed {
+    if declared_len_ok {
         declared.copy_from_slice(payload_hash.as_bytes());
         declared.make_ascii_lowercase();
     }
-    if !(hashed && constant_time_eq(&actual, &declared)) {
+    if !(declared_len_ok && constant_time_eq(&actual, &declared)) {
         return reject("payload hash mismatch");
     }
     let Some(amzdate) = signed_value(X_AMZ_DATE) else {

@@ -358,7 +358,11 @@ impl OutboundPlugin for SigV4 {
             Ok(binding) => Ok(self.keep(binding)),
             Err(refusals) => {
                 let mut lines = refusals.iter().map(style::Refusal::line);
-                let first = OpenRefusal::new(lines.next().unwrap_or_default());
+                let first = OpenRefusal::new(
+                    lines
+                        .next()
+                        .unwrap_or_else(|| "sigv4: binding refused".into()),
+                );
                 Err(lines.fold(first, |r, line| r.and(line)))
             }
         }
@@ -408,7 +412,7 @@ impl OutboundPlugin for SigV4 {
     /// so a held handle has nothing to wait for (whether a request can be signed is `fields`'
     /// answer, per request).
     fn outbound_ready(&self, handle: u64) -> bool {
-        self.binding(handle).is_some()
+        self.has_binding(handle)
     }
 
     /// The new generation.

@@ -147,7 +147,7 @@ const FORWARDED_KEYS: [&str; 4] = ["token_url", "token_uri", "scope", "subject"]
 pub(crate) fn unknown_keys(m: &Map<String, Value>) -> Vec<Refusal> {
     m.keys()
         .filter(|k| !KNOWN_KEYS.contains(&k.as_str()) && !FORWARDED_KEYS.contains(&k.as_str()))
-        .map(|k| Refusal::Settings(format!("unknown key `{k}`")))
+        .map(|k| Refusal::Settings(format!("unknown key `{}`", k.escape_debug())))
         .collect()
 }
 
@@ -230,12 +230,12 @@ fn bind(
 ) -> Result<SigV4Binding, Vec<Refusal>> {
     if style != SIGV4 {
         return Err(vec![Refusal::Settings(format!(
-            "outbound auth style `{style}` is not served by this plugin"
+            "outbound auth style `{}` is not served by this plugin",
+            style.escape_default()
         ))]);
     }
     let m = object(settings).map_err(|r| vec![r])?;
     let mut findings = unknown_keys(&m);
-    warn_ignored(&m);
     let params = match sigv4_params(&m) {
         Ok(p) => Some(p),
         Err(f) => {
@@ -263,7 +263,10 @@ fn bind(
     };
     match params {
         // A passthrough-only binding (the contract's `None`): it signs only a caller's credential.
-        Some(params) if findings.is_empty() => Ok(SigV4Binding::new(params, cred)),
+        Some(params) if findings.is_empty() => {
+            warn_ignored(&m);
+            Ok(SigV4Binding::new(params, cred))
+        }
         _ => Err(findings),
     }
 }

@@ -23,12 +23,12 @@ use busbar_contract::abi::sdk::cred::{Cred, Parts};
 use busbar_contract::header::is_legal_header_value;
 use zeroize::Zeroizing;
 
-use crate::inbound::{X_AMZ_CONTENT_SHA256, X_AMZ_DATE, X_AMZ_SECURITY_TOKEN};
+use crate::inbound::{AUTHORIZATION, X_AMZ_CONTENT_SHA256, X_AMZ_DATE, X_AMZ_SECURITY_TOKEN};
 use crate::sigv4;
-use crate::sigv4::SECS_PER_DAY;
+use crate::sigv4::{SECS_PER_DAY, SECS_PER_HOUR};
 
 /// How long before UTC midnight `tick` derives the next day's key.
-const PREDERIVE_AHEAD_SECS: u64 = 3_600;
+const PREDERIVE_AHEAD_SECS: u64 = SECS_PER_HOUR;
 
 /// A `sigv4` binding's settings: the service and region the signature is scoped to. The kernel
 /// resolves them at seal (the region from the provider's host through the plane's declared
@@ -88,6 +88,8 @@ pub(crate) const SESSION_TOKEN_EMPTY: &str = "the session token is empty";
 /// The session token cannot ride in `x-amz-security-token`.
 pub(crate) const SESSION_TOKEN_UNSENDABLE: &str =
     "the session token holds a byte no header value may carry";
+/// The SDK's signing recipe refused the request for a reason other than the session token.
+const SIGN_REFUSED: &str = "sigv4: the signing recipe refused the request";
 
 /// What `fields` answers in own mode on a binding opened with no credential of its own.
 pub(crate) const NO_OWN_CREDENTIAL: &str = "sigv4: this binding holds no credential of its own \
@@ -255,7 +257,7 @@ impl SigV4Binding {
         let (_, today) = sigv4::format_amz_time(now_epoch);
         self.derive(&today);
         if SECS_PER_DAY - now_epoch % SECS_PER_DAY <= PREDERIVE_AHEAD_SECS {
-            let (_, tomorrow) = sigv4::format_amz_time(now_epoch + SECS_PER_DAY);
+            let (_, tomorrow) = sigv4::format_amz_time(now_epoch.saturating_add(SECS_PER_DAY));
             self.derive(&tomorrow);
         }
     }
@@ -333,7 +335,13 @@ impl SigV4Binding {
 
         let signed = held
             .unwrap_or_else(|| sign_with(&cred.secret.aws4_day_key(&datestamp, region, service)))
-            .map_err(|_| SESSION_TOKEN_UNSENDABLE)?;
+            .map_err(|_| {
+                if cred.session_token.is_some() {
+                    SESSION_TOKEN_UNSENDABLE
+                } else {
+                    SIGN_REFUSED
+                }
+            })?;
         let signed_headers = signed.signed_headers;
         let credential_scope = format!(
             "{datestamp}/{region}/{service}/{}",
@@ -350,7 +358,7 @@ impl SigV4Binding {
         }
         let mut fields: Vec<Field> = vec![
             (
-                "authorization".to_string(),
+                AUTHORIZATION.to_string(),
                 FieldValue::Sealed(
                     Parts::new()
                         .public(authorization.as_bytes())

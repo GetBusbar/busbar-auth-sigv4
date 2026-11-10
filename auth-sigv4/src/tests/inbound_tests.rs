@@ -30,7 +30,7 @@ fn test_uri_encode_path_assorted_bytes() {
     assert_eq!(uri_encode_path("\u{00c3}"), "%C3%83");
 }
 
-/// Verify, through the production verifier (the SDK's `Cred::aws4_verify`), a request whose
+/// Verify, through the production verifier (the owner's sealed SigV4 recipe), a request whose
 /// `x-amz-meta-tag` was SIGNED as `signed_value` but is SENT as `sent_value`.
 fn verify_header_value(signed_value: &str, sent_value: &str) -> Result<(), VerifyError> {
     let secret = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
@@ -927,7 +927,7 @@ impl SecretSource for Fake {
 }
 
 /// A client's signed POST: the `Authorization` value and the header lines it sends, signed with
-/// the shared SDK recipe the outbound signer uses (`fixtures::sign_v4`), over `query` (the wire query, signed
+/// the owner recipe the outbound signer uses (`fixtures::sign_v4`), over `query` (the wire query, signed
 /// unchanged) and `body`, declaring `declared` as its `x-amz-content-sha256` (the body's hash
 /// unless a test overrides it).
 struct Signed {

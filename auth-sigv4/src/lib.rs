@@ -72,6 +72,7 @@
 
 mod inbound;
 mod instance;
+mod recipe;
 mod signing;
 mod sigv4;
 mod style;
@@ -537,6 +538,24 @@ impl VerifyPlugin for SigV4 {
             }
         }
         Poll::Ready(answer)
+    }
+}
+
+impl busbar_contract::abi::sdk::auth_outbound::CombinedPlugin for SigV4 {
+    fn open_combined(settings: &[u8], secrets: &[&[u8]], generation: u64) -> Result<Self, Refusal> {
+        // The verifier is stateless and shares the outbound instance's plugin settings.
+        <Self as OutboundPlugin>::open(settings, secrets, generation)
+    }
+
+    fn refresh_combined(
+        &self,
+        settings: &[u8],
+        secrets: &[&[u8]],
+        generation: u64,
+    ) -> Result<u64, Refusal> {
+        // Validate before changing the generation; there is no verifier cache to commit or drop.
+        <Self as OutboundPlugin>::refresh(self, settings, secrets, generation)?;
+        Ok(0)
     }
 }
 

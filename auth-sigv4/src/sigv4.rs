@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Public SigV4 path, query and time canonicalization. Credential derivation and signatures
-//! use the shared SDK's sealed AWS4 recipes. Test fixtures (`tests/fixtures.rs`) read signatures
+//! use this plugin's recipes over the SDK's sealed primitives. Test fixtures (`tests/fixtures.rs`) read signatures
 //! only through its dev-only wire sink.
 
 use ring::digest;

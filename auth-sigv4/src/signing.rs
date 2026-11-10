@@ -18,12 +18,13 @@
 
 use std::sync::RwLock;
 
-use busbar_contract::abi::sdk::chip::aws4::Aws4Request;
+use busbar_contract::abi::sdk::chip::SealedValue;
 use busbar_contract::abi::sdk::cred::{Cred, Parts};
 use busbar_contract::header::is_legal_header_value;
 use zeroize::Zeroizing;
 
 use crate::inbound::{AUTHORIZATION, X_AMZ_CONTENT_SHA256, X_AMZ_DATE, X_AMZ_SECURITY_TOKEN};
+use crate::recipe::{self, Aws4Request};
 use crate::sigv4;
 use crate::sigv4::{SECS_PER_DAY, SECS_PER_HOUR};
 
@@ -88,7 +89,7 @@ pub(crate) const SESSION_TOKEN_EMPTY: &str = "the session token is empty";
 /// The session token cannot ride in `x-amz-security-token`.
 pub(crate) const SESSION_TOKEN_UNSENDABLE: &str =
     "the session token holds a byte no header value may carry";
-/// The SDK's signing recipe refused the request for a reason other than the session token.
+/// The plugin's signing recipe refused the request for a reason other than the session token.
 const SIGN_REFUSED: &str = "sigv4: the signing recipe refused the request";
 
 /// What `fields` answers in own mode on a binding opened with no credential of its own.
@@ -181,7 +182,7 @@ impl SigningCredential {
 /// One day's derived key.
 struct DayKey {
     datestamp: String,
-    key: Cred,
+    key: SealedValue,
 }
 
 /// A `sigv4` binding: the params, the credential, and the day keys derived for it.
@@ -232,9 +233,12 @@ impl SigV4Binding {
         if held {
             return;
         }
-        let key = cred
-            .secret
-            .aws4_day_key(datestamp, &self.params.region, &self.params.service);
+        let key = recipe::day_key(
+            &cred.secret,
+            datestamp,
+            &self.params.region,
+            &self.params.service,
+        );
         let mut keys = self
             .keys
             .write()
@@ -307,8 +311,9 @@ impl SigV4Binding {
         let canonical_uri = sigv4::canonical_uri(facts.path, service);
         let canonical_query = Zeroizing::new(sigv4::canonical_query(facts.query));
         self.derive(&datestamp);
-        let sign_with = |key: &Cred| {
-            key.aws4_sign(
+        let sign_with = |key: &SealedValue| {
+            recipe::sign(
+                key,
                 &Aws4Request {
                     region,
                     service,
@@ -334,7 +339,9 @@ impl SigV4Binding {
         };
 
         let signed = held
-            .unwrap_or_else(|| sign_with(&cred.secret.aws4_day_key(&datestamp, region, service)))
+            .unwrap_or_else(|| {
+                sign_with(&recipe::day_key(&cred.secret, &datestamp, region, service))
+            })
             .map_err(|_| {
                 if cred.session_token.is_some() {
                     SESSION_TOKEN_UNSENDABLE
@@ -362,7 +369,7 @@ impl SigV4Binding {
                 FieldValue::Sealed(
                     Parts::new()
                         .public(authorization.as_bytes())
-                        .sealed(signed.signature),
+                        .sealed(signed.signature.field()),
                 ),
             ),
             (X_AMZ_DATE.to_string(), FieldValue::Public(amzdate)),

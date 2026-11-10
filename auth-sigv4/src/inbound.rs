@@ -6,7 +6,7 @@
 //! the dummy-secret timing equivalence for an unknown AccessKeyId.
 //!
 //! The pieces: the `Authorization` parse, the `x-amz-date` window, and the canonical signing the
-//! check recomputes ([`Cred::aws4_verify`], which trims and collapses ASCII space runs in every signed
+//! check recomputes ([`recipe::verify`], which trims and collapses ASCII space runs in every signed
 //! value, quoted or not, as the outbound signer does); the structural gate before the body is
 //! checked; and the credential check (the signed-header prefilter, `UNSIGNED-PAYLOAD` refused, the
 //! body hash against the signed `x-amz-content-sha256` in constant time, the dummy-secret rule).
@@ -29,7 +29,7 @@
 
 use zeroize::Zeroizing;
 
-use busbar_contract::abi::sdk::chip::aws4::Aws4Request;
+use crate::recipe::{self, Aws4Request};
 use busbar_contract::abi::sdk::cred::Cred;
 use busbar_contract::constant_time_eq;
 
@@ -303,7 +303,7 @@ pub struct InboundRequest<'a, H = String> {
 ///   3. requires `SignedHeaders` to be lowercase ASCII and strictly ascending (so it is exactly the list
 ///      the recomputation signs over) and selects EXACTLY the headers it names from the request
 ///      (rejecting if any is absent, or if `host` is not among them — `host` MUST be signed), and
-///   4. recomputes the signature via [`Cred::aws4_verify`] (NO duplicate canonicalization), which
+///   4. recomputes the signature via [`recipe::verify`] (NO duplicate canonicalization), which
 ///      compares it to the client's in constant time.
 ///
 /// Returns `Ok(())` only when every check passes. The caller MUST invoke this even for an UNKNOWN
@@ -381,7 +381,7 @@ pub fn verify_inbound_sigv4<H: AsRef<str>>(
         datestamp: &parsed.datestamp,
     };
 
-    if credential.aws4_verify(&request, &parsed.signature) {
+    if recipe::verify(&credential, &request, &parsed.signature) {
         Ok(())
     } else {
         Err(VerifyError::SignatureMismatch)
